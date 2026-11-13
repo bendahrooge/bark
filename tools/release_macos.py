@@ -236,6 +236,7 @@ def main():
     app = output / 'Bark.app'
     stage(args.source, app, info)
     run('ditto', sparkle / 'Sparkle.framework', app / 'Contents/Frameworks/Sparkle.framework')
+    run('ditto', sparkle / 'LICENSE', app / 'Contents/Resources/Sparkle-LICENSE.txt')
     sign(app, identity, args.chromium_src, config['team_id'])
     notarize(app, profile, output)
     archive = downloads / f'Bark-{args.version}-mac-arm64.zip'
