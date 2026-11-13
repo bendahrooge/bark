@@ -1,0 +1,163 @@
+# Keep Swift compilation in Bark's overlay: upstream's macOS GN toolchain
+# intentionally does not define a Swift tool. No compiler/toolchain fork.
+source_set("space_tab_data") {
+  sources = [ "space_tab_data.h" ]
+  public_deps = [ "//base", "//content/public/browser" ]
+}
+
+source_set("space_catalog") {
+  sources = [ "space_catalog.cc", "space_catalog.h" ]
+  deps = [ "//base", "//components/prefs" ]
+}
+
+action("spaces_resources") {
+  script = "spaces_ui/embed_resources.py"
+  sources = [
+    "spaces_ui/spaces.css",
+    "spaces_ui/spaces.html",
+    "spaces_ui/spaces.js",
+  ]
+  outputs = [ "$target_gen_dir/spaces_ui/spaces_resources.h" ]
+  args = [
+    "--output", rebase_path(outputs[0], root_build_dir),
+    "kSpacesHtml=" + rebase_path("spaces_ui/spaces.html", root_build_dir),
+    "kSpacesCss=" + rebase_path("spaces_ui/spaces.css", root_build_dir),
+    "kSpacesJs=" + rebase_path("spaces_ui/spaces.js", root_build_dir),
+  ]
+}
+
+# chrome://spaces, registered in chrome/browser/ui/webui/chrome_web_ui_configs.cc.
+source_set("spaces_ui") {
+  sources = [ "spaces_ui/spaces_ui.cc", "spaces_ui/spaces_ui.h" ]
+  public_deps = [ "//content/public/browser" ]
+  deps = [
+    ":space_catalog",
+    ":spaces_resources",
+    "//base",
+    "//chrome/browser:browser_process",
+    "//chrome/browser/profiles:profile",
+    "//chrome/browser/profiles:profile_manager",
+    "//chrome/browser/ui:ui_features",
+    "//chrome/browser/ui/webui:theme_source",
+    "//components/prefs",
+    "//content/public/common",
+    "//ui/webui",
+  ]
+}
+
+if (is_mac) {
+  import("//build/config/compiler/compiler.gni")
+  import("//build/config/mac/mac_sdk.gni")
+  bark_swift_bin = rebase_path(mac_bin_path, "", root_build_dir)
+
+  # Bark's dog icon replaces Chromium's in the app bundle (see chrome/BUILD.gn).
+  action("app_icon") {
+    script = "app_icon/make_icon.py"
+    sources = [ "app_icon/icon.png" ]
+    outputs = [
+      "$target_gen_dir/app_icon/app.icns",
+      "$target_gen_dir/app_icon/Assets.car",
+    ]
+    args = [
+      "--source", rebase_path("app_icon/icon.png", root_build_dir),
+      "--output", rebase_path("$target_gen_dir/app_icon", root_build_dir),
+      "--minimum-macos", mac_deployment_target,
+    ]
+  }
+
+  action("swift_sidebar") {
+    script = "compile_swift.py"
+    sources = [
+      "mac/ChromiumSidebar.swift",
+      "mac/SidebarBackground.swift",
+      "mac/SpaceEditor.swift",
+      "core/ArcImport.swift",
+      "core/BrowserState.swift",
+      "core/Navigation.swift",
+      "core/SidebarItems.swift",
+      "core/SpaceTheme.swift",
+      "core/StateFile.swift",
+    ]
+    outputs = [
+      "$target_gen_dir/libBarkCore.a",
+      "$target_gen_dir/libBarkSidebar.a",
+      "$target_gen_dir/BarkCore.swiftmodule",
+    ]
+    args = [
+      "--source", rebase_path(".", root_build_dir),
+      "--output", rebase_path(target_gen_dir, root_build_dir),
+      "--sdk", rebase_path(mac_sdk_path, root_build_dir),
+      "--swiftc", "$bark_swift_bin/swiftc",
+      "--target", "$current_cpu-apple-macosx$mac_deployment_target",
+    ]
+  }
+
+  config("swift_link") {
+    libs = [
+      "$target_gen_dir/libBarkSidebar.a",
+      "$target_gen_dir/libBarkCore.a",
+    ]
+    lib_dirs = [
+      "$mac_sdk_path/usr/lib/swift",
+      "$bark_swift_bin/../lib/swift/macosx",
+    ]
+    ldflags = [ "-Wl,-rpath,/usr/lib/swift" ]
+    if (use_lld && xcode_version_int >= 2640) {
+      # This SDK module contains only headers, but Swift emits an autolink
+      # request for it. Match Chromium's workaround in build/config/ios.
+      ldflags += [ "-Wl,--ignore-auto-link-option,CoreAudioTypes" ]
+    }
+    frameworks = [ "AppKit.framework", "Foundation.framework", "SwiftUI.framework", "Combine.framework" ]
+  }
+
+  # Link with Chromium's actual linker before the expensive browser build.
+  executable("swift_link_check") {
+    output_name = "bark_swift_link_check"
+    sources = [ "link_check.mm" ]
+    deps = [ ":swift_sidebar" ]
+    configs += [ ":swift_link" ]
+  }
+
+  source_set("sidebar") {
+    sources = [ "mac/sidebar_mac.h", "mac/sidebar_mac.mm", "mac/space_test_driver.h", "mac/space_test_driver.cc", "mac/updater_mac.h", "mac/updater_mac.mm" ]
+    deps = [
+      ":swift_sidebar",
+      ":space_catalog",
+      ":space_tab_data",
+      "//base",
+      "//chrome/browser:browser_process",
+      "//chrome/browser/autocomplete",
+      "//chrome/browser/profiles:profile",
+      "//chrome/browser/profiles:profile_manager",
+      "//chrome/browser/sessions",
+      "//chrome/browser/themes",
+      "//chrome/browser/ui:browser_commands",
+      "//chrome/browser/ui/browser_window",
+      "//chrome/browser/ui:bubble_anchor_util",
+      "//chrome/browser/ui/extensions",
+      "//chrome/browser/ui/page_info",
+      "//chrome/browser/ui:recently_audible_helper",
+      "//chrome/browser/ui/navigator",
+      "//chrome/browser/ui/tabs:tab_strip",
+      "//chrome/browser/ui/tabs:tab_strip_model_observer",
+      "//chrome/browser/ui/views/frame:browser_view_header",
+      "//chrome/browser/ui/views/frame:browser_frame_view",
+      "//components/download/content/public",
+      "//components/download/public/common:public",
+      "//components/favicon/content",
+      "//components/omnibox/browser",
+      "//components/prefs",
+      "//components/sessions",
+      "//components/url_formatter",
+      "//content/public/browser",
+      "//net",
+      "//third_party/metrics_proto",
+      "//ui/base",
+      "//ui/gfx",
+      "//ui/views",
+      "//url",
+    ]
+    # The main framework applies swift_link directly. Propagating it through
+    # all_dependent_configs would also link Swift into sandbox helper loaders.
+  }
+}

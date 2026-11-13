@@ -1,0 +1,158 @@
+html {
+  background: var(--md-background-color);
+}
+
+html[webui-refresh-2026] {
+  background: var(--color-webui-page-background, var(--md-background-color));
+}
+
+body {
+  color: var(--cr-primary-text-color);
+  margin: 0;
+}
+
+header {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  height: 56px;
+  padding: 0 16px;
+}
+
+h1 {
+  font-size: 1.375rem;
+  font-weight: 400;
+  margin: 0;
+}
+
+main {
+  margin: 0 auto;
+  max-width: 680px;
+  padding: 8px 16px 48px;
+}
+
+h2 {
+  font-size: 108%;
+  font-weight: 500;
+  margin: 24px 0 4px;
+}
+
+.hint {
+  color: var(--cr-secondary-text-color);
+  margin: 0 0 12px;
+}
+
+.card {
+  background: var(--cr-card-background-color);
+  border-radius: var(--cr-card-border-radius, 8px);
+  box-shadow: var(--cr-card-shadow);
+  margin-bottom: 12px;
+}
+
+.row {
+  align-items: center;
+  border-top: var(--cr-separator-line);
+  display: flex;
+  gap: 12px;
+  min-height: var(--cr-section-min-height);
+  padding: 8px var(--cr-section-padding);
+}
+
+.row:first-child {
+  border-top: none;
+}
+
+.space {
+  align-items: stretch;
+  flex-direction: column;
+  gap: 8px;
+  padding-block: 12px;
+}
+
+.space-main {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+}
+
+.emoji {
+  --cr-input-padding-start: 0;
+  --cr-input-padding-end: 0;
+  text-align: center;
+  width: 44px;
+}
+
+.emoji::part(input) {
+  font-size: 18px;
+  text-align: center;
+}
+
+.name {
+  flex: 1;
+}
+
+select {
+  background: var(--cr-input-background-color, transparent);
+  border: 1px solid var(--cr-separator-color, rgba(0, 0, 0, 0.14));
+  border-radius: 8px;
+  color: inherit;
+  font: inherit;
+  height: 32px;
+  max-width: 180px;
+  padding: 0 8px;
+}
+
+.colors {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-inline-start: 56px;
+}
+
+.swatch {
+  border: 2px solid transparent;
+  border-radius: 50%;
+  cursor: pointer;
+  height: 22px;
+  outline: none;
+  padding: 0;
+  width: 22px;
+}
+
+.swatch:focus-visible {
+  box-shadow: 0 0 0 2px var(--cr-focus-outline-color);
+}
+
+.swatch[aria-checked='true'] {
+  border-color: var(--cr-primary-text-color);
+}
+
+.actions {
+  display: flex;
+}
+
+.profile .name {
+  flex: 1;
+}
+
+.profile .count {
+  color: var(--cr-secondary-text-color);
+  white-space: nowrap;
+}
+
+.add-profile {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  margin: 0;
+  padding: 12px var(--cr-section-padding);
+}
+
+.add-profile cr-input {
+  flex: 1;
+}
+
+.empty {
+  color: var(--cr-secondary-text-color);
+  padding: 16px var(--cr-section-padding);
+}

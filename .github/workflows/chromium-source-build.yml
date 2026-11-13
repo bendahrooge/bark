@@ -1,0 +1,53 @@
+name: Chromium foundation build
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        type: choice
+        required: true
+        default: linux-x64
+        options: [linux-x64, mac-arm64]
+      native_ui_checks:
+        type: boolean
+        default: false
+        description: Run extension action/pop-up checks in a logged-in macOS desktop session
+
+permissions:
+  contents: read
+
+jobs:
+  source-build:
+    # Persistent build machines must never execute untrusted pull requests.
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ${{ inputs.target == 'mac-arm64' && fromJSON('["self-hosted", "macOS", "ARM64", "bark-chromium"]') || fromJSON('["self-hosted", "Linux", "X64", "bark-chromium"]') }}
+    timeout-minutes: 720
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Check build capacity
+        run: python3 tools/chromium.py doctor --work-dir "$RUNNER_TEMP/bark-chromium-${{ github.run_id }}"
+      - name: Sync exact Chromium source and dependencies
+        run: python3 tools/chromium.py sync --work-dir "$RUNNER_TEMP/bark-chromium-${{ github.run_id }}"
+      - name: Build development foundation
+        run: python3 tools/chromium.py build --work-dir "$RUNNER_TEMP/bark-chromium-${{ github.run_id }}" --target "${{ inputs.target }}"
+      - name: Validate Swift command and lifecycle boundary
+        if: inputs.target == 'mac-arm64'
+        run: python3 tools/test_chromium_swift.py
+      - name: Validate native Chromium extensions
+        shell: bash
+        run: |
+          source_root="$RUNNER_TEMP/bark-chromium-${{ github.run_id }}/src"
+          flags=()
+          if [[ '${{ inputs.target }}' == 'mac-arm64' ]]; then
+            node_binary="$source_root/third_party/node/mac_arm64/node-darwin-arm64/bin/node"
+            browser_binary="$source_root/out/Bark-mac-arm64/Bark.app/Contents/MacOS/Bark"
+            if [[ '${{ inputs.native_ui_checks }}' == 'true' ]]; then
+              flags+=(--headed --swift-ui)
+            fi
+          else
+            node_binary="$source_root/third_party/node/linux/node-linux-x64/bin/node"
+            browser_binary="$source_root/out/Bark-linux-x64/chrome"
+          fi
+          "$node_binary" tools/test_chromium_browser.mjs "$browser_binary" "${flags[@]}"

@@ -1,0 +1,110 @@
+diff --git a/chrome/browser/profiles/profiles_state.cc b/chrome/browser/profiles/profiles_state.cc
+index d1fcd93ded..e63832c66a 100644
+--- a/chrome/browser/profiles/profiles_state.cc
++++ b/chrome/browser/profiles/profiles_state.cc
+@@ -83,11 +83,15 @@ void RegisterPrefs(PrefRegistrySimple* registry) {
+   registry->RegisterBooleanPref(prefs::kBrowserGuestModeEnforced, false);
+   registry->RegisterBooleanPref(prefs::kBrowserAddPersonEnabled, true);
+   registry->RegisterBooleanPref(prefs::kForceBrowserSignin, false);
++  // Bark manages all profiles/spaces through its native Swift sidebar, so the
++  // stock Chromium profile picker must never appear at startup. Disabling
++  // availability makes ProfilePicker::GetStartupMode() always launch straight
++  // into the last-used profile's browser window regardless of profile count.
+   registry->RegisterBooleanPref(prefs::kBrowserShowProfilePickerOnStartup,
+-                                true);
++                                false);
+   registry->RegisterIntegerPref(
+       prefs::kBrowserProfilePickerAvailabilityOnStartup,
+-      static_cast<int>(ProfilePicker::AvailabilityOnStartup::kEnabled));
++      static_cast<int>(ProfilePicker::AvailabilityOnStartup::kDisabled));
+   registry->RegisterBooleanPref(prefs::kBrowserProfilePickerShown, false);
+ #if !BUILDFLAG(IS_ANDROID) && !BUILDFLAG(IS_CHROMEOS)
+   registry->RegisterBooleanPref(
+diff --git a/chrome/browser/ui/startup/first_run_service.cc b/chrome/browser/ui/startup/first_run_service.cc
+index 7e1709c674..2baf9f0f7f 100644
+--- a/chrome/browser/ui/startup/first_run_service.cc
++++ b/chrome/browser/ui/startup/first_run_service.cc
+@@ -32,7 +32,7 @@
+ #include "content/public/browser/browser_context.h"
+ 
+ namespace {
+-bool IsFirstRunEligibleProfile(Profile* profile) {
++[[maybe_unused]] bool IsFirstRunEligibleProfile(Profile* profile) {
+   if (profile->IsOffTheRecord()) {
+     return false;
+   }
+@@ -46,7 +46,7 @@ bool IsFirstRunEligibleProfile(Profile* profile) {
+   return true;
+ }
+ 
+-bool IsFirstRunEligibleProcess() {
++[[maybe_unused]] bool IsFirstRunEligibleProcess() {
+   if (!first_run::IsChromeFirstRun()) {
+     return false;
+   }
+@@ -295,6 +295,8 @@ FirstRunServiceFactory::BuildServiceInstanceForBrowserContext(
+ // Helpers ---------------------------------------------------------------------
+ 
+ bool ShouldOpenFirstRun(Profile* profile) {
+-  return IsFirstRunEligibleProcess() && IsFirstRunEligibleProfile(profile) &&
+-         !IsFirstRunMarkedFinishedInPrefs();
++  // Bark manages identity, profiles and spaces entirely through its native
++  // Swift sidebar, so the stock "Who's using Chromium?" first-run experience
++  // must never open. Launch straight into the browser instead.
++  return false;
+ }
+diff --git a/chrome/browser/ui/startup/infobar_utils.cc b/chrome/browser/ui/startup/infobar_utils.cc
+index 598e361a29..7dbc748fd2 100644
+--- a/chrome/browser/ui/startup/infobar_utils.cc
++++ b/chrome/browser/ui/startup/infobar_utils.cc
+@@ -253,19 +253,9 @@ void AddInfoBarsIfNecessary(BrowserWindowInterface* browser,
+   infobars::ContentInfoBarManager* infobar_manager =
+       infobars::ContentInfoBarManager::FromWebContents(web_contents);
+ 
+-  if (!google_apis::HasAPIKeyConfigured()) {
+-    if (infobars::IsInfoBarMigrated(
+-            infobars::InfoBarDelegate::GOOGLE_API_KEYS_INFOBAR_DELEGATE)) {
+-      if (auto* manager =
+-              infobars::BrowserInfoBarManager::From(g_browser_process)) {
+-        manager->Show(
+-            tabs::TabInterface::GetFromContents(web_contents),
+-            infobars::InfoBarDelegate::GOOGLE_API_KEYS_INFOBAR_DELEGATE);
+-      }
+-    } else {
+-      GoogleApiKeysInfoBarDelegate::Create(infobar_manager);
+-    }
+-  }
++  // Bark: no "Google API keys are missing" infobar. Bark ships without Google
++  // API keys on purpose; the services they unlock (sync, Google sign-in) are
++  // not part of Bark.
+ 
+   if (ObsoleteSystem::IsObsoleteNowOrSoon()) {
+     PrefService* local_state = g_browser_process->local_state();
+diff --git a/testing/variations/fieldtrial_testing_config.json b/testing/variations/fieldtrial_testing_config.json
+index 0f26dd2cb5..9dda23a2ad 100644
+--- a/testing/variations/fieldtrial_testing_config.json
++++ b/testing/variations/fieldtrial_testing_config.json
+@@ -12084,23 +12084,6 @@
+             ]
+         }
+     ],
+-    "OmniboxEverywhere": [
+-        {
+-            "platforms": [
+-                "mac",
+-                "windows"
+-            ],
+-            "experiments": [
+-                {
+-                    "name": "Enabled",
+-                    "enable_features": [
+-                        "IPH_OmniboxEverywhereLensPromo",
+-                        "OmniboxEverywhere"
+-                    ]
+-                }
+-            ]
+-        }
+-    ],
+     "OmniboxFuseboxAsyncInflation": [
+         {
+             "platforms": [

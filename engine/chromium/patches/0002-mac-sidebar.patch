@@ -1,0 +1,359 @@
+diff --git a/chrome/BUILD.gn b/chrome/BUILD.gn
+index f1d133b6cd..6f0ad588a4 100644
+--- a/chrome/BUILD.gn
++++ b/chrome/BUILD.gn
+@@ -672,14 +672,17 @@ if (is_win) {
+     }
+   }
+ 
++  # Bark: the dog icon, generated from apps/macos/resources/icon.png.
+   bundle_data("chrome_app_icon") {
+-    sources = [ "app/theme/$branding_path_component/mac/app.icns" ]
++    sources = [ "$root_gen_dir/bark/app_icon/app.icns" ]
+     outputs = [ "{{bundle_resources_dir}}/{{source_file_part}}" ]
++    public_deps = [ "//bark:app_icon" ]
+   }
+ 
+   bundle_data("chrome_asset_catalog") {
+-    sources = [ "app/theme/$branding_path_component/mac/Assets.car" ]
++    sources = [ "$root_gen_dir/bark/app_icon/Assets.car" ]
+     outputs = [ "{{bundle_resources_dir}}/{{source_file_part}}" ]
++    public_deps = [ "//bark:app_icon" ]
+   }
+ 
+   bundle_data("chrome_resources") {
+@@ -1367,6 +1370,9 @@ if (is_win) {
+   mac_framework_bundle("chrome_framework") {
+     output_name = chrome_framework_name
+ 
++    # Keep Swift runtime dependencies in the browser framework only.
++    configs += [ "//bark:swift_link" ]
++
+     framework_version = chrome_framework_version
+     framework_contents = [
+       "Helpers",
+diff --git a/chrome/browser/ui/views/bubble_anchor_util_views.cc b/chrome/browser/ui/views/bubble_anchor_util_views.cc
+index c9a9e72e45..83ac9d16ef 100644
+--- a/chrome/browser/ui/views/bubble_anchor_util_views.cc
++++ b/chrome/browser/ui/views/bubble_anchor_util_views.cc
+@@ -37,6 +37,14 @@ AnchorConfiguration GetPageInfoAnchorConfiguration(
+     BrowserWindowInterface* browser,
+     Anchor anchor) {
+   BrowserView* browser_view = BrowserView::GetBrowserViewForBrowser(browser);
++#if BUILDFLAG(IS_MAC)
++  if (browser_view) {
++    if (auto* sidebar_anchor = browser_view->GetBarkToolbarAnchor(false)) {
++      return {views::BubbleAnchor(sidebar_anchor), std::nullopt,
++              views::BubbleBorder::TOP_LEFT};
++    }
++  }
++#endif
+   auto* location_bar_view =
+       browser_view ? browser_view->GetLocationBarView() : nullptr;
+ 
+@@ -130,6 +138,11 @@ AnchorConfiguration GetPermissionPromptBubbleAnchorConfiguration(
+       tab ? tab->GetBrowserWindowInterface()
+           : webui::GetBrowserWindowInterface(web_contents);
+   if (browser) {
++#if BUILDFLAG(IS_MAC)
++    auto* browser_view = BrowserView::GetBrowserViewForBrowser(browser);
++    if (browser_view && browser_view->GetBarkToolbarAnchor(false))
++      return GetPageInfoAnchorConfiguration(browser);
++#endif
+     LocationBar* location_bar =
+         location_bar::GetLocationBarForWebContents(web_contents);
+     ChipController* chip_controller =
+diff --git a/chrome/browser/ui/views/extensions/extensions_toolbar_button.cc b/chrome/browser/ui/views/extensions/extensions_toolbar_button.cc
+index a36455069d..0e60179f9f 100644
+--- a/chrome/browser/ui/views/extensions/extensions_toolbar_button.cc
++++ b/chrome/browser/ui/views/extensions/extensions_toolbar_button.cc
+@@ -167,7 +167,7 @@ void ExtensionsToolbarButton::ToggleExtensionsMenu() {
+       base::RecordAction(base::UserMetricsAction(
+           "Extensions.Toolbar.MenuOpenedWhenExtensionsAreRequestingAccess"));
+     }
+-    extensions_menu_coordinator_->Show(views::BubbleAnchor(this),
++    extensions_menu_coordinator_->Show(extensions_toolbar_->GetExtensionsButtonAnchor(),
+                                        extensions_toolbar_);
+     menu = extensions_menu_coordinator_->GetExtensionsMenuWidget();
+   } else {
+@@ -175,9 +175,16 @@ void ExtensionsToolbarButton::ToggleExtensionsMenu() {
+     // extensions_features::kExtensionsMenuAccessControl menu, therefore we can
+     // use Browser for the other menu until the feature is rolled out.
+     menu = ExtensionsMenuView::ShowBubble(
+-        views::BubbleAnchor(this), browser_,
++        extensions_toolbar_->GetExtensionsButtonAnchor(), browser_,
+         extensions_toolbar_->GetToolbarViewModel(), extensions_toolbar_);
+   }
++  if (!menu) {
++    // The menu closes itself during construction when it has no entries.
++    // Undo the opening state instead of observing a widget that never existed.
++    pressed_lock_.reset();
++    extensions_toolbar_->OnMenuClosed();
++    return;
++  }
+   extensions_menu_widget_ = menu->GetWeakPtr();
+   extension_menu_observation_.Observe(menu);
+ }
+diff --git a/chrome/browser/ui/views/extensions/extensions_toolbar_desktop.cc b/chrome/browser/ui/views/extensions/extensions_toolbar_desktop.cc
+index 151f05a06e..dd1366ff13 100644
+--- a/chrome/browser/ui/views/extensions/extensions_toolbar_desktop.cc
++++ b/chrome/browser/ui/views/extensions/extensions_toolbar_desktop.cc
+@@ -582,6 +582,15 @@ void ExtensionsToolbarDesktop::AnchorAndShowWidgetImmediately(
+   // * AnchorAndShowWidgetImmediately runs.
+   // Revisit how to handle that, likely the Widget should Close on removal which
+   // would remove the AnchoredWidget entry.
++#if BUILDFLAG(IS_MAC)
++  if (auto* browser_view = BrowserView::GetBrowserViewForBrowser(browser_)) {
++    if (auto* anchor = browser_view->GetBarkToolbarAnchor(true)) {
++      widget->widget_delegate()->AsBubbleDialogDelegate()->SetAnchorView(anchor);
++      widget->Show();
++      return;
++    }
++  }
++#endif
+   views::View* const anchor_view = GetViewForId(iter->extension_id);
+   widget->widget_delegate()->AsBubbleDialogDelegate()->SetAnchorView(
+       anchor_view && anchor_view->GetVisible() ? anchor_view
+@@ -1257,12 +1266,24 @@ views::FocusManager* ExtensionsToolbarDesktop::GetFocusManagerForAccelerator() {
+ 
+ views::BubbleAnchor ExtensionsToolbarDesktop::GetReferenceButtonForPopup(
+     const extensions::ExtensionId& action_id) {
++#if BUILDFLAG(IS_MAC)
++  if (auto* browser_view = BrowserView::GetBrowserViewForBrowser(browser_)) {
++    if (auto* anchor = browser_view->GetBarkToolbarAnchor(true))
++      return views::BubbleAnchor(anchor);
++  }
++#endif
+   ToolbarActionView* view = GetViewForId(action_id);
+   return view ? view->GetReferenceButtonForPopup()
+               : GetExtensionsButtonAnchor();
+ }
+ 
+ views::BubbleAnchor ExtensionsToolbarDesktop::GetExtensionsButtonAnchor() {
++#if BUILDFLAG(IS_MAC)
++  if (auto* browser_view = BrowserView::GetBrowserViewForBrowser(browser_)) {
++    if (auto* anchor = browser_view->GetBarkToolbarAnchor(true))
++      return views::BubbleAnchor(anchor);
++  }
++#endif
+   return views::BubbleAnchor(GetExtensionsButton());
+ }
+ 
+diff --git a/chrome/browser/ui/views/frame/BUILD.gn b/chrome/browser/ui/views/frame/BUILD.gn
+index 07ff3566c1..c4ab76aa56 100644
+--- a/chrome/browser/ui/views/frame/BUILD.gn
++++ b/chrome/browser/ui/views/frame/BUILD.gn
+@@ -1019,6 +1019,7 @@ source_set("browser_view") {
+     ]
+   }
+   if (is_mac) {
++    deps += [ "//bark:sidebar" ]
+     deps += [
+       ":immersive_mode_overlay_views_mac",
+       "//chrome/browser:global_keyboard_shortcuts_mac",
+diff --git a/chrome/browser/ui/views/frame/browser_view.cc b/chrome/browser/ui/views/frame/browser_view.cc
+index d441b8a76b..81489b1980 100644
+--- a/chrome/browser/ui/views/frame/browser_view.cc
++++ b/chrome/browser/ui/views/frame/browser_view.cc
+@@ -4,6 +4,10 @@
+ 
+ #include "chrome/browser/ui/views/frame/browser_view.h"
+ 
++#if BUILDFLAG(IS_MAC)
++#include "bark/mac/sidebar_mac.h"
++#endif
++
+ #include <stdint.h>
+ 
+ #include <algorithm>
+@@ -1108,6 +1112,9 @@ BrowserView::BrowserView(BrowserWindowInterface* browser)
+ }
+ 
+ BrowserView::~BrowserView() {
++#if BUILDFLAG(IS_MAC)
++  bark_sidebar_.reset();
++#endif
+   // Remove the layout manager to avoid dangling. This needs to be earlier than
+   // other cleanups that destroy views referenced in the layout manager.
+   SetLayoutManager(nullptr);
+@@ -1425,6 +1432,9 @@ bool BrowserView::ShouldDrawTabStrokes() const {
+ }
+ 
+ bool BrowserView::ShouldDrawTabStrip() const {
++#if BUILDFLAG(IS_MAC)
++  if (bark_sidebar_ && !IsFullscreen()) return false;
++#endif
+   // Return false if this window does not normally display a tabstrip or if the
+   // tabstrip is currently hidden, e.g. because we're in fullscreen.
+   if (!WindowFeatureController::From(browser_)->SupportsWindowFeature(
+@@ -2347,6 +2357,12 @@ PinnedToolbarActions* BrowserView::GetPinnedToolbarActions() {
+ }
+ 
+ void BrowserView::SetFocusToLocationBar(bool is_user_initiated) {
++#if BUILDFLAG(IS_MAC)
++  if (bark_sidebar_ && !IsFullscreen()) {
++    bark_sidebar_->FocusAddress();
++    return;
++  }
++#endif
+   // On Windows, changing focus to the location bar causes the browser window to
+   // become active. This can steal focus if the user has another window open
+   // already. On Chrome OS, changing focus makes a view believe it has a focus
+@@ -3062,6 +3078,8 @@ void BrowserView::DisableTabStripEditingForTesting() {
+ 
+ bool BrowserView::IsToolbarVisible() const {
+ #if BUILDFLAG(IS_MAC)
++  if (bark_sidebar_ && !IsFullscreen())
++    return false;
+   // Immersive full screen makes it possible to display the toolbar when
+   // kShowFullscreenToolbar is not set.
+   if (!WindowFeatureController::From(browser())
+@@ -3088,6 +3106,10 @@ bool BrowserView::IsToolbarShowing() const {
+ }
+ 
+ bool BrowserView::IsLocationBarVisible() const {
++#if BUILDFLAG(IS_MAC)
++  if (bark_sidebar_ && !IsFullscreen())
++    return true;  // Cmd+L targets the sidebar address field.
++#endif
+   return WindowFeatureController::From(browser_)->SupportsWindowFeature(
+              WindowFeatureController::WindowFeature::kFeatureLocationBar) &&
+          GetLocationBar()->IsVisible();
+@@ -4824,7 +4846,14 @@ int BrowserView::NonClientHitTest(const gfx::Point& point) {
+ 
+ gfx::Size BrowserView::GetMinimumSize() const {
+   auto* const layout = GetBrowserViewLayout();
+-  return layout ? layout->GetMinimumSize(this) : gfx::Size();
++  gfx::Size minimum = layout ? layout->GetMinimumSize(this) : gfx::Size();
++#if BUILDFLAG(IS_MAC)
++  if (bark_sidebar_) {
++    minimum.set_width(std::max(
++        minimum.width(), BrowserViewLayout::kMainBrowserContentsMinimumWidth + 200));
++  }
++#endif
++  return minimum;
+ }
+ 
+ ///////////////////////////////////////////////////////////////////////////////
+@@ -4883,6 +4912,9 @@ void BrowserView::Layout(PassKey) {
+   }
+ 
+   LayoutSuperclass<views::View>(this);
++#if BUILDFLAG(IS_MAC)
++  if (bark_sidebar_) bark_sidebar_->Layout();
++#endif
+ 
+   // TODO(jamescook): Why was this in the middle of layout code?
+   toolbar_->location_bar()->UpdateFocusBehavior(IsToolbarVisible());
+@@ -5172,8 +5204,23 @@ void BrowserView::AddedToWidget() {
+       kFallbackPopupAnchorElementId, *this);
+ 
+   initialized_ = true;
++#if BUILDFLAG(IS_MAC)
++  if (bark::SidebarMac::IsEnabled(browser()))
++    bark_sidebar_ = std::make_unique<bark::SidebarMac>(this);
++#endif
+ }
+ 
++#if BUILDFLAG(IS_MAC)
++int BrowserView::GetBarkSidebarWidth() const {
++  return bark_sidebar_ ? bark_sidebar_->width() : 0;
++}
++
++views::View* BrowserView::GetBarkToolbarAnchor(bool extensions) const {
++  return bark_sidebar_ && !IsFullscreen()
++             ? bark_sidebar_->bubble_anchor(extensions) : nullptr;
++}
++#endif
++
+ void BrowserView::RemovedFromWidget() {
+   CHECK(GetFocusManager());
+ #if BUILDFLAG(IS_WIN)
+diff --git a/chrome/browser/ui/views/frame/browser_view.h b/chrome/browser/ui/views/frame/browser_view.h
+index e7bfac16bd..5a450cae3e 100644
+--- a/chrome/browser/ui/views/frame/browser_view.h
++++ b/chrome/browser/ui/views/frame/browser_view.h
+@@ -77,6 +77,8 @@ class AccessibilityFocusHighlight;
+ class BookmarkBarController;
+ class BookmarkBarView;
+ class BrowserWindowInterface;
++namespace bark { class SidebarMac; }
++
+ class BrowserViewLayout;
+ class ContentsContainerView;
+ class ContentsWebView;
+@@ -822,11 +824,21 @@ class BrowserView : public BrowserWindow,
+   bool IsLockedFullscreen() const;
+ #endif
+ 
++#if BUILDFLAG(IS_MAC)
++  int GetBarkSidebarWidth() const;
++  // Native popup anchor for controls hosted in Bark's Swift sidebar.
++  // Null for windows using Chromium's standard toolbar.
++  views::View* GetBarkToolbarAnchor(bool extensions) const;
++#endif
++
+  protected:
+   // BrowserWindow:
+   void DeleteBrowserWindow() final;
+ 
+  private:
++#if BUILDFLAG(IS_MAC)
++  std::unique_ptr<bark::SidebarMac> bark_sidebar_;
++#endif
+   // Do not friend BrowserViewLayout. Use the BrowserViewLayoutDelegate
+   // interface to keep these two classes decoupled and testable.
+   friend class BrowserViewLayoutDelegateImpl;
+diff --git a/chrome/browser/ui/views/frame/layout/browser_view_layout_delegate_impl.cc b/chrome/browser/ui/views/frame/layout/browser_view_layout_delegate_impl.cc
+index 162cb04878..08dff219a3 100644
+--- a/chrome/browser/ui/views/frame/layout/browser_view_layout_delegate_impl.cc
++++ b/chrome/browser/ui/views/frame/layout/browser_view_layout_delegate_impl.cc
+@@ -114,8 +114,20 @@ BrowserLayoutParams BrowserViewLayoutDelegateImpl::GetBrowserLayoutParams(
+       use_browser_bounds = false;
+     }
+ #endif
+-    return params.InLocalCoordinates(
++    auto local = params.InLocalCoordinates(
+         use_browser_bounds ? browser_bounds : params.visual_client_area);
++#if BUILDFLAG(IS_MAC)
++    if (browser_view_->bark_sidebar_ && !browser_view_->IsFullscreen()) {
++      // Leave room beside the traffic lights for Bark's sidebar toggle even
++      // when the sidebar is collapsed and the native toolbar spans the window.
++      local.leading_exclusion.content.set_width(
++          std::max(120.f, local.leading_exclusion.content.width()));
++      local.leading_exclusion.content.set_height(
++          std::max(38.f, local.leading_exclusion.content.height()));
++    }
++    local.InsetHorizontal(browser_view_->GetBarkSidebarWidth(), /*leading=*/true);
++#endif
++    return local;
+   }
+ 
+   return BrowserLayoutParams();
+diff --git a/chrome/browser/ui/views/session_crashed_bubble_view.cc b/chrome/browser/ui/views/session_crashed_bubble_view.cc
+index 3a0abc0d12..906e6ca3ca 100644
+--- a/chrome/browser/ui/views/session_crashed_bubble_view.cc
++++ b/chrome/browser/ui/views/session_crashed_bubble_view.cc
+@@ -285,9 +285,19 @@ views::BubbleDialogDelegate* SessionCrashedBubbleView::ShowBubble(
+     return nullptr;
+   }
+ 
+-  auto* control = browser_view->toolbar_button_provider()->GetAppMenuControl();
+-  views::BubbleAnchor anchor =
+-      control ? control->GetAnchor() : views::BubbleAnchor();
++  views::BubbleAnchor anchor;
++#if BUILDFLAG(IS_MAC)
++  // When Bark's Swift sidebar owns the window chrome, the native toolbar and
++  // its app-menu button are not drawn, so AppMenuButton::GetAnchor() would
++  // CHECK on the missing fallback anchor. Anchor to the sidebar instead.
++  if (auto* sidebar_anchor = browser_view->GetBarkToolbarAnchor(false)) {
++    anchor = views::BubbleAnchor(sidebar_anchor);
++  }
++#endif
++  if (!anchor) {
++    auto* control = browser_view->toolbar_button_provider()->GetAppMenuControl();
++    anchor = control ? control->GetAnchor() : views::BubbleAnchor();
++  }
+ 
+   auto bubble_delegate_unique =
+       std::make_unique<SessionCrashedBubbleDelegate>(browser->GetProfile());

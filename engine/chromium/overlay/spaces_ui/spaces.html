@@ -1,0 +1,47 @@
+<!doctype html>
+<html dir="ltr" lang="en" $REFRESH>
+<head>
+  <meta charset="utf-8">
+  <meta name="color-scheme" content="light dark">
+  <title>Spaces &amp; profiles</title>
+  <link rel="stylesheet" href="chrome://resources/css/md_colors.css">
+  <link rel="stylesheet" href="chrome://resources/css/text_defaults_md.css">
+  <link rel="stylesheet" href="chrome://theme/colors.css?sets=ui,chrome">
+  <link rel="stylesheet" href="spaces.css">
+  <script type="module" src="spaces.js"></script>
+</head>
+<body>
+  <header>
+    <cr-icon-button id="back" iron-icon="cr:arrow-back"
+        title="Back to settings" aria-label="Back to settings"></cr-icon-button>
+    <h1>Spaces &amp; profiles</h1>
+  </header>
+  <main>
+    <section>
+      <h2>Spaces</h2>
+      <p class="hint">The sidebar shows spaces in this order. Changes apply to
+        every window right away.</p>
+      <div class="card" id="spaces"></div>
+    </section>
+    <section>
+      <h2>Profiles</h2>
+      <p class="hint">Each space opens in one profile. A profile keeps its own
+        sign-ins, cookies, history, and extensions.</p>
+      <div class="card" id="profiles"></div>
+      <div class="card add-profile">
+        <cr-input id="newProfile" placeholder="New profile name" maxlength="128"
+            aria-label="New profile name"></cr-input>
+        <cr-button id="addProfile" class="action-button" disabled>Add profile</cr-button>
+      </div>
+    </section>
+  </main>
+  <cr-dialog id="deleteDialog">
+    <div slot="title">Delete space?</div>
+    <div slot="body" id="deleteBody"></div>
+    <div slot="button-container">
+      <cr-button class="cancel-button" id="cancelDelete">Cancel</cr-button>
+      <cr-button class="action-button" id="confirmDelete">Delete</cr-button>
+    </div>
+  </cr-dialog>
+</body>
+</html>

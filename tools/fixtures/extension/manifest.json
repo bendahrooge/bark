@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "Bark Extension Test",
+  "version": "1.0",
+  "permissions": ["storage", "declarativeNetRequest", "tabs", "activeTab", "scripting"],
+  "host_permissions": ["http://127.0.0.1/*"],
+  "background": {"service_worker": "worker.js"},
+  "content_scripts": [{"matches": ["http://127.0.0.1/*"], "js": ["content.js"]}],
+  "declarative_net_request": {
+    "rule_resources": [{"id": "test", "enabled": true, "path": "rules.json"}]
+  },
+  "action": {"default_title": "Bark Extension Test", "default_popup": "popup.html"}
+}

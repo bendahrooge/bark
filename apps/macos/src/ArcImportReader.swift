@@ -1,0 +1,135 @@
+import Foundation
+import SQLite3
+import BarkCore
+
+enum ArcImportReader {
+    static var defaultRoot: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Arc", isDirectory: true)
+    }
+    struct ReadError: LocalizedError {
+        let message: String
+        var errorDescription: String? { message }
+    }
+    static func safeURL(_ root: URL, _ relative: String) throws -> URL {
+        let base = root.resolvingSymlinksInPath().standardizedFileURL
+        let result = base.appendingPathComponent(relative).resolvingSymlinksInPath().standardizedFileURL
+        guard result.path.hasPrefix(base.path + "/") else { throw ReadError(message: "An Arc data path points outside the selected folder.") }
+        return result
+    }
+    static func json(_ url: URL, limit: Int = 32 * 1024 * 1024) throws -> [String: Any] {
+        let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+        guard size <= limit else { throw ReadError(message: "An Arc data file is too large to import safely.") }
+        return try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any] ?? [:]
+    }
+    static func read(_ root: URL) throws -> ArcImportPlan {
+        let scoped = root.startAccessingSecurityScopedResource()
+        defer { if scoped { root.stopAccessingSecurityScopedResource() } }
+        let sidebar = try safeURL(root, "StorableSidebar.json")
+        let size = try sidebar.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+        guard size <= 64 * 1024 * 1024 else { throw ArcImportError.invalidSidebar }
+        var plan = try ArcImport.sidebar(Data(contentsOf: sidebar))
+        let userData = ["User Data", "UserData"].first { FileManager.default.fileExists(atPath: root.appendingPathComponent($0).path) }
+        guard let userData else {
+            plan.unavailableHistoryProfiles = Set(plan.spaces.map(\.profileDirectory))
+            plan.unavailableExtensionProfiles = plan.unavailableHistoryProfiles
+            plan.warnings.append("Arc’s browser profiles weren’t found. Spaces, tabs, and folders are available; uncheck history and extensions to import them.")
+            return plan
+        }
+        for directory in Set(plan.spaces.map(\.profileDirectory)).sorted() {
+            guard ArcImport.validProfileDirectory(directory) else { continue }
+            let profile = try safeURL(root, userData + "/" + directory)
+            guard FileManager.default.fileExists(atPath: profile.path) else {
+                plan.unavailableHistoryProfiles.insert(directory)
+                plan.unavailableExtensionProfiles.insert(directory)
+                plan.warnings.append("\(directory): the browser profile wasn’t found. History and extensions aren’t available.")
+                continue
+            }
+            do {
+                let history = try safeURL(profile, "History")
+                if FileManager.default.fileExists(atPath: history.path) {
+                    let records = try readHistory(history)
+                    plan.history[directory] = Array(records.prefix(BrowserState.historyLimit))
+                    if records.count > BrowserState.historyLimit { plan.warnings.append("\(directory): only the newest \(BrowserState.historyLimit.formatted()) history entries are available in this import.") }
+                } else { plan.warnings.append("\(directory): no history database was found.") }
+            } catch {
+                plan.unavailableHistoryProfiles.insert(directory)
+                plan.warnings.append("\(directory): history couldn’t be read. Quit Arc and scan again to retry.")
+            }
+            do { plan.extensions[directory] = try readExtensions(profile) }
+            catch { plan.unavailableExtensionProfiles.insert(directory); plan.warnings.append("\(directory): the extension list couldn’t be read.") }
+        }
+        return plan
+    }
+    static func readHistory(_ path: URL) throws -> [ArcHistoryRecord] {
+        var database: OpaquePointer?
+        guard sqlite3_open_v2(path.path, &database, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK, let db = database else {
+            if let database { sqlite3_close(database) }
+            throw ReadError(message: "Arc history is unavailable.")
+        }
+        defer { sqlite3_close(db) }
+        sqlite3_busy_timeout(db, 2_000)
+        guard sqlite3_exec(db, "PRAGMA query_only=ON; BEGIN;", nil, nil, nil) == SQLITE_OK else { throw ReadError(message: "Arc history is busy.") }
+        defer { sqlite3_exec(db, "ROLLBACK", nil, nil, nil) }
+        var statement: OpaquePointer?
+        let sql = "SELECT url, title, last_visit_time FROM urls WHERE last_visit_time > 0 ORDER BY last_visit_time DESC LIMIT \(BrowserState.historyLimit + 1)"
+        let prepared = sqlite3_prepare_v2(db, sql, -1, &statement, nil)
+        guard prepared == SQLITE_OK, let query = statement else {
+            if let statement { sqlite3_finalize(statement) }
+            throw ReadError(message: prepared == SQLITE_BUSY || prepared == SQLITE_LOCKED ? "Arc’s history is in use. Quit Arc and try again." : "Arc’s history format isn’t supported.")
+        }
+        defer { sqlite3_finalize(query) }
+        func string(_ column: Int32) -> String { sqlite3_column_text(query, column).map { String(cString: $0) } ?? "" }
+        var records: [ArcHistoryRecord] = []
+        var status = sqlite3_step(query)
+        while status == SQLITE_ROW {
+            let url = string(0), title = string(1)
+            // Chromium stores microseconds since 1601; Bark uses Unix milliseconds.
+            let timestamp = Double(sqlite3_column_int64(query, 2)) / 1_000 - 11_644_473_600_000
+            if Navigation.isWebURL(url), timestamp.isFinite, timestamp >= 0 {
+                records.append(ArcHistoryRecord(title: String((title.isEmpty ? Navigation.display(url) : title).prefix(300)), url: url, visitedAt: timestamp))
+            }
+            status = sqlite3_step(query)
+        }
+        guard status == SQLITE_DONE else { throw ReadError(message: "Arc history could not be read completely.") }
+        return records
+    }
+    static func readExtensions(_ profile: URL) throws -> [ArcExtensionRecord] {
+        var settings: [String: Any] = [:]
+        for name in ["Preferences", "Secure Preferences"] {
+            let path = try safeURL(profile, name)
+            if FileManager.default.fileExists(atPath: path.path) {
+                let data = try json(path)
+                let extensions = data["extensions"] as? [String: Any]
+                settings.merge(extensions?["settings"] as? [String: Any] ?? [:]) { _, new in new }
+            }
+        }
+        let root = try safeURL(profile, "Extensions")
+        guard FileManager.default.fileExists(atPath: root.path) else { return [] }
+        var result: [ArcExtensionRecord] = []
+        for folder in try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil).prefix(1_000) {
+            let id = folder.lastPathComponent
+            guard id.range(of: #"^[a-p]{32}$"#, options: .regularExpression) != nil else { continue }
+            let safe = try safeURL(root, id)
+            let entry = settings[id] as? [String: Any] ?? [:]
+            // Do not resurrect orphaned extension files left after uninstall.
+            guard settings[id] != nil else { continue }
+            let versions = try FileManager.default.contentsOfDirectory(at: safe, includingPropertiesForKeys: nil)
+                .sorted { $0.lastPathComponent.compare($1.lastPathComponent, options: .numeric) == .orderedDescending }
+            guard let versionFolder = versions.first else { continue }
+            let manifestURL = try safeURL(safe, versionFolder.lastPathComponent + "/manifest.json")
+            let manifest = try json(manifestURL, limit: 2 * 1024 * 1024)
+            guard manifest["theme"] == nil, let name = manifest["name"] as? String else { continue }
+            var display = name
+            if name.hasPrefix("__MSG_"), name.hasSuffix("__") {
+                let key = String(name.dropFirst(6).dropLast(2))
+                let locale = manifest["default_locale"] as? String ?? "en"
+                if locale.range(of: #"^[A-Za-z_-]{1,32}$"#, options: .regularExpression) != nil {
+                    let messagesURL = try safeURL(safe, versionFolder.lastPathComponent + "/_locales/" + locale + "/messages.json")
+                    if let messages = try? json(messagesURL, limit: 2 * 1024 * 1024), let message = messages.first(where: { $0.key.lowercased() == key.lowercased() })?.value as? [String: Any], let value = message["message"] as? String { display = value }
+                }
+            }
+            result.append(ArcExtensionRecord(id: id, name: String(display.prefix(200)), version: String((manifest["version"] as? String ?? "").prefix(64)), enabled: (entry["state"] as? Int ?? 1) == 1))
+        }
+        return result.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+}

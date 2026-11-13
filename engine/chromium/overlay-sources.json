@@ -1,0 +1,18 @@
+{
+  "mac/ChromiumSidebar.swift": "apps/macos/src/chromium/ChromiumSidebar.swift",
+  "mac/sidebar_mac.h": "apps/macos/src/chromium/sidebar_mac.h",
+  "mac/sidebar_mac.mm": "apps/macos/src/chromium/sidebar_mac.mm",
+  "mac/space_test_driver.h": "apps/macos/src/chromium/space_test_driver.h",
+  "mac/space_test_driver.cc": "apps/macos/src/chromium/space_test_driver.cc",
+  "mac/updater_mac.h": "apps/macos/src/chromium/updater_mac.h",
+  "mac/updater_mac.mm": "apps/macos/src/chromium/updater_mac.mm",
+  "mac/SidebarBackground.swift": "apps/macos/src/SidebarBackground.swift",
+  "mac/SpaceEditor.swift": "apps/macos/src/SpaceEditor.swift",
+  "core/ArcImport.swift": "packages/core/src/ArcImport.swift",
+  "core/BrowserState.swift": "packages/core/src/BrowserState.swift",
+  "core/Navigation.swift": "packages/core/src/Navigation.swift",
+  "core/SidebarItems.swift": "packages/core/src/SidebarItems.swift",
+  "core/SpaceTheme.swift": "packages/core/src/SpaceTheme.swift",
+  "core/StateFile.swift": "packages/core/src/StateFile.swift",
+  "app_icon/icon.png": "apps/macos/resources/icon.png"
+}

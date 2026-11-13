@@ -1,0 +1,11 @@
+{
+  "repository": "bendahrooge/bark",
+  "bundle_id": "app.bark.browser",
+  "team_id": "926NLH6ZVC",
+  "signing_identity": "Developer ID Application: Benjamin Dahrooge (926NLH6ZVC)",
+  "notary_profile": "bark-notary",
+  "sparkle_account": "bark",
+  "sparkle_public_key": "MPyocX9VzLOpYCnRVNKPZaKjvnTXYETKDgygijW7TZI=",
+  "sparkle_version": "2.10.1",
+  "sparkle_sha256": "1a856d2a9edb8e628de88121d7be04cf0e2167f8641650b78fca00b14244cf27"
+}
