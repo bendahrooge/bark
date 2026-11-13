@@ -8,6 +8,7 @@ import argparse
 import base64
 import hashlib
 import json
+import mmap
 import os
 from pathlib import Path
 import plistlib
@@ -30,6 +31,18 @@ SPARKLE_NS = 'http://www.andymatuschak.org/xml-namespaces/sparkle'
 
 def run(*args, **kwargs):
     return subprocess.run([str(a) for a in args], check=True, **kwargs)
+
+
+def verify_release_source(source):
+    framework = source / 'Contents/Frameworks/Bark Framework.framework/Bark Framework'
+    if not framework.is_file():
+        raise ValueError('Expected the Chromium source-build Bark framework')
+    # Prevent an old cached build from gaining update metadata without the code
+    # that actually starts Sparkle. This marker is a compiled diagnostic string.
+    with framework.open('rb') as stream, mmap.mmap(stream.fileno(), 0, access=mmap.ACCESS_READ) as binary:
+        if binary.find(b'Bark could not load its update framework:') == -1:
+            raise ValueError('This browser was built before Sparkle integration; rebuild Chromium first')
+    run('lipo', '-verify_arch', 'arm64', framework)
 
 
 def read_config(path=CONFIG):
@@ -209,6 +222,7 @@ def main():
         parser.error('Output already exists; choose a new directory to preserve previous release artifacts')
     identity = args.identity or config['signing_identity']
     profile = args.notary_profile or config['notary_profile']
+    verify_release_source(args.source)
     # Check credentials before copying or signing the large application.
     run('xcrun', 'notarytool', 'history', '--keychain-profile', profile,
         '--output-format', 'json', stdout=subprocess.DEVNULL)

@@ -66,6 +66,15 @@ class ReleaseTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             release.sign(Path('/Bark.app'), 'Apple Development: Example', Path('/src'), self.config['team_id'])
 
+    def test_old_browser_without_updater_cannot_be_packaged(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = Path(directory) / 'Bark.app'
+            framework = app / 'Contents/Frameworks/Bark Framework.framework/Bark Framework'
+            framework.parent.mkdir(parents=True)
+            framework.write_bytes(bytes.fromhex('cffaedfe') + b'old browser')
+            with self.assertRaisesRegex(ValueError, 'before Sparkle'):
+                release.verify_release_source(app)
+
     def test_notary_rejection_never_staples(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(release, 'zip_app'), patch.object(release, 'run') as run:
             result = subprocess.CompletedProcess([], 1, '{"status":"Invalid","id":"test"}', '')
