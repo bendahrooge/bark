@@ -39,6 +39,13 @@ jobs:
           swift-build: 6.2.1-RELEASE
       - run: swift --version
       - run: swift test --scratch-path .build/core
+      - uses: actions/setup-python@v7
+        if: runner.os == 'macOS'
+        with:
+          python-version: '3.13'
+      - name: Validate native Sparkle integration
+        if: runner.os == 'macOS'
+        run: python3 tools/test_updater_macos.py
 
   chromium-patches:
     runs-on: ubuntu-latest

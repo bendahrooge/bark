@@ -29,6 +29,8 @@ def main():
                     SUEnableAutomaticChecks=False, SUEnableInstallerLauncherService=True)
         (app / 'Contents/Info.plist').write_bytes(plistlib.dumps(info))
         subprocess.run(['xcrun', 'clang++', '-std=c++20', '-fobjc-arc',
+                        '-Wall', '-Wextra', '-Werror', '-Wno-unused-parameter',
+                        '-Wobjc-missing-property-synthesis', '-Wexit-time-destructors',
                         '-I' + str(ROOT / 'apps/macos/src/chromium'),
                         str(ROOT / 'apps/macos/src/chromium/updater_mac.mm'),
                         str(ROOT / 'tools/fixtures/UpdaterTests.mm'),

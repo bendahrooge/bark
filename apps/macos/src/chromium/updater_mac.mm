@@ -23,6 +23,7 @@
 @end
 
 @implementation BarkUpdateSettings
+@synthesize controller = _controller;
 - (void)toggleAutomaticChecks:(id)sender {
   self.controller.updater.automaticallyChecksForUpdates =
       !self.controller.updater.automaticallyChecksForUpdates;
