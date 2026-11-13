@@ -24,6 +24,10 @@ contains **Check for Updates…** and **Automatically Check for Updates**. Check
 are enabled initially; users can turn them off. Sparkle asks before installing
 an update. Both the feed and archive must pass Sparkle signature verification.
 Development builds keep their separate bundle identifier and have no updater.
+Starting with 0.1.1, Settings → About Bark (`chrome://settings/help`) also opens
+the same Sparkle update flow and shows Bark's version separately from Chromium's.
+The About page in 0.1.0 still invokes Chromium's updater and can show error 0;
+use the Bark application menu to install 0.1.1.
 
 ## Release from this Mac
 
@@ -53,6 +57,7 @@ xcrun notarytool history --keychain-profile bark-notary
    python3 tools/test_updater_macos.py
    python3 tools/chromium.py build --work-dir .deps/chromium-source --target mac-arm64 --jobs 6
    node tools/test_chromium_browser.mjs --headed --swift-ui
+   node tools/test_chromium_updates.mjs
    ```
 
 3. Package, sign every nested executable/framework/helper, notarize, staple,

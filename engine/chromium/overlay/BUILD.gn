@@ -118,9 +118,15 @@ if (is_mac) {
     configs += [ ":swift_link" ]
   }
 
+  source_set("updater") {
+    sources = [ "mac/updater_mac.h", "mac/updater_mac.mm" ]
+    frameworks = [ "AppKit.framework" ]
+  }
+
   source_set("sidebar") {
-    sources = [ "mac/sidebar_mac.h", "mac/sidebar_mac.mm", "mac/space_test_driver.h", "mac/space_test_driver.cc", "mac/updater_mac.h", "mac/updater_mac.mm" ]
+    sources = [ "mac/sidebar_mac.h", "mac/sidebar_mac.mm", "mac/space_test_driver.h", "mac/space_test_driver.cc" ]
     deps = [
+      ":updater",
       ":swift_sidebar",
       ":space_catalog",
       ":space_tab_data",

@@ -35,6 +35,10 @@
     {
       "file": "0007-spaces-settings-page.patch",
       "sha256": "85748caa982a048479082f439d67353e74916dc67dda195be614719748f163c2"
+    },
+    {
+      "file": "0008-bark-about-updates.patch",
+      "sha256": "4aac734314c7475c580fa30901fb6025e8d87493f4634a19a2e64209426d7652"
     }
   ]
 }

@@ -413,7 +413,7 @@ def main():
                 run([*ninja,
                      'bark_swift_link_check',
                      'obj/bark/sidebar/sidebar_mac.o',
-                     'obj/bark/sidebar/updater_mac.o',
+                     'obj/bark/updater/updater_mac.o',
                      'obj/chrome/browser/ui/views/frame/browser_view/browser_view.o',
                      'obj/chrome/browser/ui/views/frame/browser_view_layout_delegate_impl/browser_view_layout_delegate_impl.o'],
                     cwd=work / 'src', env=env)
