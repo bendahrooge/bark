@@ -91,6 +91,43 @@ private final class Commands {
                      "Audio and loading state reach the tab row and the Stop control")
         precondition(!model.canDelete(model.snapshot.spaces[0]) && model.moveTargets.isEmpty,
                      "A profile's last space cannot be deleted")
+        model.update(#"{"tabs":[{"id":1,"title":"Pinned","url":"https://example.test/p","active":false,"pinned":true,"loading":false},{"id":2,"title":"A","url":"https://example.test/a","active":true,"pinned":false,"loading":false,"split":"s1","splitActive":true},{"id":3,"title":"B","url":"https://example.test/b","active":false,"pinned":false,"loading":false,"split":"s1","splitActive":true}],"favorites":[{"id":9,"title":"Favorite","url":"https://example.test/f","active":false,"pinned":true,"loading":false}],"spaces":[{"id":"research","name":"Research","active":true,"profile":"Default"},{"id":"home","name":"Home","active":false,"profile":"Default"}],"profiles":[{"id":"Default","name":"Personal"}],"profile":"/temporary/bark-bridge-test","profileId":"Default","activeSpaceId":"research","canGoBack":false,"canGoForward":false}"#)
+        precondition(model.snapshot.tabs[1].split == "s1" && model.snapshot.tabs[2].splitActive == true && model.snapshot.tabs[0].split == nil,
+                     "Split view membership reaches the tab rows")
+        func shortcut(_ characters: String?, _ code: UInt16, _ modifiers: NSEvent.ModifierFlags) -> BarkShortcut.Action? {
+            BarkShortcut.match(characters: characters, keyCode: code, modifiers: modifiers)?.action
+        }
+        precondition(shortcut("s", 1, .command) == .toggleSidebar && shortcut("C", 8, [.command, .shift]) == .copyURL &&
+                     shortcut("C", 8, [.command, .shift, .option]) == .copyMarkdown && shortcut("3", 20, .control) == .space(3) &&
+                     shortcut(nil, 124, [.command, .option, .numericPad, .function]) == .nextSpace && shortcut("+", 24, [.control, .shift]) == .addSplit,
+                     "Arc shortcuts match by character or key code, ignoring unrelated modifier flags")
+        precondition(shortcut("s", 1, [.command, .shift]) == nil && shortcut("c", 8, .command) == nil && shortcut("t", 17, .command) == nil,
+                     "Other key combinations are left to Chromium")
+        model.perform(.nextTab)
+        precondition(commands.messages.last?["action"] as? String == "select" && commands.messages.last?["id"] as? Int == 3,
+                     "Next tab follows the sidebar's order")
+        model.perform(.tab(1))
+        precondition(commands.messages.last?["id"] as? Int == 9, "Tab numbers count from Favorites at the top of the sidebar")
+        model.perform(.nextSpace)
+        precondition(commands.messages.last?["action"] as? String == "space" && commands.messages.last?["text"] as? String == "home")
+        let beforeEdge = commands.messages.count
+        model.perform(.previousSpace)
+        model.perform(.space(1))
+        precondition(commands.messages.count == beforeEdge, "Space shortcuts do nothing at the first space or for the current one")
+        model.perform(.closeSplit)
+        precondition(commands.messages.last?["action"] as? String == "unsplit")
+        let windowFrame = NSRect(x: 100, y: 100, width: 1000, height: 700)
+        let sidebarFrame = NSRect(x: 100, y: 100, width: 260, height: 662)
+        let page = SplitDropController.pageRect(window: windowFrame, sidebar: sidebarFrame, floating: false)
+        precondition(page == NSRect(x: 360, y: 100, width: 740, height: 662) &&
+                     SplitDropController.side(at: NSPoint(x: 400, y: 300), page: page, sidebar: sidebarFrame) == .left &&
+                     SplitDropController.side(at: NSPoint(x: 900, y: 300), page: page, sidebar: sidebarFrame) == .right &&
+                     SplitDropController.side(at: NSPoint(x: 200, y: 300), page: page, sidebar: sidebarFrame) == nil,
+                     "A tab dragged onto the page splits on the half under the pointer; the sidebar is not a drop target")
+        let floatingPage = SplitDropController.pageRect(window: windowFrame, sidebar: sidebarFrame, floating: true)
+        precondition(floatingPage.minX == 100 && SplitDropController.side(at: NSPoint(x: 200, y: 300), page: floatingPage, sidebar: sidebarFrame) == nil &&
+                     SplitDropController.side(at: NSPoint(x: 400, y: 300), page: floatingPage, sidebar: sidebarFrame) == .left,
+                     "A floating sidebar covers part of the page without becoming a drop target")
         model.shutdown()
         let count = commands.messages.count
         model.send("new")
@@ -102,6 +139,6 @@ private final class Commands {
         precondition(Unmanaged<AnyObject>.fromOpaque(header).takeUnretainedValue() is NSView)
         barkSwiftSidebarHeaderDestroy(header)
         barkSwiftSidebarDestroy(handle)
-        print("29 Swift/Chromium bridge checks passed")
+        print("39 Swift/Chromium bridge checks passed")
     }
 }

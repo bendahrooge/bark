@@ -57,6 +57,7 @@
 #include "chrome/browser/ui/recently_audible_helper.h"
 #include "chrome/browser/ui/navigator/browser_navigator.h"
 #include "chrome/browser/ui/navigator/browser_navigator_params.h"
+#include "chrome/browser/ui/tabs/split_tab_metrics.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/browser/ui/tabs/tab_strip_model_observer.h"
 #include "chrome/browser/ui/views/frame/browser_view.h"
@@ -76,6 +77,10 @@
 #include "components/prefs/pref_change_registrar.h"
 #include "components/prefs/pref_service.h"
 #include "components/sessions/content/session_tab_helper.h"
+#include "components/split_tabs/split_tab_id.h"
+#include "components/split_tabs/split_tab_visual_data.h"
+#include "components/tabs/public/split_tab_data.h"
+#include "components/tabs/public/tab_interface.h"
 #include "components/url_formatter/url_fixer.h"
 #include "content/public/browser/navigation_controller.h"
 #include "content/public/browser/render_frame_host.h"
@@ -260,6 +265,7 @@ class SidebarMac::Impl : public TabStripModelObserver,
   }
   void OnTabChangedAt(tabs::TabInterface*, TabChangeType) override { QueueGroupSnapshot(); }
   void OnTabPinnedStateChanged(tabs::TabInterface*, int) override { QueueGroupSnapshot(); }
+  void OnSplitTabChanged(const SplitTabChange&) override { QueueGroupSnapshot(); }
   void OnTabStripModelDestroyed(TabStripModel*) override { tabs_ = nullptr; }
   void OnProfileAdded(const base::FilePath&) override { QueueSnapshot(); }
   void OnProfileWasRemoved(const base::FilePath&, const std::u16string&) override { QueueSnapshot(); }
@@ -786,6 +792,13 @@ class SidebarMac::Impl : public TabStripModelObserver,
     auto* audio = RecentlyAudibleHelper::FromWebContents(contents);
     tab.Set("audible", audio && audio->WasRecentlyAudible());
     tab.Set("muted", contents->IsAudioMuted());
+    // Both tabs of a split view are listed; the pair shown on screen is the
+    // one containing the active tab.
+    if (auto split = tabs_->GetSplitForTab(i)) {
+      tab.Set("split", split->ToString());
+      const int current = tabs_->active_index();
+      tab.Set("splitActive", tabs_->ContainsIndex(current) && tabs_->GetSplitForTab(current) == split);
+    }
     if (auto* driver = favicon::ContentFaviconDriver::FromWebContents(contents)) {
       gfx::Image icon = driver->GetFavicon();
       if (!icon.IsEmpty()) {
@@ -1234,6 +1247,40 @@ class SidebarMac::Impl : public TabStripModelObserver,
     if (to >= 0 && to != from) tabs_->MoveWebContentsAt(from, to, false);
   }
 
+  // MARK: Split view
+
+  // Chromium's own split view: two tabs of one space side by side. Chromium
+  // keeps the pair adjacent in the tab strip and restores it with the session.
+  void Unsplit(int index) {
+    if (!tabs_->ContainsIndex(index)) return;
+    if (auto split = tabs_->GetSplitForTab(index)) tabs_->RemoveSplit(*split);
+  }
+
+  // Shows the tab at `index` beside the active tab, on the leading or
+  // trailing half of the page. A split holds two tabs, so a tab already in a
+  // split leaves it first.
+  void SplitWithActive(int index, bool leading) {
+    const int current = tabs_->active_index();
+    if (!tabs_->ContainsIndex(index) || !tabs_->ContainsIndex(current) || index == current) return;
+    auto* dragged = tabs_->GetWebContentsAt(index);
+    auto* active = tabs_->GetWebContentsAt(current);
+    // Favorites belong to every space, so they stay out of a space's split.
+    if (IsFavorite(dragged) || IsFavorite(active) || !InActiveSpace(index) || !InActiveSpace(current)) return;
+    Unsplit(index);
+    Unsplit(tabs_->GetIndexOfWebContents(active));
+    index = tabs_->GetIndexOfWebContents(dragged);
+    if (!tabs_->ContainsIndex(index) || tabs_->GetActiveWebContents() != active) return;
+    const auto split = tabs_->AddToNewSplit(
+        {index}, split_tabs::SplitTabVisualData(split_tabs::SplitTabLayout::kSideBySide),
+        split_tabs::SplitTabCreatedSource::kDragAndDropTab);
+    // The pair keeps its tab-strip order; put the dropped tab on the half it
+    // was dropped on.
+    const auto* data = tabs_->GetSplitData(split);
+    const auto members = data ? data->ListTabs() : std::vector<tabs::TabInterface*>();
+    if (members.size() == 2 && (members[0]->GetContents() == dragged) != leading)
+      tabs_->ReverseTabsInSplit(split);
+  }
+
   // MARK: Archive
 
   // Closes the active space's unpinned tabs and keeps them in the space's
@@ -1433,6 +1480,15 @@ class SidebarMac::Impl : public TabStripModelObserver,
               !zone ? (tabs_->IsTabPinned(index) ? TabZone::kPinned : TabZone::kUnpinned)
               : *zone == "favorites" ? TabZone::kFavorites
               : *zone == "pinned" ? TabZone::kPinned : TabZone::kUnpinned);
+    } else if (*action == "splitTab" && tabs_->ContainsIndex(index)) {
+      SplitWithActive(index, text && *text == "left");
+    } else if (*action == "splitNew" && active) {
+      // Chromium's "new split" page lists the open tabs to choose from.
+      if (!tabs_->GetSplitForTab(tabs_->active_index()) && !IsFavorite(active))
+        chrome::NewSplitTab(browser, split_tabs::SplitTabLayout::kSideBySide,
+                            split_tabs::SplitTabCreatedSource::kKeyboardShortcut);
+    } else if (*action == "unsplit") {
+      Unsplit(tabs_->ContainsIndex(index) ? index : tabs_->active_index());
     } else if (*action == "new") {
       // Same path as Cmd+T, so Chromium focuses the address bar for the new
       // tab and Bark presents the centered address bar.

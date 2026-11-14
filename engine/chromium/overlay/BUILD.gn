@@ -154,6 +154,8 @@ if (is_mac) {
       "//components/omnibox/browser",
       "//components/prefs",
       "//components/sessions",
+      "//components/split_tabs",
+      "//components/tabs:public",
       "//components/url_formatter",
       "//content/public/browser",
       "//net",

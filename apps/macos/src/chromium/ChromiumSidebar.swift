@@ -16,6 +16,10 @@ struct ChromiumTab: Decodable, Identifiable {
     // Playing sound now or moments ago, and silenced by the user.
     var audible: Bool? = nil
     var muted: Bool? = nil
+    // Chromium's split view: the split this tab belongs to, and whether that
+    // split is the one on screen.
+    var split: String? = nil
+    var splitActive: Bool? = nil
     var isBlank: Bool { url == "about:blank" || url == "chrome://newtab/" }
     var faviconImage: NSImage? {
         guard let favicon, let data = Data(base64Encoded: favicon), data.count <= 262144 else { return nil }
@@ -115,6 +119,11 @@ private struct AddressSuggestions: Decodable {
     @Published var editingAddress = false
     // Presents the centered address bar over this sidebar's browser window.
     var presentAddressBar: (() -> Void)?
+    // The sidebar's AppKit view, for window geometry and keyboard shortcuts.
+    weak var hostView: NSView?
+    let splitDrop = SplitDropController()
+    // Incremented by the keyboard shortcut; the sidebar archives with undo.
+    @Published private(set) var archiveRequests = 0
     @Published private(set) var suggestions: [AddressSuggestion] = []
     @Published var selectedSuggestion: Int?
     private var suggestionQuery: String?
@@ -277,6 +286,48 @@ private struct AddressSuggestions: Decodable {
     }
 
     func focusAddress() { presentAddressBar?() }
+
+    // MARK: Keyboard shortcuts
+
+    /// Tabs in sidebar order: Favorites, pinned, then the rest.
+    private var orderedTabs: [ChromiumTab] {
+        (isIncognito ? [] : snapshot.favorites ?? []) + snapshot.tabs.filter(\.pinned) + snapshot.tabs.filter { !$0.pinned }
+    }
+
+    func perform(_ action: BarkShortcut.Action) {
+        let tabs = orderedTabs
+        let active = tabs.first { $0.active }
+        let spaces = snapshot.spaces
+        switch action {
+        case .toggleSidebar: send("toggleSidebar")
+        case .togglePin:
+            // Favorites stay where they are; unpinning one would drop it into a space.
+            if let tab = snapshot.tabs.first(where: { $0.active }) { send("pin", id: tab.id) }
+        case .copyURL, .copyMarkdown:
+            guard let active, !active.isBlank else { return }
+            let title = active.title.replacingOccurrences(of: "[", with: "\\[").replacingOccurrences(of: "]", with: "\\]")
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(action == .copyURL ? active.url : "[\(title)](\(active.url))", forType: .string)
+        case .nextTab, .previousTab:
+            guard tabs.count > 1 else { return }
+            let step = action == .nextTab ? 1 : -1
+            let index = tabs.firstIndex { $0.active }.map { ($0 + step + tabs.count) % tabs.count } ?? 0
+            send("select", id: tabs[index].id)
+        case .tab(let number):
+            if tabs.indices.contains(number - 1) { send("select", id: tabs[number - 1].id) }
+        case .nextSpace, .previousSpace:
+            guard snapshot.switchingSpace != true, let index = spaces.firstIndex(where: { $0.active }) else { return }
+            let target = index + (action == .nextSpace ? 1 : -1)
+            if spaces.indices.contains(target) { send("space", text: spaces[target].id) }
+        case .space(let number):
+            guard snapshot.switchingSpace != true, spaces.indices.contains(number - 1), !spaces[number - 1].active else { return }
+            send("space", text: spaces[number - 1].id)
+        case .addSplit: send("splitNew")
+        case .closeSplit: send("unsplit")
+        case .archiveTabs:
+            if !isIncognito, snapshot.tabs.contains(where: { !$0.pinned }) { archiveRequests += 1 }
+        }
+    }
 
     func shutdown() { callback = nil; swipeResetWork?.cancel() }
 
@@ -730,6 +781,10 @@ private struct ChromiumTabRow: View {
                 }.buttonStyle(SidebarButtonStyle()).foregroundStyle(.secondary)
                     .help(muteLabel).accessibilityLabel(muteLabel)
             }
+            if tab.split != nil && !hovered {
+                Image(systemName: "rectangle.split.2x1").font(.system(size: 10)).foregroundStyle(.secondary)
+                    .help("In a split view").accessibilityHidden(true)
+            }
             if hovered {
                 HStack(spacing: 1) {
                     Button { model.send("pin", id: tab.id) } label: {
@@ -743,13 +798,16 @@ private struct ChromiumTabRow: View {
         }.padding(.leading, 11).padding(.trailing, hovered ? 5 : 11).frame(height: 36)
             .background {
                 RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .fill(tab.active ? Color.white.opacity(scheme == .dark ? 0.12 : 0.60) : Color.primary.opacity(hovered ? 0.045 : 0))
+                    .fill(tab.active ? Color.white.opacity(scheme == .dark ? 0.12 : 0.60)
+                          // The other half of the split on screen.
+                          : tab.splitActive == true ? Color.white.opacity(scheme == .dark ? 0.06 : 0.30)
+                          : Color.primary.opacity(hovered ? 0.045 : 0))
                     .shadow(color: .black.opacity(tab.active ? (scheme == .dark ? 0.12 : 0.045) : 0), radius: 2, y: 1)
             }
             .contentShape(RoundedRectangle(cornerRadius: 9)).onTapGesture { model.send("select", id: tab.id) }
             .onHover { hovered = $0 }
             .accessibilityElement(children: .combine).accessibilityLabel(title)
-            .accessibilityValue((tab.active ? "Selected. " : "") + audioDescription + (tab.pinned ? "Pinned" : ""))
+            .accessibilityValue((tab.active ? "Selected. " : "") + (tab.split != nil ? "In a split view. " : "") + audioDescription + (tab.pinned ? "Pinned" : ""))
             .accessibilityAction { model.send("select", id: tab.id) }
             .accessibilityAction(named: "Close tab") { model.send("close", id: tab.id) }
             .accessibilityAction(named: tab.pinned ? "Unpin tab" : "Pin tab") { model.send("pin", id: tab.id) }
@@ -763,6 +821,11 @@ private struct ChromiumTabRow: View {
                     Button("Duplicate") { model.send("duplicate", id: tab.id) }
                 }
                 Button(muteLabel) { model.send("mute", id: tab.id) }
+                if tab.split != nil {
+                    Button("Separate Split View") { model.send("unsplit", id: tab.id) }
+                } else if !tab.active {
+                    Button("Open in Split View") { model.send("splitTab", id: tab.id, text: "right") }
+                }
                 Divider()
                 if !model.isIncognito {
                     Button("Add to Favorites") { model.send("moveTab", id: tab.id, metadata: ["zone": "favorites", "before": ""]) }
@@ -880,6 +943,8 @@ private struct TabDrag {
     var pointer: CGPoint
     /// Released; waiting for Chromium's new tab order.
     var dropped = false
+    /// Over the page: the half where releasing opens the tab in a split view.
+    var splitSide: SplitDropController.Side?
 }
 
 private struct TabFramesKey: PreferenceKey {
@@ -935,6 +1000,7 @@ private struct ChromiumSidebar: View {
             }.frame(maxWidth: .infinity, maxHeight: .infinity)
                 .coordinateSpace(name: Self.dragSpace)
                 .onPreferenceChange(TabFramesKey.self) { tabFrames = $0 }
+                .onChange(of: model.archiveRequests) { _ in archiveTabs() }
                 .overlay(alignment: .topLeading) { dragOverlay }
                 .background {
                     ZStack {
@@ -1182,7 +1248,20 @@ private struct ChromiumSidebar: View {
 
     private enum DropZone: String { case favorites, pinned, unpinned }
 
-    private var dropZone: DropZone? { tabDrag.map { dropTarget(for: $0).zone } }
+    private var dropZone: DropZone? { tabDrag.flatMap { $0.splitSide == nil ? dropTarget(for: $0).zone : nil } }
+
+    /// Dragging a tab out of the sidebar onto the page opens it beside the
+    /// active tab, on the half it is dropped on. Favorites and the tabs
+    /// already on screen cannot be split.
+    private func splitSide(for drag: TabDrag) -> SplitDropController.Side? {
+        guard !drag.fromFavorites, let tab = draggedTab(drag.id), !tab.active, tab.splitActive != true,
+              model.snapshot.tabs.contains(where: { $0.active }) else {
+            model.splitDrop.end()
+            return nil
+        }
+        return model.splitDrop.update(from: model.hostView, floating: floating,
+                                      title: tab.title.isEmpty || tab.isBlank ? "New tab" : tab.title)
+    }
 
     /// Where the dragged tab would land, and before which tab (nil for the
     /// end of that zone).
@@ -1214,7 +1293,7 @@ private struct ChromiumSidebar: View {
 
     /// The accent line showing where the dragged tab will land.
     private var dropIndicator: CGRect? {
-        guard let drag = tabDrag, !drag.dropped else { return nil }
+        guard let drag = tabDrag, !drag.dropped, drag.splitSide == nil else { return nil }
         let target = dropTarget(for: drag)
         if target.zone == .favorites {
             if let before = target.before, let frame = tabFrames[before] {
@@ -1244,12 +1323,22 @@ private struct ChromiumSidebar: View {
                                       grab: CGSize(width: value.startLocation.x - frame.minX, height: value.startLocation.y - frame.minY),
                                       size: frame.size, pointer: value.location)
                 }
+                if let drag = tabDrag { tabDrag?.splitSide = splitSide(for: drag) }
             }
             .onEnded { value in
-                guard var drag = tabDrag, drag.id == id, !drag.dropped else { return }
+                guard var drag = tabDrag, drag.id == id, !drag.dropped else { model.splitDrop.end(); return }
                 drag.pointer = value.location
-                let target = dropTarget(for: drag)
+                let side = splitSide(for: drag)
+                model.splitDrop.end()
+                drag.splitSide = nil
                 drag.dropped = true
+                if let side {
+                    withAnimation(.easeOut(duration: 0.12)) { tabDrag = drag }
+                    model.send("splitTab", id: id, text: side.rawValue)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { settleTabDrag(id) }
+                    return
+                }
+                let target = dropTarget(for: drag)
                 withAnimation(.easeOut(duration: 0.12)) { tabDrag = drag }
                 model.send("moveTab", id: id, metadata: ["zone": target.zone.rawValue,
                                                          "before": target.before.map(String.init) ?? ""])
@@ -1400,6 +1489,7 @@ private struct ChromiumSidebar: View {
                 }
                 Button("Extensions") { model.send("extensions") }
                 Button("Settings") { model.send("settings") }
+                Button("Keyboard Shortcuts") { ShortcutGuide.shared.show() }
                 Divider()
                 Button("New profile…") { profileName = ""; creatingProfile = true }
                 if !model.isIncognito {
@@ -1701,6 +1791,9 @@ private struct ChromiumSidebar: View {
         super.init(rootView: ChromiumSidebar(model: model))
         // Chromium sets this view's frame; the content must never resize it.
         sizingOptions = []
+        model.hostView = self
+        ShortcutMonitor.shared.install()
+        ShortcutGuide.shared.installHelpMenuItem()
         model.presentAddressBar = { [weak self] in
             guard let self else { return }
             self.addressBar.show(over: self.window)
@@ -1719,10 +1812,21 @@ private struct ChromiumSidebar: View {
         model.focusAddress()
     }
 
+    /// The sidebar model of a browser window, if it has a sidebar.
+    static func model(in window: NSWindow) -> ChromiumSidebarModel? {
+        func find(_ view: NSView) -> ChromiumHostingView? {
+            if let host = view as? ChromiumHostingView { return host }
+            for child in view.subviews { if let host = find(child) { return host } }
+            return nil
+        }
+        return window.contentView.flatMap(find)?.model
+    }
+
     func stopTracking() {
         if let scrollMonitor { NSEvent.removeMonitor(scrollMonitor) }
         scrollMonitor = nil
         model.presentAddressBar = nil
+        model.splitDrop.end()
         addressBar.tearDown()
     }
 
@@ -1775,6 +1879,259 @@ private struct ChromiumSidebar: View {
             return true
         case .idle, .passthrough:
             return false
+        }
+    }
+}
+
+// MARK: Split view drop target
+
+/// Highlights the half of the page where a dragged sidebar tab would open in
+/// a split view. The sidebar's own view is clipped to its bounds, so the
+/// highlight is a transparent child window over the page.
+@MainActor final class SplitDropController {
+    enum Side: String { case left, right }
+    private var panel: NSPanel?
+    private var label: NSTextField?
+    private weak var parent: NSWindow?
+
+    /// The page area of `window` in screen coordinates: everything beside the
+    /// sidebar, below the titlebar strip. A collapsed sidebar floats over the
+    /// page, which then spans the window.
+    static func pageRect(window: NSRect, sidebar: NSRect, floating: Bool) -> NSRect {
+        let left = floating ? window.minX : min(max(sidebar.maxX, window.minX), window.maxX)
+        let top = min(max(sidebar.maxY, window.minY), window.maxY)
+        return NSRect(x: left, y: window.minY, width: window.maxX - left, height: top - window.minY)
+    }
+
+    static func side(at point: NSPoint, page: NSRect, sidebar: NSRect) -> Side? {
+        guard page.width >= 200, page.contains(point), !sidebar.contains(point) else { return nil }
+        return point.x < page.midX ? .left : .right
+    }
+
+    /// Call while dragging. Returns the half under the pointer, or nil when
+    /// the pointer is not over the page.
+    func update(from view: NSView?, floating: Bool, title: String) -> Side? {
+        guard let view, let window = view.window else { end(); return nil }
+        let sidebar = window.convertToScreen(view.convert(view.bounds, to: nil))
+        let page = Self.pageRect(window: window.frame, sidebar: sidebar, floating: floating)
+        guard let side = Self.side(at: NSEvent.mouseLocation, page: page, sidebar: sidebar) else { end(); return nil }
+        var half = page
+        half.size.width = page.width / 2
+        if side == .right { half.origin.x = page.midX }
+        show(half.insetBy(dx: 6, dy: 6), over: window, title: title)
+        return side
+    }
+
+    func end() {
+        guard let panel else { return }
+        parent?.removeChildWindow(panel)
+        panel.orderOut(nil)
+        parent = nil
+    }
+
+    private func show(_ frame: NSRect, over window: NSWindow, title: String) {
+        let panel = self.panel ?? makePanel()
+        self.panel = panel
+        label?.stringValue = "Split with " + title
+        panel.setFrame(frame, display: true)
+        if parent !== window {
+            parent?.removeChildWindow(panel)
+            window.addChildWindow(panel, ordered: .above)
+            parent = window
+        }
+    }
+
+    private func makePanel() -> NSPanel {
+        let panel = NSPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: true)
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = false
+        panel.ignoresMouseEvents = true
+        panel.isReleasedWhenClosed = false
+        let content = NSView()
+        content.wantsLayer = true
+        content.layer?.cornerRadius = 12
+        content.layer?.cornerCurve = .continuous
+        content.layer?.borderWidth = 2
+        content.layer?.borderColor = NSColor.controlAccentColor.withAlphaComponent(0.7).cgColor
+        content.layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.18).cgColor
+        let label = NSTextField(labelWithString: "")
+        label.font = .systemFont(ofSize: 15, weight: .medium)
+        label.textColor = .labelColor
+        label.lineBreakMode = .byTruncatingTail
+        label.alignment = .center
+        label.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.centerYAnchor.constraint(equalTo: content.centerYAnchor),
+            label.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 24),
+            label.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -24),
+        ])
+        panel.contentView = content
+        self.label = label
+        return panel
+    }
+}
+
+// MARK: Keyboard shortcuts
+
+/// Arc's default shortcuts that differ from Chromium's. One table drives both
+/// the key handling and the guide in the Help menu.
+struct BarkShortcut {
+    enum Action: Equatable {
+        case toggleSidebar, togglePin, copyURL, copyMarkdown, archiveTabs
+        case nextTab, previousTab, nextSpace, previousSpace
+        case tab(Int), space(Int)
+        case addSplit, closeSplit
+    }
+    /// Either a character (as typed without modifiers) or a layout-independent key code.
+    enum Key: Equatable {
+        case character(String)
+        case code(UInt16)
+    }
+    let action: Action
+    let key: Key
+    let modifiers: NSEvent.ModifierFlags
+    /// The keys as shown in the guide, such as "⌘ S".
+    let keys: String
+    let title: String
+    let section: String
+    /// Holding the keys repeats the action.
+    var repeats = false
+
+    static let relevantModifiers: NSEvent.ModifierFlags = [.command, .option, .control, .shift]
+
+    static let all: [BarkShortcut] = {
+        var list = [
+            BarkShortcut(action: .toggleSidebar, key: .character("s"), modifiers: .command, keys: "⌘ S", title: "Show or hide the sidebar", section: "Sidebar and tabs"),
+            BarkShortcut(action: .togglePin, key: .character("d"), modifiers: .command, keys: "⌘ D", title: "Pin or unpin the current tab", section: "Sidebar and tabs"),
+            BarkShortcut(action: .copyURL, key: .character("c"), modifiers: [.command, .shift], keys: "⇧ ⌘ C", title: "Copy the page's link", section: "Sidebar and tabs"),
+            BarkShortcut(action: .copyMarkdown, key: .character("c"), modifiers: [.command, .shift, .option], keys: "⌥ ⇧ ⌘ C", title: "Copy the page's link as Markdown", section: "Sidebar and tabs"),
+            BarkShortcut(action: .archiveTabs, key: .character("k"), modifiers: [.command, .shift], keys: "⇧ ⌘ K", title: "Archive this space's unpinned tabs", section: "Sidebar and tabs"),
+            BarkShortcut(action: .nextTab, key: .code(125), modifiers: [.command, .option], keys: "⌥ ⌘ ↓", title: "Next tab in the sidebar", section: "Sidebar and tabs", repeats: true),
+            BarkShortcut(action: .previousTab, key: .code(126), modifiers: [.command, .option], keys: "⌥ ⌘ ↑", title: "Previous tab in the sidebar", section: "Sidebar and tabs", repeats: true),
+            BarkShortcut(action: .tab(1), key: .character("1"), modifiers: .command, keys: "⌘ 1 – 9", title: "Go to that tab, counting from the top of the sidebar", section: "Sidebar and tabs"),
+            BarkShortcut(action: .nextSpace, key: .code(124), modifiers: [.command, .option], keys: "⌥ ⌘ →", title: "Next space", section: "Spaces"),
+            BarkShortcut(action: .previousSpace, key: .code(123), modifiers: [.command, .option], keys: "⌥ ⌘ ←", title: "Previous space", section: "Spaces"),
+            BarkShortcut(action: .space(1), key: .character("1"), modifiers: .control, keys: "⌃ 1 – 9", title: "Go to that space", section: "Spaces"),
+            BarkShortcut(action: .addSplit, key: .code(24), modifiers: [.control, .shift], keys: "⌃ ⇧ =", title: "Open a split view beside the current tab", section: "Split view"),
+            BarkShortcut(action: .closeSplit, key: .code(27), modifiers: [.control, .shift], keys: "⌃ ⇧ −", title: "Separate the split view into two tabs", section: "Split view"),
+        ]
+        for number in 2...9 {
+            list.append(BarkShortcut(action: .tab(number), key: .character(String(number)), modifiers: .command, keys: "", title: "", section: ""))
+            list.append(BarkShortcut(action: .space(number), key: .character(String(number)), modifiers: .control, keys: "", title: "", section: ""))
+        }
+        return list
+    }()
+
+    /// Chromium shortcuts that already match Arc's, listed in the guide.
+    static let builtIn: [(keys: String, title: String)] = [
+        ("⌘ T", "New tab"), ("⌘ L", "Edit the address"), ("⌘ W", "Close the tab"),
+        ("⇧ ⌘ T", "Reopen the last closed tab"), ("⌃ Tab", "Next tab"), ("⌃ ⇧ Tab", "Previous tab"),
+        ("⌘ N", "New window"), ("⇧ ⌘ N", "New Incognito window"), ("⌘ R", "Reload"),
+        ("⌘ [  and  ⌘ ]", "Back and forward"), ("⌘ F", "Find on the page"), ("⌘ Y", "History"),
+    ]
+
+    static func match(characters: String?, keyCode: UInt16, modifiers: NSEvent.ModifierFlags) -> BarkShortcut? {
+        let pressed = modifiers.intersection(relevantModifiers)
+        let typed = characters?.lowercased()
+        return all.first { shortcut in
+            guard shortcut.modifiers == pressed else { return false }
+            switch shortcut.key {
+            case .character(let character): return character == typed
+            case .code(let code): return code == keyCode
+            }
+        }
+    }
+}
+
+/// Handles Bark's shortcuts for the key browser window before Chromium's menu
+/// and the page see them, as Arc does.
+@MainActor final class ShortcutMonitor {
+    static let shared = ShortcutMonitor()
+    private var monitor: Any?
+
+    func install() {
+        guard monitor == nil else { return }
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            ShortcutMonitor.shared.handle(event) ? nil : event
+        }
+    }
+
+    private func handle(_ event: NSEvent) -> Bool {
+        // Only browser windows with a sidebar; sheets, panels, and windows
+        // using Chromium's own toolbar keep Chromium's shortcuts.
+        guard let window = event.window, window.isKeyWindow, window.attachedSheet == nil,
+              let model = ChromiumHostingView.model(in: window),
+              let shortcut = BarkShortcut.match(characters: event.charactersIgnoringModifiers, keyCode: event.keyCode,
+                                                modifiers: event.modifierFlags) else { return false }
+        if !event.isARepeat || shortcut.repeats { model.perform(shortcut.action) }
+        return true
+    }
+}
+
+/// The shortcut list, opened from Help > Keyboard Shortcuts.
+@MainActor final class ShortcutGuide: NSObject {
+    static let shared = ShortcutGuide()
+    private var window: NSWindow?
+    private var menuItem: NSMenuItem?
+
+    /// Adds "Keyboard Shortcuts" to the Help menu Chromium built.
+    func installHelpMenuItem() {
+        guard menuItem?.menu == nil, let menu = NSApp.helpMenu ?? NSApp.mainMenu?.items.last?.submenu else { return }
+        let item = NSMenuItem(title: "Keyboard Shortcuts", action: #selector(showFromMenu(_:)), keyEquivalent: "")
+        item.target = self
+        menu.insertItem(item, at: 0)
+        menuItem = item
+    }
+
+    @objc private func showFromMenu(_ sender: Any?) { show() }
+
+    func show() {
+        if window == nil {
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 620),
+                                  styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: true)
+            window.title = "Keyboard Shortcuts"
+            window.isReleasedWhenClosed = false
+            window.contentView = NSHostingView(rootView: ShortcutGuideView())
+            window.center()
+            self.window = window
+        }
+        window?.makeKeyAndOrderFront(nil)
+    }
+}
+
+private struct ShortcutGuideView: View {
+    private static let sections = ["Sidebar and tabs", "Spaces", "Split view"]
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                Text("Bark uses Arc's shortcuts. Press the keys shown while a browser window is in front.")
+                    .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                ForEach(Self.sections, id: \.self) { section in
+                    group(section, BarkShortcut.all.filter { $0.section == section }.map { ($0.keys, $0.title) })
+                }
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Split view with the mouse").font(.system(size: 13, weight: .semibold))
+                    Text("Drag a tab from the sidebar onto the left or right half of the page to open it beside the current tab. Drag the divider to resize the halves. To go back to two separate tabs, right-click either tab and choose Separate Split View.")
+                        .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+                group("Also the same as Arc", BarkShortcut.builtIn.map { ($0.keys, $0.title) })
+                Text("These shortcuts replace Chromium's for the same keys: Save Page (⌘ S), Bookmark (⌘ D), and Inspect Element (⇧ ⌘ C) remain available from the menus and the page's context menu.")
+                    .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }.padding(20).frame(maxWidth: .infinity, alignment: .leading)
+        }.frame(minWidth: 400, minHeight: 320)
+    }
+
+    private func group(_ title: String, _ rows: [(String, String)]) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title).font(.system(size: 13, weight: .semibold))
+            ForEach(rows, id: \.0) { row in
+                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                    Text(row.1).font(.system(size: 12)).frame(maxWidth: .infinity, alignment: .leading)
+                    Text(row.0).font(.system(size: 12, weight: .medium, design: .rounded)).foregroundStyle(.secondary)
+                }.accessibilityElement(children: .combine)
+            }
         }
     }
 }
