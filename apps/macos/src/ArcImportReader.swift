@@ -12,8 +12,17 @@ enum ArcImportReader {
     }
     static func safeURL(_ root: URL, _ relative: String) throws -> URL {
         let base = root.resolvingSymlinksInPath().standardizedFileURL
-        let result = base.appendingPathComponent(relative).resolvingSymlinksInPath().standardizedFileURL
-        guard result.path.hasPrefix(base.path + "/") else { throw ReadError(message: "An Arc data path points outside the selected folder.") }
+        let components = relative.split(separator: "/")
+        guard !relative.hasPrefix("/"), !components.isEmpty, !components.contains("..") else {
+            throw ReadError(message: "An Arc data path points outside the selected folder.")
+        }
+        var result = base
+        // Resolve each parent separately: Foundation may leave a symlink
+        // unresolved when the final file in the path does not exist.
+        for component in components {
+            result = result.appendingPathComponent(String(component)).resolvingSymlinksInPath().standardizedFileURL
+            guard result.path.hasPrefix(base.path + "/") else { throw ReadError(message: "An Arc data path points outside the selected folder.") }
+        }
         return result
     }
     static func json(_ url: URL, limit: Int = 32 * 1024 * 1024) throws -> [String: Any] {
@@ -32,17 +41,41 @@ enum ArcImportReader {
         guard let userData else {
             plan.unavailableHistoryProfiles = Set(plan.spaces.map(\.profileDirectory))
             plan.unavailableExtensionProfiles = plan.unavailableHistoryProfiles
-            plan.warnings.append("Arc’s browser profiles weren’t found. Spaces, tabs, and folders are available; uncheck history and extensions to import them.")
+            plan.unavailableBookmarkProfiles = plan.unavailableHistoryProfiles
+            plan.warnings.append("Arc’s browser profiles weren’t found. Spaces, tabs, and folders are available; uncheck bookmarks, history, and extensions to import them.")
             return plan
         }
-        for directory in Set(plan.spaces.map(\.profileDirectory)).sorted() {
+        let profileRoot = try safeURL(root, userData)
+        let directories = try FileManager.default.contentsOfDirectory(atPath: profileRoot.path)
+            .filter(ArcImport.validProfileDirectory)
+        for directory in Set(directories + plan.spaces.map(\.profileDirectory)).sorted() {
             guard ArcImport.validProfileDirectory(directory) else { continue }
             let profile = try safeURL(root, userData + "/" + directory)
+            plan.profileNames[directory] = directory == "Default" ? "Personal" : directory
             guard FileManager.default.fileExists(atPath: profile.path) else {
                 plan.unavailableHistoryProfiles.insert(directory)
                 plan.unavailableExtensionProfiles.insert(directory)
-                plan.warnings.append("\(directory): the browser profile wasn’t found. History and extensions aren’t available.")
+                plan.unavailableBookmarkProfiles.insert(directory)
+                plan.warnings.append("\(directory): the browser profile wasn’t found. Bookmarks, history, and extensions aren’t available.")
                 continue
+            }
+            let preferences = try safeURL(profile, "Preferences")
+            if let prefs = try? json(preferences), let info = prefs["profile"] as? [String: Any],
+               let name = info["name"] as? String, !name.isEmpty {
+                if name == "__ARC_SYSTEM_PROFILE", !plan.spaces.contains(where: { $0.profileDirectory == directory }) {
+                    plan.profileNames.removeValue(forKey: directory)
+                    continue
+                }
+                plan.profileNames[directory] = String(name.prefix(64))
+            }
+            do {
+                let bookmarks = try safeURL(profile, "Bookmarks")
+                if FileManager.default.fileExists(atPath: bookmarks.path) {
+                    plan.bookmarks[directory] = try readBookmarks(bookmarks)
+                }
+            } catch {
+                plan.unavailableBookmarkProfiles.insert(directory)
+                plan.warnings.append("\(directory): bookmarks couldn’t be read. Uncheck bookmarks or choose another Arc folder.")
             }
             do {
                 let history = try safeURL(profile, "History")
@@ -50,7 +83,7 @@ enum ArcImportReader {
                     let records = try readHistory(history)
                     plan.history[directory] = Array(records.prefix(BrowserState.historyLimit))
                     if records.count > BrowserState.historyLimit { plan.warnings.append("\(directory): only the newest \(BrowserState.historyLimit.formatted()) history entries are available in this import.") }
-                } else { plan.warnings.append("\(directory): no history database was found.") }
+                }
             } catch {
                 plan.unavailableHistoryProfiles.insert(directory)
                 plan.warnings.append("\(directory): history couldn’t be read. Quit Arc and scan again to retry.")
@@ -59,6 +92,30 @@ enum ArcImportReader {
             catch { plan.unavailableExtensionProfiles.insert(directory); plan.warnings.append("\(directory): the extension list couldn’t be read.") }
         }
         return plan
+    }
+    static func readBookmarks(_ path: URL) throws -> [ArcBookmarkRecord] {
+        let data = try json(path)
+        guard let roots = data["roots"] as? [String: Any] else {
+            throw ReadError(message: "Arc’s bookmarks format isn’t supported.")
+        }
+        var records: [ArcBookmarkRecord] = []
+        func walk(_ node: [String: Any], parent: String, path: String, depth: Int) throws {
+            guard depth < 64, records.count < 20_000 else { throw ReadError(message: "Arc’s bookmarks exceed the import limit.") }
+            let id = "bookmark/" + (node["guid"] as? String ?? node["id"] as? String ?? path)
+            let title = String((node["name"] as? String ?? "Bookmark").prefix(300))
+            if node["type"] as? String == "folder" {
+                records.append(.init(id: id, parent: parent, title: title))
+                for (index, child) in (node["children"] as? [[String: Any]] ?? []).enumerated() {
+                    try walk(child, parent: id, path: path + "/\(index)", depth: depth + 1)
+                }
+            } else if let url = node["url"] as? String, Navigation.isWebURL(url) {
+                records.append(.init(id: id, parent: parent, title: title, url: url))
+            }
+        }
+        for key in ["bookmark_bar", "other", "synced"] {
+            if let node = roots[key] as? [String: Any] { try walk(node, parent: "", path: key, depth: 0) }
+        }
+        return records
     }
     static func readHistory(_ path: URL) throws -> [ArcHistoryRecord] {
         var database: OpaquePointer?

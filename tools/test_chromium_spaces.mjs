@@ -74,6 +74,77 @@ function launch(label, options = {}) {
   });
 }
 
+const deepFind = `function find(selector, root = document) {
+  const found = root.querySelector(selector);
+  if (found) return found;
+  for (const node of root.querySelectorAll('*')) {
+    if (node.shadowRoot) {
+      const found = find(selector, node.shadowRoot);
+      if (found) return found;
+    }
+  }
+  return null;
+}`;
+const settingsState = `(async () => {
+  const {sendWithPromise} = await import('chrome://resources/js/cr.js');
+  return sendWithPromise('getState');
+})()`;
+async function openWebUI(url) {
+  const {targetId} = await browser.send('Target.createTarget', {url});
+  const {sessionId} = await browser.send('Target.attachToTarget', {targetId, flatten: true});
+  return {targetId, sessionId};
+}
+async function waitPage(session, expression, label) {
+  for (let attempt = 0; attempt < 150; attempt++) {
+    try { if (await evaluate(browser, session, expression)) return; }
+    catch (error) {
+      if (!/Execution context was destroyed|Cannot find context with specified id/.test(error.message)) throw error;
+    }
+    await delay(100);
+  }
+  throw new Error('Timed out: ' + label);
+}
+async function editSettings() {
+  const settings = await openWebUI('chrome://settings/');
+  const session = settings.sessionId;
+  await waitPage(session, `!!(${deepFind})('#barkSpacesLink') && !!(${deepFind})('#barkImportLink')`, 'Bark settings links');
+  assert.equal(await evaluate(browser, session, `(${deepFind})('#barkImportLink').getAttribute('href')`), '/importData');
+  await evaluate(browser, session, `(${deepFind})('#barkSpacesLink').click()`);
+  await waitPage(session, `location.host === 'spaces' && !!document.querySelector('#spaces cr-input.name')`, 'Spaces settings navigation');
+  checks.push('Settings exposes the import route and navigates to the registered chrome://spaces page');
+
+  await evaluate(browser, session, `(() => {
+    const input = document.querySelector('#spaces cr-input.name');
+    input.value = 'E2E renamed space';
+    input.dispatchEvent(new Event('change', {bubbles: true}));
+  })()`);
+  await waitPage(session, `(${settingsState}).then(state => state.spaces.some(space => space.name === 'E2E renamed space'))`, 'saved space name');
+  await evaluate(browser, session, `(() => {
+    const input = document.querySelector('#newProfile');
+    input.value = 'E2E profile';
+    input.dispatchEvent(new Event('input', {bubbles: true}));
+    document.querySelector('#addProfile').click();
+  })()`);
+  await waitPage(session, `(${settingsState}).then(state => state.profiles.some(profile => profile.name === 'E2E profile' && profile.spaces === 1))`, 'created profile and space');
+  checks.push('Spaces settings rename a space and create a real Chromium profile with its own space');
+  await browser.send('Target.closeTarget', {targetId: settings.targetId});
+
+  const appearance = await openWebUI('chrome://settings/appearance');
+  await waitPage(appearance.sessionId, `!!(${deepFind})('[pref-key="webkit.webprefs.tabs_to_links"]')`, 'macOS appearance controls');
+  assert.equal(await evaluate(browser, appearance.sessionId, `!!(${deepFind})('[pref-key="browser.confirm_to_quit"]')`), false);
+  checks.push('Appearance settings omit the removed hold-to-confirm quit preference');
+  await browser.send('Target.closeTarget', {targetId: appearance.targetId});
+}
+async function verifySettingsRestored() {
+  const restored = await openWebUI('chrome://spaces/');
+  await waitPage(restored.sessionId, `!!document.querySelector('#spaces cr-input.name')`, 'Spaces settings after restart');
+  const saved = await evaluate(browser, restored.sessionId, settingsState);
+  assert.ok(saved.spaces.some(space => space.name === 'E2E renamed space'));
+  assert.ok(saved.profiles.some(profile => profile.name === 'E2E profile' && profile.spaces === 1));
+  checks.push('Settings edits and the new profile persist across the same normal browser restart');
+  await browser.send('Target.closeTarget', {targetId: restored.targetId});
+}
+
 const server = http.createServer((request, response) => {
   response.writeHead(200, {'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store'});
   response.end('<!doctype html><meta charset="utf-8"><title>Space page</title><body>Space test</body>');
@@ -159,6 +230,7 @@ try {
   }
   current = await select(personal, current.windowId);
   checks.push('Repeated switches reuse profile hosts, preserve pins/themes/emoji, and keep exactly one visible window');
+  await editSettings();
   fs.writeFileSync(path.join(reports, 'before-restart.json'), JSON.stringify(await command(), null, 2));
   await browser.close(); browser = null;
 
@@ -172,6 +244,7 @@ try {
   assert.equal(restored.allTabs.find(tab => tab.url === urls.research).space, research);
   assert.equal(restored.allTabs.find(tab => tab.url === urls.research).pinned, true);
   assert.equal(restored.spaces.find(space => space.id === research).emoji, '📚');
+  await verifySettingsRestored();
   current = await select(workSpace, restored.windowId);
   state = await waitState(state => visible(state).length === 1 && visible(state)[0].allTabs.some(tab => tab.url === urls.work), 'second profile restoration');
   assert.equal(visible(state)[0].allTabs.find(tab => tab.url === urls.work).space, workSpace);
@@ -220,7 +293,7 @@ try {
   checks.push('Closing the Bark window also closes its background profile hosts without crashing');
   await browser.close(); browser = null;
   report.passed = true;
-  console.log(`${checks.length} native space/profile checks passed`);
+  console.log(`${checks.length} native space/profile/settings checks passed`);
 } catch (error) {
   report.error = error.stack || String(error);
   report.lastState = latest;

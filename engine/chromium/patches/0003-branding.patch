@@ -17,8 +17,9 @@ diff --git a/chrome/browser/ui/views/frame/browser_native_widget_mac.mm b/chrome
 diff --git a/chrome/browser/search/search.cc b/chrome/browser/search/search.cc
 --- a/chrome/browser/search/search.cc
 +++ b/chrome/browser/search/search.cc
-@@ -9,6 +9,7 @@
+@@ -9,7 +9,8 @@
  #include <string>
+ #include <string_view>
  
  #include "base/check_deref.h"
 +#include "base/command_line.h"

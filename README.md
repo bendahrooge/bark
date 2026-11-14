@@ -24,8 +24,6 @@ python3 tools/chromium.py sync --work-dir /path/to/build-volume
 python3 tools/chromium.py build --work-dir /path/to/build-volume --target mac-arm64
 ```
 
-Launch the development app with `--bark-swift-ui` to enable the sidebar. See the [build guide](engine/chromium/README.md) for prerequisites, packaging, and Linux setup.
-
 ## Development
 
 Run the portable checks without building Chromium:
@@ -35,4 +33,10 @@ swift test --scratch-path .build/core
 python3 -m unittest discover -s tools/tests
 ```
 
-[MIT licensed](LICENSE). Chromium and bundled components retain their licenses. Bark is independent of Arc and Google.
+After building Chromium, run all browser checks with:
+
+```sh
+node tools/test_chromium_browser.mjs --all
+```
+
+[MIT license](LICENSE). Chromium and bundled components retain their licenses. Bark is independent of Arc and Google.

@@ -20,13 +20,25 @@ public struct ArcExtensionRecord: Sendable {
     public var enabled: Bool
     public init(id: String, name: String, version: String, enabled: Bool) { self.id = id; self.name = name; self.version = version; self.enabled = enabled }
 }
+public struct ArcBookmarkRecord: Sendable {
+    public var id: String
+    public var parent: String
+    public var title: String
+    public var url: String?
+    public init(id: String, parent: String, title: String, url: String? = nil) {
+        self.id = id; self.parent = parent; self.title = title; self.url = url
+    }
+}
 public struct ArcImportPlan: Sendable {
     public var spaces: [ArcSpaceImport]
+    public var profileNames: [String: String] = [:]
+    public var bookmarks: [String: [ArcBookmarkRecord]] = [:]
     public var history: [String: [ArcHistoryRecord]] = [:]
     public var extensions: [String: [ArcExtensionRecord]] = [:]
     public var warnings: [String] = []
     public var unavailableHistoryProfiles: Set<String> = []
     public var unavailableExtensionProfiles: Set<String> = []
+    public var unavailableBookmarkProfiles: Set<String> = []
 }
 public struct ArcImportOptions: Sendable {
     public var selectedSpaces: Set<String>

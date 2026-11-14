@@ -1,0 +1,188 @@
+diff --git a/chrome/browser/app_controller_mac.mm b/chrome/browser/app_controller_mac.mm
+--- a/chrome/browser/app_controller_mac.mm
++++ b/chrome/browser/app_controller_mac.mm
+@@ -1007,43 +1007,10 @@
+ }
+ 
+ - (ConfirmQuitResult)confirmQuitIfNeeded {
+-  // If there are no windows, quit immediately.
+-  if (!GetLastActiveBrowserWindowInterfaceWithAnyProfile() &&
+-      !AppWindowRegistryUtil::IsAppWindowVisibleInAnyProfile(0)) {
+-    return ConfirmQuitResultNotPrompted;
+-  }
+-
+-  // Check if the preference is turned on.
+-  const PrefService* prefs = g_browser_process->local_state();
+-  if (!prefs->GetBoolean(prefs::kConfirmToQuitEnabled)) {
+-    confirm_quit::RecordHistogram(confirm_quit::kNoConfirm);
+-    return ConfirmQuitResultNotPrompted;
+-  }
+-
+-  NSEvent* event = [NSApp currentEvent];
+-  // Run only for keyboard-initiated quits.
+-  if (!event || CommandForKeyEvent(event).chrome_command != IDC_EXIT) {
+-    return ConfirmQuitResultNotPrompted;
+-  }
+-
+-  // In the event of a double-quit attempt (holding command and pressing 'Q'
+-  // twice), we will already have a ConfirmQuitPanelController, so only create a
+-  // new one if needed.
+-  if (!_confirmQuitPanelController) {
+-    _confirmQuitPanelController = [[ConfirmQuitPanelController alloc] init];
+-  }
+-
+-  __weak AppController* weakSelf = self;
+-  BOOL quitConfirmed = [_confirmQuitPanelController
+-      runConfirmQuitLoopWithEvent:event
+-                dismissedCallback:^{
+-                  AppController* strongSelf = weakSelf;
+-                  if (strongSelf && !browser_shutdown::IsTryingToQuit()) {
+-                    strongSelf->_confirmQuitPanelController = nil;
+-                  }
+-                }];
+-
+-  return quitConfirmed ? ConfirmQuitResultConfirmed : ConfirmQuitResultAborted;
++  // Bark restores tabs through the normal shutdown/session path. Quit without
++  // Chrome's hold-to-confirm delay, including when an existing profile has the
++  // legacy confirmation preference enabled.
++  return ConfirmQuitResultNotPrompted;
+ }
+ 
+ // Handles the NSApplicationWillTerminateNotification notification. (Note to
+diff --git a/chrome/browser/ui/cocoa/confirm_quit.cc b/chrome/browser/ui/cocoa/confirm_quit.cc
+--- a/chrome/browser/ui/cocoa/confirm_quit.cc
++++ b/chrome/browser/ui/cocoa/confirm_quit.cc
+@@ -15,7 +15,7 @@
+ }
+ 
+ void RegisterLocalState(PrefRegistrySimple* registry) {
+-  registry->RegisterBooleanPref(prefs::kConfirmToQuitEnabled, true);
++  registry->RegisterBooleanPref(prefs::kConfirmToQuitEnabled, false);
+ }
+ 
+ }  // namespace confirm_quit
+diff --git a/chrome/browser/ui/cocoa/main_menu_builder.mm b/chrome/browser/ui/cocoa/main_menu_builder.mm
+--- a/chrome/browser/ui/cocoa/main_menu_builder.mm
++++ b/chrome/browser/ui/cocoa/main_menu_builder.mm
+@@ -87,11 +87,6 @@
+                                             NSEventModifierFlagOption),
+               Item(IDS_SHOW_ALL_MAC)
+                   .action(@selector(unhideAllApplications:)),
+-              Item().is_separator(),
+-              Item(IDS_CONFIRM_TO_QUIT_OPTION)
+-                  .target(app_delegate)
+-                  .action(@selector(toggleConfirmToQuit:))
+-                  .remove_if(is_pwa),
+               Item().is_separator(),
+               Item(IDS_EXIT_MAC)
+                   .string_format_1(product_name)
+diff --git a/chrome/browser/resources/settings/appearance_page/appearance_page.html.ts b/chrome/browser/resources/settings/appearance_page/appearance_page.html.ts
+--- a/chrome/browser/resources/settings/appearance_page/appearance_page.html.ts
++++ b/chrome/browser/resources/settings/appearance_page/appearance_page.html.ts
+@@ -333,9 +333,6 @@
+     <settings-toggle-button class="hr" pref-key="webkit.webprefs.tabs_to_links"
+         label="$i18n{tabsToLinks}">
+     </settings-toggle-button>
+-    <settings-toggle-button class="hr" pref-key="browser.confirm_to_quit"
+-        label="$i18n{warnBeforeQuitting}">
+-    </settings-toggle-button>
+ </if>
+   </div>
+   <settings-toggle-button class="hr" id="splitViewDragAndDrop"
+diff --git a/chrome/browser/app_controller_mac_browsertest.mm b/chrome/browser/app_controller_mac_browsertest.mm
+--- a/chrome/browser/app_controller_mac_browsertest.mm
++++ b/chrome/browser/app_controller_mac_browsertest.mm
+@@ -1252,11 +1252,10 @@
+   AppControllerMainMenuBrowserTest() = default;
+ };
+ 
+-// Verifies that the Confirm Quit panel is shown when a browser window is
+-// active, the kConfirmToQuitEnabled preference is enabled, and the quit is
+-// keyboard-initiated.
++// Bark quits immediately for keyboard-initiated quits, even if an existing
++// profile still has the legacy confirmation preference enabled.
+ IN_PROC_BROWSER_TEST_F(AppControllerMainMenuBrowserTest,
+-                       ConfirmQuitPanelShownWithBrowserWindowAndKeyQuit) {
++                       ConfirmQuitPanelNotShownWhenLegacyPrefEnabled) {
+   g_browser_process->local_state()->SetBoolean(prefs::kConfirmToQuitEnabled,
+                                                true);
+ 
+@@ -1268,7 +1267,7 @@
+   ScopedMockConfirmQuitPanel mock_quit_panel;
+ 
+   EXPECT_EQ([AppController.sharedController confirmQuitIfNeeded],
+-            ConfirmQuitResultConfirmed);
++            ConfirmQuitResultNotPrompted);
+ }
+ 
+ // Verifies that the Confirm Quit panel is not shown when the
+diff --git a/chrome/browser/app_controller_mac_interactive_uitest.mm b/chrome/browser/app_controller_mac_interactive_uitest.mm
+--- a/chrome/browser/app_controller_mac_interactive_uitest.mm
++++ b/chrome/browser/app_controller_mac_interactive_uitest.mm
+@@ -237,16 +237,6 @@
+ - (void)tryToTerminateApplication;
+ @end
+ 
+-@interface AppController (TryToTerminateTesting)
+-- (ConfirmQuitResult)test_confirmQuitIfNeeded;
+-@end
+-
+-@implementation AppController (TryToTerminateTesting)
+-- (ConfirmQuitResult)test_confirmQuitIfNeeded {
+-  return ConfirmQuitResultAborted;
+-}
+-@end
+-
+ @interface ConfirmQuitPanelController (TryToTerminateTesting)
+ - (BOOL)test_failConfirmQuitLoopWithEvent:(NSEvent*)event
+                         dismissedCallback:(void (^)())dismissedCallback;
+@@ -304,24 +294,24 @@
+   AppControllerTerminateInteractiveUITest() = default;
+ };
+ 
+-// Verifies that when the Confirm Quit panel is shown and cancelled,
+-// tryToTerminateApplication correctly aborts the termination sequence.
++// Bark starts normal shutdown on a single keyboard quit, even if an
++// existing profile has the legacy confirmation preference enabled.
+ IN_PROC_BROWSER_TEST_F(AppControllerTerminateInteractiveUITest,
+-                       ConfirmQuitPanelShownForKeyboardQuit) {
+-  AppController* app_controller = AppController.sharedController;
+-
+-  // Set up conditions that should trigger the Confirm Quit panel.
++                       ConfirmQuitPanelNotShownForKeyboardQuit) {
++  AppController* app_controller = AppController.sharedController;
++
++  // Simulate an existing profile with the old preference enabled.
+   g_browser_process->local_state()->SetBoolean(prefs::kConfirmToQuitEnabled,
+                                                true);
+   NSEvent* cmd_q_event = cocoa_test_event_utils::KeyEventWithKeyCode(
+       'q', 'q', NSEventTypeKeyDown, NSEventModifierFlagCommand);
+   ScopedMockCurrentEvent mock_event(cmd_q_event);
+ 
+-  // Swizzle runConfirmQuitPanel to return NO, which happens if the user does
+-  // not complete the Confirm Quit action.
++  // Fail if the confirmation loop is entered instead of quitting directly.
+   base::apple::ScopedObjCClassSwizzler run_quit_swizzler(
+-      [AppController class], @selector(confirmQuitIfNeeded),
+-      @selector(test_confirmQuitIfNeeded));
++      [ConfirmQuitPanelController class],
++      @selector(runConfirmQuitLoopWithEvent:dismissedCallback:),
++      @selector(test_failConfirmQuitLoopWithEvent:dismissedCallback:));
+ 
+   // Track closing notifications.
+   std::vector<bool> closing_all_browsers_notifications;
+@@ -334,11 +324,9 @@
+ 
+   [app_controller tryToTerminateApplication];
+ 
+-  // Verify that no closing notifications were ever sent and that the browser
+-  // remains open and visible.
+-  EXPECT_TRUE(closing_all_browsers_notifications.empty());
+-  EXPECT_EQ(1u, GlobalBrowserCollection::GetInstance()->GetSize());
+-  EXPECT_TRUE(browser()->GetWindow()->IsVisible());
++  // Verify that the regular closing sequence was initiated, not cancelled.
++  ASSERT_EQ(1u, closing_all_browsers_notifications.size());
++  EXPECT_TRUE(closing_all_browsers_notifications[0]);
+ }
+ 
+ // Verifies that when the Confirm Quit panel is bypassed (e.g. mouse quit),

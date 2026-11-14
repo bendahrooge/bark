@@ -69,6 +69,8 @@ if (is_mac) {
     script = "compile_swift.py"
     sources = [
       "mac/ChromiumSidebar.swift",
+      "mac/ChromiumArcImport.swift",
+      "mac/ArcImportReader.swift",
       "mac/SidebarBackground.swift",
       "mac/SpaceEditor.swift",
       "core/ArcImport.swift",
@@ -96,6 +98,7 @@ if (is_mac) {
     libs = [
       "$target_gen_dir/libBarkSidebar.a",
       "$target_gen_dir/libBarkCore.a",
+      "sqlite3",
     ]
     lib_dirs = [
       "$mac_sdk_path/usr/lib/swift",
@@ -124,7 +127,7 @@ if (is_mac) {
   }
 
   source_set("sidebar") {
-    sources = [ "mac/sidebar_mac.h", "mac/sidebar_mac.mm", "mac/space_test_driver.h", "mac/space_test_driver.cc" ]
+    sources = [ "mac/arc_importer.h", "mac/arc_importer.cc", "mac/sidebar_mac.h", "mac/sidebar_mac.mm", "mac/space_test_driver.h", "mac/space_test_driver.cc" ]
     deps = [
       ":updater",
       ":swift_sidebar",
@@ -133,6 +136,11 @@ if (is_mac) {
       "//base",
       "//chrome/browser:browser_process",
       "//chrome/browser/autocomplete",
+      "//chrome/browser/bookmarks",
+      "//chrome/browser/history",
+      "//chrome/browser/profiles/keep_alive",
+      "//components/bookmarks/browser",
+      "//components/history/core/browser",
       "//chrome/browser/profiles:profile",
       "//chrome/browser/profiles:profile_manager",
       "//chrome/browser/sessions",
@@ -154,6 +162,8 @@ if (is_mac) {
       "//components/omnibox/browser",
       "//components/prefs",
       "//components/sessions",
+      "//components/split_tabs",
+      "//components/tabs:public",
       "//components/url_formatter",
       "//content/public/browser",
       "//net",

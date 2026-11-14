@@ -11,7 +11,7 @@ on:
       native_ui_checks:
         type: boolean
         default: false
-        description: Run extension action/pop-up checks in a logged-in macOS desktop session
+        description: Run all native browser E2E suites in a logged-in macOS desktop session
 
 permissions:
   contents: read
@@ -35,19 +35,27 @@ jobs:
       - name: Validate Swift command and lifecycle boundary
         if: inputs.target == 'mac-arm64'
         run: python3 tools/test_chromium_swift.py
-      - name: Validate native Chromium extensions
+      - name: Validate Chromium patches end to end
         shell: bash
         run: |
           source_root="$RUNNER_TEMP/bark-chromium-${{ github.run_id }}/src"
-          flags=()
+          flags=(--all --headless)
           if [[ '${{ inputs.target }}' == 'mac-arm64' ]]; then
             node_binary="$source_root/third_party/node/mac_arm64/node-darwin-arm64/bin/node"
             browser_binary="$source_root/out/Bark-mac-arm64/Bark.app/Contents/MacOS/Bark"
             if [[ '${{ inputs.native_ui_checks }}' == 'true' ]]; then
-              flags+=(--headed --swift-ui)
+              flags=(--all)
             fi
           else
             node_binary="$source_root/third_party/node/linux/node-linux-x64/bin/node"
             browser_binary="$source_root/out/Bark-linux-x64/chrome"
           fi
           "$node_binary" tools/test_chromium_browser.mjs "$browser_binary" "${flags[@]}"
+      - name: Upload browser test reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: chromium-e2e-${{ inputs.target }}
+          path: test-results/chromium-*/
+          retention-days: 7
+          if-no-files-found: ignore

@@ -10,7 +10,7 @@ index c35c985ddf..913cc33464 100644
            attr-for-selected="href" @iron-activate="${this.onIronActivate_}"
            @click="${this.onLinkClick_}" selected-attribute="selected">
          <a role="menuitem"
-@@ -15,6 +16,12 @@
+@@ -15,6 +16,19 @@
            <span class="menu-label">$i18n{peoplePageTitle}</span>
            <cr-ripple></cr-ripple>
          </a>
@@ -18,6 +18,13 @@ index c35c985ddf..913cc33464 100644
 +            href="chrome://spaces">
 +          <cr-icon icon="settings:dashboard"></cr-icon>
 +          <span class="menu-label">Spaces &amp; profiles</span>
++          <cr-ripple></cr-ripple>
++        </a>
++        <a role="menuitem" id="barkImportLink" href="/importData"
++            ?hidden="${this.shouldHideMenuItem_(this.pageVisibility_?.people)}"
++            class="cr-nav-menu-item">
++          <cr-icon icon="settings:file-save"></cr-icon>
++          <span class="menu-label">$i18n{importTitle}</span>
 +          <cr-ripple></cr-ripple>
 +        </a>
          <a role="menuitem" id="autofill" href="/autofill"

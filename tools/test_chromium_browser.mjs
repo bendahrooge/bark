@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-// Exercise the compiled browser's real extension services using disposable
-// profiles and a loopback server. Node 18+; no third-party packages required.
+// Exercise the compiled browser with disposable profiles and loopback pages.
+// Use --all to include every applicable browser suite. Node 18+; no packages.
 import assert from 'node:assert/strict';
-import {spawn} from 'node:child_process';
+import {execFileSync, spawn} from 'node:child_process';
 import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
@@ -14,11 +14,16 @@ const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const target = process.platform === 'darwin' ? 'mac-arm64' : 'linux-x64';
 const output = path.join(root, '.deps/chromium-source/src/out', `Bark-${target}`);
 const arguments_ = process.argv.slice(2);
+const all = arguments_.includes('--all');
+const headless = arguments_.includes('--headless');
 const headed = arguments_.includes('--headed');
 const swiftUI = arguments_.includes('--swift-ui');
-if (arguments_.some(arg => arg.startsWith('--') && !['--headed', '--swift-ui'].includes(arg))) {
-  throw new Error('Usage: test_chromium_browser.mjs [executable] [--headed] [--swift-ui]');
+if (arguments_.filter(arg => !arg.startsWith('--')).length > 1 ||
+    arguments_.some(arg => arg.startsWith('--') && !['--all', '--headless', '--headed', '--swift-ui'].includes(arg))) {
+  throw new Error('Usage: test_chromium_browser.mjs [executable] [--all [--headless] | --headed [--swift-ui]]');
 }
+if (headless && !all) throw new Error('--headless requires --all; the default extension run is already headless');
+if (all && (headed || swiftUI)) throw new Error('--all selects native macOS checks automatically; use --headless to skip them');
 if (swiftUI && (!headed || process.platform !== 'darwin')) throw new Error('--swift-ui requires --headed on macOS');
 const binary = path.resolve(arguments_.find(arg => !arg.startsWith('--')) || path.join(output,
   process.platform === 'darwin' ? 'Bark.app/Contents/MacOS/Bark' : 'chrome'));
@@ -423,6 +428,60 @@ async function main() {
   }
 }
 
+async function runAll() {
+  assert.ok(['darwin', 'linux'].includes(process.platform), 'Requires macOS or Linux');
+  const native = process.platform === 'darwin' && !headless;
+  fs.mkdirSync(resultsRoot, {recursive: true});
+  const directory = fs.mkdtempSync(path.join(resultsRoot, 'run-'));
+  const report = {passed: false, startedAt: new Date().toISOString(), binary,
+    expectedChromium: lock.version, expectedSourceRevision: lock.revision, native, suites: []};
+  const save = () => fs.writeFileSync(path.join(directory, 'report.json'), JSON.stringify(report, null, 2) + '\n');
+  // The headed browser run already includes every headless extension check.
+  const suites = [['browser', 'test_chromium_browser.mjs', native ? ['--headed', '--swift-ui'] : []]];
+  if (native) suites.push(
+    ['spaces-and-settings', 'test_chromium_spaces.mjs', []],
+    ['arc-import', 'test_chromium_arc_import.mjs', []],
+    ['about-updates', 'test_chromium_updates.mjs', []],
+  );
+  try {
+    report.actualVersion = execFileSync(binary, ['--version'], {encoding: 'utf8', timeout: 30000}).trim();
+    assert.ok(report.actualVersion.split(/\s+/).includes(lock.version),
+      `Build the pinned Chromium first: expected ${lock.version}, got ${report.actualVersion}`);
+    save();
+    for (const [name, script, flags] of suites) {
+      console.log(`Running ${name} on ${report.actualVersion}`);
+      const log = path.join(directory, name + '.log');
+      const descriptor = fs.openSync(log, 'w');
+      const started = Date.now();
+      let outcome;
+      try {
+        const child = spawn(process.execPath, [path.join(root, 'tools', script), binary, ...flags], {
+          cwd: root, stdio: ['ignore', descriptor, descriptor],
+        });
+        outcome = await new Promise(resolve => {
+          child.once('error', error => resolve({error: String(error)}));
+          child.once('exit', (code, signal) => resolve({code, signal}));
+        });
+      } finally {
+        fs.closeSync(descriptor);
+      }
+      const passed = outcome.code === 0;
+      report.suites.push({name, passed, ...outcome, durationMs: Date.now() - started, log});
+      save();
+      console.log(`${passed ? 'Passed' : 'FAILED'} ${name}: ${log}`);
+    }
+    report.passed = report.suites.every(suite => suite.passed);
+    if (!report.passed) process.exitCode = 1;
+  } catch (error) {
+    report.error = error.stack || String(error);
+    throw error;
+  } finally {
+    report.finishedAt = new Date().toISOString();
+    save();
+    console.log(`Browser test report: ${path.join(directory, 'report.json')}`);
+  }
+}
+
 if (fileURLToPath(import.meta.url) === path.resolve(process.argv[1] ?? '')) {
-  main().catch(error => { console.error(error); process.exitCode = 1; });
+  (all ? runAll() : main()).catch(error => { console.error(error); process.exitCode = 1; });
 }

@@ -1,4 +1,5 @@
 #include "bark/mac/sidebar_mac.h"
+#include "bark/mac/arc_importer.h"
 #include "bark/space_catalog.h"
 #include "bark/space_tab_data.h"
 #include "bark/mac/space_test_driver.h"
@@ -57,6 +58,7 @@
 #include "chrome/browser/ui/recently_audible_helper.h"
 #include "chrome/browser/ui/navigator/browser_navigator.h"
 #include "chrome/browser/ui/navigator/browser_navigator_params.h"
+#include "chrome/browser/ui/tabs/split_tab_metrics.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/browser/ui/tabs/tab_strip_model_observer.h"
 #include "chrome/browser/ui/views/frame/browser_view.h"
@@ -76,6 +78,10 @@
 #include "components/prefs/pref_change_registrar.h"
 #include "components/prefs/pref_service.h"
 #include "components/sessions/content/session_tab_helper.h"
+#include "components/split_tabs/split_tab_id.h"
+#include "components/split_tabs/split_tab_visual_data.h"
+#include "components/tabs/public/split_tab_data.h"
+#include "components/tabs/public/tab_interface.h"
 #include "components/url_formatter/url_fixer.h"
 #include "content/public/browser/navigation_controller.h"
 #include "content/public/browser/render_frame_host.h"
@@ -260,6 +266,7 @@ class SidebarMac::Impl : public TabStripModelObserver,
   }
   void OnTabChangedAt(tabs::TabInterface*, TabChangeType) override { QueueGroupSnapshot(); }
   void OnTabPinnedStateChanged(tabs::TabInterface*, int) override { QueueGroupSnapshot(); }
+  void OnSplitTabChanged(const SplitTabChange&) override { QueueGroupSnapshot(); }
   void OnTabStripModelDestroyed(TabStripModel*) override { tabs_ = nullptr; }
   void OnProfileAdded(const base::FilePath&) override { QueueSnapshot(); }
   void OnProfileWasRemoved(const base::FilePath&, const std::u16string&) override { QueueSnapshot(); }
@@ -355,7 +362,7 @@ class SidebarMac::Impl : public TabStripModelObserver,
     return space && space->FindString("profile") && *space->FindString("profile") == ProfileKey();
   }
   void EnsureProfileSpaces() {
-    if (IsPrivate()) return;
+    if (IsPrivate() || IsArcImportInProgress()) return;
     for (auto* entry : profiles_->GetAllProfilesAttributesSortedForDisplay()) {
       std::string key = entry->GetPath().BaseName().AsUTF8Unsafe();
       if (entry->IsOmitted() || !catalog_.FirstForProfile(key).empty()) continue;
@@ -754,8 +761,13 @@ class SidebarMac::Impl : public TabStripModelObserver,
   void QueueSnapshot() {
     if (snapshot_pending_) return;
     snapshot_pending_ = true;
-    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
-        FROM_HERE, base::BindOnce(&Impl::Snapshot, weak_factory_.GetWeakPtr()));
+    // A loading page reports tab changes many times a second, and each
+    // snapshot is built on the UI thread. The first goes out at once; a burst
+    // is then limited to one per interval.
+    const base::TimeDelta wait = last_snapshot_ + base::Milliseconds(50) - base::TimeTicks::Now();
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
+        FROM_HERE, base::BindOnce(&Impl::Snapshot, weak_factory_.GetWeakPtr()),
+        std::max(wait, base::TimeDelta()));
   }
   // Other windows of this logical window preview this window's spaces.
   void QueueGroupSnapshot() {
@@ -767,6 +779,7 @@ class SidebarMac::Impl : public TabStripModelObserver,
 
   void Snapshot() {
     snapshot_pending_ = false;
+    last_snapshot_ = base::TimeTicks::Now();
     if (!tabs_ || tabs_->closing_all()) return;
     auto state = MakeSnapshot();
     SaveSpacePreviews();
@@ -786,6 +799,13 @@ class SidebarMac::Impl : public TabStripModelObserver,
     auto* audio = RecentlyAudibleHelper::FromWebContents(contents);
     tab.Set("audible", audio && audio->WasRecentlyAudible());
     tab.Set("muted", contents->IsAudioMuted());
+    // Both tabs of a split view are listed; the pair shown on screen is the
+    // one containing the active tab.
+    if (auto split = tabs_->GetSplitForTab(i)) {
+      tab.Set("split", split->ToString());
+      const int current = tabs_->active_index();
+      tab.Set("splitActive", tabs_->ContainsIndex(current) && tabs_->GetSplitForTab(current) == split);
+    }
     if (auto* driver = favicon::ContentFaviconDriver::FromWebContents(contents)) {
       gfx::Image icon = driver->GetFavicon();
       if (!icon.IsEmpty()) {
@@ -809,7 +829,7 @@ class SidebarMac::Impl : public TabStripModelObserver,
       const GURL url = spec ? GURL(*spec) : GURL();
       if (!url.is_valid()) continue;
       NavigateParams params(view_->browser(), url, ui::PAGE_TRANSITION_LINK);
-      params.disposition = WindowOpenDisposition::NEW_BACKGROUND_TAB;
+      params.disposition = WindowOpenDisposition::kNewBackgroundTab;
       Navigate(&params);
       auto* contents = params.navigated_or_inserted_contents.get();
       if (!contents) continue;
@@ -878,7 +898,7 @@ class SidebarMac::Impl : public TabStripModelObserver,
         host->EnsureProfileSpaces();
         const std::string fallback = host->catalog_.FirstForProfile(host->ProfileKey());
         NavigateParams params(host->view_->browser(), GURL("about:blank"), ui::PAGE_TRANSITION_TYPED);
-        params.disposition = WindowOpenDisposition::NEW_BACKGROUND_TAB;
+        params.disposition = WindowOpenDisposition::kNewBackgroundTab;
         Navigate(&params);
         if (auto* blank = params.navigated_or_inserted_contents.get(); blank && !fallback.empty())
           host->AssignTab(blank, fallback);
@@ -1121,6 +1141,7 @@ class SidebarMac::Impl : public TabStripModelObserver,
       if (!item || !item->FindString("id") || !item->FindString("profile") ||
           ProfilePath(*item->FindString("profile")).empty()) continue;
       auto space = item->Clone();
+      for (const char* key : {"pendingTabs", "previewTabs", "archivedTabs", "arcTabIds", "arcSource", "arcProfile"}) space.Remove(key);
       space.Set("active", *item->FindString("id") == active_space_);
       spaces.Append(std::move(space));
     }
@@ -1137,6 +1158,7 @@ class SidebarMac::Impl : public TabStripModelObserver,
       break;
     }
     base::DictValue state;
+    if (!incognito && arc_import_result_) state.Set("arcImportResult", arc_import_result_->Clone());
     state.Set("sidebarCollapsed", collapsed_);
     state.Set("sidebarRevealed", revealed_);
     state.Set("sidebarWidth", expanded_width());
@@ -1232,6 +1254,40 @@ class SidebarMac::Impl : public TabStripModelObserver,
       if (last >= 0) to = last > from ? last : last + 1;
     }
     if (to >= 0 && to != from) tabs_->MoveWebContentsAt(from, to, false);
+  }
+
+  // MARK: Split view
+
+  // Chromium's own split view: two tabs of one space side by side. Chromium
+  // keeps the pair adjacent in the tab strip and restores it with the session.
+  void Unsplit(int index) {
+    if (!tabs_->ContainsIndex(index)) return;
+    if (auto split = tabs_->GetSplitForTab(index)) tabs_->RemoveSplit(*split);
+  }
+
+  // Shows the tab at `index` beside the active tab, on the leading or
+  // trailing half of the page. A split holds two tabs, so a tab already in a
+  // split leaves it first.
+  void SplitWithActive(int index, bool leading) {
+    const int current = tabs_->active_index();
+    if (!tabs_->ContainsIndex(index) || !tabs_->ContainsIndex(current) || index == current) return;
+    auto* dragged = tabs_->GetWebContentsAt(index);
+    auto* active = tabs_->GetWebContentsAt(current);
+    // Favorites belong to every space, so they stay out of a space's split.
+    if (IsFavorite(dragged) || IsFavorite(active) || !InActiveSpace(index) || !InActiveSpace(current)) return;
+    Unsplit(index);
+    Unsplit(tabs_->GetIndexOfWebContents(active));
+    index = tabs_->GetIndexOfWebContents(dragged);
+    if (!tabs_->ContainsIndex(index) || tabs_->GetActiveWebContents() != active) return;
+    const auto split = tabs_->AddToNewSplit(
+        {index}, split_tabs::SplitTabVisualData(split_tabs::SplitTabLayout::kSideBySide),
+        split_tabs::SplitTabCreatedSource::kDragAndDropTab);
+    // The pair keeps its tab-strip order; put the dropped tab on the half it
+    // was dropped on.
+    const auto* data = tabs_->GetSplitData(split);
+    const auto members = data ? data->ListTabs() : std::vector<tabs::TabInterface*>();
+    if (members.size() == 2 && (members[0]->GetContents() == dragged) != leading)
+      tabs_->ReverseTabsInSplit(split);
   }
 
   // MARK: Archive
@@ -1385,7 +1441,7 @@ class SidebarMac::Impl : public TabStripModelObserver,
   void NavigateTo(const GURL& url, bool new_tab) {
     NavigateParams params(view_->browser(), url, ui::PAGE_TRANSITION_TYPED);
     params.disposition = new_tab || tabs_->empty()
-        ? WindowOpenDisposition::NEW_FOREGROUND_TAB : WindowOpenDisposition::CURRENT_TAB;
+        ? WindowOpenDisposition::kNewForegroundTab : WindowOpenDisposition::kCurrentTab;
     Navigate(&params);
     if (auto* contents = tabs_->GetActiveWebContents()) contents->Focus();
   }
@@ -1404,7 +1460,7 @@ class SidebarMac::Impl : public TabStripModelObserver,
     // creation or the original profile's appearance settings.
     if (incognito && (*action == "space" || *action == "createSpace" || *action == "deleteSpace" ||
                       *action == "manageSpaces" || *action == "moveTabToSpace" ||
-                      *action == "createProfile" || *action == "customizeSpace" || *action == "appearance")) return;
+                      *action == "createProfile" || *action == "customizeSpace" || *action == "appearance" || *action == "importArc")) return;
     auto* active = tabs_->GetActiveWebContents();
     if (*action == "select" && tabs_->ContainsIndex(index)) {
       tabs_->ActivateTabAt(index);
@@ -1433,6 +1489,15 @@ class SidebarMac::Impl : public TabStripModelObserver,
               !zone ? (tabs_->IsTabPinned(index) ? TabZone::kPinned : TabZone::kUnpinned)
               : *zone == "favorites" ? TabZone::kFavorites
               : *zone == "pinned" ? TabZone::kPinned : TabZone::kUnpinned);
+    } else if (*action == "splitTab" && tabs_->ContainsIndex(index)) {
+      SplitWithActive(index, text && *text == "left");
+    } else if (*action == "splitNew" && active) {
+      // Chromium's "new split" page lists the open tabs to choose from.
+      if (!tabs_->GetSplitForTab(tabs_->active_index()) && !IsFavorite(active))
+        chrome::NewSplitTab(browser, split_tabs::SplitTabLayout::kSideBySide,
+                            split_tabs::SplitTabCreatedSource::kKeyboardShortcut);
+    } else if (*action == "unsplit") {
+      Unsplit(tabs_->ContainsIndex(index) ? index : tabs_->active_index());
     } else if (*action == "new") {
       // Same path as Cmd+T, so Chromium focuses the address bar for the new
       // tab and Bark presents the centered address bar.
@@ -1445,11 +1510,11 @@ class SidebarMac::Impl : public TabStripModelObserver,
     } else if (*action == "navigate" && text) {
       NavigateTo(AddressURL(*text), false);
     } else if (*action == "back" && active && chrome::CanGoBack(active)) {
-      chrome::GoBack(browser, WindowOpenDisposition::CURRENT_TAB);
+      chrome::GoBack(browser, WindowOpenDisposition::kCurrentTab);
     } else if (*action == "forward" && active && chrome::CanGoForward(active)) {
-      chrome::GoForward(browser, WindowOpenDisposition::CURRENT_TAB);
+      chrome::GoForward(browser, WindowOpenDisposition::kCurrentTab);
     } else if (*action == "reload" && active) {
-      chrome::Reload(browser, WindowOpenDisposition::CURRENT_TAB);
+      chrome::Reload(browser, WindowOpenDisposition::kCurrentTab);
     } else if (*action == "stop" && active) {
       chrome::Stop(browser);
     } else if (*action == "extensions") {
@@ -1486,6 +1551,15 @@ class SidebarMac::Impl : public TabStripModelObserver,
       catalog_.Remove(*text);
     } else if (*action == "manageSpaces") {
       NavigateTo(GURL("chrome://spaces/"), true);
+    } else if (*action == "importArc" && text) {
+      arc_import_result_.reset();
+      ImportArc(*text, base::BindOnce([](base::WeakPtr<Impl> self, base::DictValue result) {
+        if (!self) return;
+        self->arc_import_result_ = std::move(result);
+        self->QueueSnapshot();
+      }, weak_factory_.GetWeakPtr()));
+    } else if (*action == "bookmarks") {
+      NavigateTo(GURL("chrome://bookmarks/"), true);
     } else if (*action == "settings") {
       NavigateTo(GURL("chrome://settings/"), true);
     } else if (*action == "hostActivated" && !group_->closing && !group_->restoring &&
@@ -1574,6 +1648,8 @@ class SidebarMac::Impl : public TabStripModelObserver,
     QueueSnapshot();
   }
 
+  std::optional<base::DictValue> arc_import_result_;
+
   // The newest batch of archived tabs, which "Undo" reopens.
   std::string last_archive_space_;
   size_t last_archive_count_ = 0;
@@ -1606,6 +1682,7 @@ class SidebarMac::Impl : public TabStripModelObserver,
   int width_ = 260;
   int last_layout_width_ = 0;
   bool snapshot_pending_ = false;
+  base::TimeTicks last_snapshot_;
   bool collapsed_ = false;
   bool revealed_ = false;
   // Space presentation; see BeginReveal().

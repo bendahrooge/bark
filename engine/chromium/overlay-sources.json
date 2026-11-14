@@ -14,5 +14,9 @@
   "core/SidebarItems.swift": "packages/core/src/SidebarItems.swift",
   "core/SpaceTheme.swift": "packages/core/src/SpaceTheme.swift",
   "core/StateFile.swift": "packages/core/src/StateFile.swift",
-  "app_icon/icon.png": "apps/macos/resources/icon.png"
+  "app_icon/icon.png": "apps/macos/resources/icon.png",
+  "mac/ArcImportReader.swift": "apps/macos/src/ArcImportReader.swift",
+  "mac/ChromiumArcImport.swift": "apps/macos/src/chromium/ChromiumArcImport.swift",
+  "mac/arc_importer.h": "apps/macos/src/chromium/arc_importer.h",
+  "mac/arc_importer.cc": "apps/macos/src/chromium/arc_importer.cc"
 }

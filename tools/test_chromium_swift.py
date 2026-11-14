@@ -30,7 +30,9 @@ def main():
                         '-module-cache-path', output / 'module-cache', '-I', output,
                         '-L', output, '-lBarkCore', stage / 'mac/ChromiumSidebar.swift',
                         stage / 'mac/SidebarBackground.swift', stage / 'mac/SpaceEditor.swift',
+                        stage / 'mac/ArcImportReader.swift', stage / 'mac/ChromiumArcImport.swift',
                         chromium.ROOT / 'tools/fixtures/ChromiumSidebarTests.swift',
+                        chromium.ROOT / 'tools/fixtures/ArcImportReaderTests.swift',
                         '-o', executable], check=True)
         subprocess.run([executable], check=True)
 

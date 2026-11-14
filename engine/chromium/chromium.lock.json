@@ -2,8 +2,8 @@
   "schema": 1,
   "channel": "Stable",
   "reference_platform": "Mac",
-  "version": "157.0.8103.51",
-  "revision": "653674df293788cf4932c40d914e9e15b41a2d31",
+  "version": "158.0.8127.37",
+  "revision": "b8c2be851f62f6a394ec57955d7f31335d7cb6d4",
   "depot_tools_revision": "c4cdaeebba9b9ed92d041997317ffdbd042158ac",
   "upstream": "https://chromium.googlesource.com/chromium/src.git",
   "depot_tools": "https://chromium.googlesource.com/chromium/tools/depot_tools.git",
@@ -18,15 +18,15 @@
     },
     {
       "file": "0003-branding.patch",
-      "sha256": "cb0a307c4abf50df7a7b6c78d6982301516993ed890d11f4b2916717f77d0709"
+      "sha256": "b919a4f05b7b3b37b2ae32b3ef016f480d3e0f814d866ede19b219e52d070c99"
     },
     {
       "file": "0004-spaces-sessions.patch",
-      "sha256": "5250f7dce208b36ee3ede38996c4217df4c03bbb6ca71deea1073827d05e6bba"
+      "sha256": "9ee557b99802ad075164c95d29b97d2e9f806019dc402ec9d2d386a320ce9c85"
     },
     {
       "file": "0005-extensions.patch",
-      "sha256": "5a885c7fc1170bdd27b0e9a6c49c474b6e6001479d432e7dca71efff2a4e5138"
+      "sha256": "ac2055282061f43ffa205dc2e09bef47a3f16248f3e659b4f62577e666b4dd77"
     },
     {
       "file": "0006-startup-defaults.patch",
@@ -34,11 +34,15 @@
     },
     {
       "file": "0007-spaces-settings-page.patch",
-      "sha256": "85748caa982a048479082f439d67353e74916dc67dda195be614719748f163c2"
+      "sha256": "ca7de4595938895ce759a4c7ae2a65f428da08b72a12863c13d27c1b618205de"
     },
     {
       "file": "0008-bark-about-updates.patch",
       "sha256": "4aac734314c7475c580fa30901fb6025e8d87493f4634a19a2e64209426d7652"
+    },
+    {
+      "file": "0009-immediate-quit.patch",
+      "sha256": "5fc18adde419386007ebdc5c0a596ff19da1267ab4b91d3333559802f5cf0d1e"
     }
   ]
 }

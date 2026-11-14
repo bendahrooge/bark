@@ -205,8 +205,22 @@ def seed_from_github(work, lock):
     ensure_checkout(src, lock)
 
 
-def sync(work, lock, github_mirror=False):
-    doctor(work)
+def gclient_config(custom_vars):
+    return 'solutions = ' + repr([{'name': 'src', 'url': UPSTREAM, 'managed': False, 'custom_deps': {}, 'custom_vars': custom_vars}]) + '\n'
+
+
+def write_gclient(work):
+    """Write Bark's .gclient; official builds need runhooks to fetch PGO profiles."""
+    config = gclient_config({'checkout_pgo_profiles': True})
+    gclient = work / '.gclient'
+    # Checkouts made before the official-build preset lack the PGO variable.
+    if gclient.exists() and gclient.read_text() not in (config, gclient_config({})):
+        raise RuntimeError('Existing .gclient differs from Bark configuration; use a separate build directory')
+    gclient.write_text(config)
+
+
+def sync(work, lock, github_mirror=False, min_free=150):
+    doctor(work, min_free)
     work.mkdir(parents=True, exist_ok=True)
     depot, src = work / 'depot_tools', work / 'src'
     if src.exists() and any(src.iterdir()):
@@ -220,11 +234,7 @@ def sync(work, lock, github_mirror=False):
     run(['git', '-C', depot, 'fetch', 'origin', lock['depot_tools_revision']])
     run(['git', '-C', depot, 'checkout', '--detach', lock['depot_tools_revision']])
     bootstrap_tools(work)
-    config = 'solutions = ' + repr([{'name': 'src', 'url': UPSTREAM, 'managed': False, 'custom_deps': {}, 'custom_vars': {}}]) + '\n'
-    gclient = work / '.gclient'
-    if gclient.exists() and gclient.read_text() != config:
-        raise RuntimeError('Existing .gclient differs from Bark configuration; use a separate build directory')
-    gclient.write_text(config)
+    write_gclient(work)
     env = build_env(depot)
     if github_mirror:
         seed_from_github(work, lock)
@@ -355,6 +365,7 @@ def configure(work, lock, target):
     bootstrap_tools(work)
     prepare(work, lock)
     env = build_env(work / 'depot_tools')
+    write_gclient(work)
     run([work / 'depot_tools/gclient', 'runhooks'], cwd=work, env=env)
     out = work / 'src/out' / ('Bark-' + target)
     out.mkdir(parents=True, exist_ok=True)
@@ -374,6 +385,7 @@ def main():
     parser.add_argument('--target', choices=['mac-arm64', 'linux-x64'])
     parser.add_argument('--github-mirror', action='store_true', help='For sync: seed the pinned source commit from Chromium’s official GitHub mirror')
     parser.add_argument('--jobs', type=int, help='For build: maximum concurrent local compiler jobs')
+    parser.add_argument('--min-free-gb', type=int, default=150, help='For doctor and sync: free disk space preflight budget in GiB')
     args = parser.parse_args()
     if args.github_mirror and args.command != 'sync':
         parser.error('--github-mirror is only supported with sync')
@@ -381,7 +393,9 @@ def main():
         parser.error('--jobs requires build and a positive integer')
     lock = load_lock()
     work = args.work_dir.expanduser().resolve()
-    if args.command == 'doctor': doctor(work)
+    if args.min_free_gb < 1:
+        parser.error('--min-free-gb requires a positive integer')
+    if args.command == 'doctor': doctor(work, args.min_free_gb)
     elif args.command in ('check', 'update'):
         version, revision = latest_release()
         print(f"Pinned: {lock['version']} | Latest Mac stable: {version}")
@@ -397,7 +411,7 @@ def main():
             print('Pin updated. Build, test, and review before release; no artifact was published.')
     elif args.command == 'verify-patches': verify_patches(lock)
     elif args.command == 'verify-deps': verify_dependencies(work)
-    elif args.command == 'sync': sync(work, lock, github_mirror=args.github_mirror)
+    elif args.command == 'sync': sync(work, lock, github_mirror=args.github_mirror, min_free=args.min_free_gb)
     elif args.command == 'prepare': prepare(work, lock)
     else:
         target = args.target or ('mac-arm64' if platform.system() == 'Darwin' else 'linux-x64')
@@ -413,6 +427,9 @@ def main():
                 run([*ninja,
                      'bark_swift_link_check',
                      'obj/bark/sidebar/sidebar_mac.o',
+                     'obj/bark/sidebar/arc_importer.o',
+                     'obj/bark/sidebar/space_test_driver.o',
+                     'obj/bark/spaces_ui/spaces_ui.o',
                      'obj/bark/updater/updater_mac.o',
                      'obj/chrome/browser/ui/views/frame/browser_view/browser_view.o',
                      'obj/chrome/browser/ui/views/frame/browser_view_layout_delegate_impl/browser_view_layout_delegate_impl.o'],

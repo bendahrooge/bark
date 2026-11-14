@@ -1,16 +1,3 @@
-diff --git a/chrome/browser/ui/toolbar/toolbar_actions_model.cc b/chrome/browser/ui/toolbar/toolbar_actions_model.cc
---- a/chrome/browser/ui/toolbar/toolbar_actions_model.cc
-+++ b/chrome/browser/ui/toolbar/toolbar_actions_model.cc
-@@ -158,7 +158,8 @@
- 
-   // We can only pin extensions that have a toolbar action.
-   if (should_add_extension) {
--    if (is_pinned_by_policy || is_pinned_by_feature) {
-+    if ((is_pinned_by_policy || is_pinned_by_feature) &&
-+        !IsActionPinned(extension->id())) {
-       SetActionVisibility(extension->id(), true);
-     }
-   }
 diff --git a/chrome/browser/ui/views/extensions/extensions_menu_coordinator.cc b/chrome/browser/ui/views/extensions/extensions_menu_coordinator.cc
 index 880d7fd32a..6753d8244c 100644
 --- a/chrome/browser/ui/views/extensions/extensions_menu_coordinator.cc
