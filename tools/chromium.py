@@ -205,6 +205,20 @@ def seed_from_github(work, lock):
     ensure_checkout(src, lock)
 
 
+def gclient_config(custom_vars):
+    return 'solutions = ' + repr([{'name': 'src', 'url': UPSTREAM, 'managed': False, 'custom_deps': {}, 'custom_vars': custom_vars}]) + '\n'
+
+
+def write_gclient(work):
+    """Write Bark's .gclient; official builds need runhooks to fetch PGO profiles."""
+    config = gclient_config({'checkout_pgo_profiles': True})
+    gclient = work / '.gclient'
+    # Checkouts made before the official-build preset lack the PGO variable.
+    if gclient.exists() and gclient.read_text() not in (config, gclient_config({})):
+        raise RuntimeError('Existing .gclient differs from Bark configuration; use a separate build directory')
+    gclient.write_text(config)
+
+
 def sync(work, lock, github_mirror=False):
     doctor(work)
     work.mkdir(parents=True, exist_ok=True)
@@ -220,11 +234,7 @@ def sync(work, lock, github_mirror=False):
     run(['git', '-C', depot, 'fetch', 'origin', lock['depot_tools_revision']])
     run(['git', '-C', depot, 'checkout', '--detach', lock['depot_tools_revision']])
     bootstrap_tools(work)
-    config = 'solutions = ' + repr([{'name': 'src', 'url': UPSTREAM, 'managed': False, 'custom_deps': {}, 'custom_vars': {}}]) + '\n'
-    gclient = work / '.gclient'
-    if gclient.exists() and gclient.read_text() != config:
-        raise RuntimeError('Existing .gclient differs from Bark configuration; use a separate build directory')
-    gclient.write_text(config)
+    write_gclient(work)
     env = build_env(depot)
     if github_mirror:
         seed_from_github(work, lock)
@@ -355,6 +365,7 @@ def configure(work, lock, target):
     bootstrap_tools(work)
     prepare(work, lock)
     env = build_env(work / 'depot_tools')
+    write_gclient(work)
     run([work / 'depot_tools/gclient', 'runhooks'], cwd=work, env=env)
     out = work / 'src/out' / ('Bark-' + target)
     out.mkdir(parents=True, exist_ok=True)
