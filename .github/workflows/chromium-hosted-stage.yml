@@ -134,17 +134,17 @@ jobs:
       - name: Check the built browser starts
         if: steps.build.outputs.finished == 'true'
         run: |
-          "$WORK/src/out/Bark-mac-arm64/Bark.app/Contents/MacOS/Bark" --version
+          "$WORK/src/out/Bark-mac-arm64/Bark-dev.app/Contents/MacOS/Bark" --version
           du -sh "$WORK/src/out/Bark-mac-arm64"
       - name: Validate native Chromium extensions
         if: steps.build.outputs.finished == 'true'
         continue-on-error: true
         run: |
           "$WORK/src/third_party/node/mac_arm64/node-darwin-arm64/bin/node" tools/test_chromium_browser.mjs \
-            "$WORK/src/out/Bark-mac-arm64/Bark.app/Contents/MacOS/Bark"
+            "$WORK/src/out/Bark-mac-arm64/Bark-dev.app/Contents/MacOS/Bark"
       - name: Package unsigned app
         if: steps.build.outputs.finished == 'true'
-        run: tar -cpf - -C "$WORK/src/out/Bark-mac-arm64" Bark.app | zstd -T0 -10 > "$RUNNER_TEMP/Bark-mac-arm64-unsigned.tar.zst"
+        run: tar -cpf - -C "$WORK/src/out/Bark-mac-arm64" Bark-dev.app | zstd -T0 -10 > "$RUNNER_TEMP/Bark-mac-arm64-unsigned.tar.zst"
       - name: Upload unsigned app
         if: steps.build.outputs.finished == 'true'
         uses: actions/upload-artifact@v7

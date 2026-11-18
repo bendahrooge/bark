@@ -273,6 +273,7 @@ def prepare(work, lock):
     inputs.update({'overlay/' + name: digest(source) for name, source in overlays.items()})
     previous_outputs = {}
     previous_patch_paths = set()
+    removed_overlays = set()
     if stamp_path.exists():
         stamp = json.loads(stamp_path.read_text())
         if stamp.get('revision') != lock['revision']:
@@ -287,11 +288,12 @@ def prepare(work, lock):
             return
         # Rebuild the stack in a staging directory from the exact pinned HEAD.
         # Only files whose previous output hash still matches may be replaced.
-        # No checkout-wide reset/clean and no dependency/output deletion.
+        # No checkout-wide reset/clean and no dependency or build-cache deletion.
         previous_patch_paths = {name for name in previous_outputs if not name.startswith('bark/')}
-        old_overlay = {name[5:] for name in previous_outputs if name.startswith('bark/')}
-        if old_overlay - overlays.keys():
-            raise RuntimeError('Overlay removals require a clean checkout')
+        # These generated files passed the same ownership/hash checks above as
+        # replacements. Retire them as part of the rollback-protected update.
+        removed_overlays = {name for name in previous_outputs
+                            if name.startswith('bark/') and name[5:] not in overlays}
     elif git(src, 'status', '--porcelain', '--untracked-files=normal'):
         raise RuntimeError('Refusing to patch a dirty Chromium checkout')
     output_paths = sorted(set(patch_paths(patches)) | {'bark/' + name for name in overlays})
@@ -326,18 +328,22 @@ def prepare(work, lock):
             target = stage / 'bark' / name
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, target)
-        changed_paths = sorted(set(patch_targets) | {'bark/' + name for name in overlays})
+        changed_paths = sorted(set(patch_targets) | {'bark/' + name for name in overlays} | removed_overlays)
         original = {name: (src / name).read_bytes() if (src / name).exists() else None for name in changed_paths}
+        removed_metadata = {name: (src / name).stat() for name in removed_overlays}
         modified = []
         try:
             for name in changed_paths:
-                replacement = (stage / name).read_bytes()
+                replacement = None if name in removed_overlays else (stage / name).read_bytes()
                 if replacement == original[name]:
                     continue  # Preserve timestamps and cached header dependents.
                 target = src / name
                 target.parent.mkdir(parents=True, exist_ok=True)
                 modified.append(name)
-                target.write_bytes(replacement)
+                if replacement is None:
+                    target.unlink()
+                else:
+                    target.write_bytes(replacement)
             temporary_stamp = stamp_path.with_suffix('.tmp')
             temporary_stamp.write_text(json.dumps({'revision': lock['revision'], 'inputs': inputs,
                 'outputs': {name: digest(src / name) for name in output_paths}}, indent=2) + '\n')
@@ -347,7 +353,12 @@ def prepare(work, lock):
                 data = original[name]
                 target = src / name
                 if data is None: target.unlink(missing_ok=True)
-                else: target.write_bytes(data)
+                else:
+                    target.write_bytes(data)
+                    if name in removed_metadata:
+                        metadata = removed_metadata[name]
+                        target.chmod(metadata.st_mode & 0o7777)
+                        os.utime(target, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
             raise
 
 
@@ -427,7 +438,7 @@ def main():
                 run([*ninja,
                      'bark_swift_link_check',
                      'obj/bark/sidebar/sidebar_mac.o',
-                     'obj/bark/sidebar/arc_importer.o',
+                     'obj/bark/sidebar/bark_importer.o',
                      'obj/bark/sidebar/space_test_driver.o',
                      'obj/bark/spaces_ui/spaces_ui.o',
                      'obj/bark/updater/updater_mac.o',
@@ -435,7 +446,8 @@ def main():
                      'obj/chrome/browser/ui/views/frame/browser_view_layout_delegate_impl/browser_view_layout_delegate_impl.o'],
                     cwd=work / 'src', env=env)
             run([*ninja, 'chrome'], cwd=work / 'src', env=env)
-            print(f'Built Bark browser in {out}; use tools/release_macos.py for signed distribution.')
+            artifact = out / 'Bark-dev.app' if target.startswith('mac-') else out / 'chrome'
+            print(f'Built development browser: {artifact}; use tools/release_macos.py for signed distribution.')
     return 0
 
 

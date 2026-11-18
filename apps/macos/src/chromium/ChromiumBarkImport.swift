@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 import BarkCore
 
-struct ChromiumArcImportResult: Decodable {
+struct ChromiumBarkImportResult: Decodable {
     let request: String
     let success: Bool
     let profiles: Int
@@ -17,20 +17,20 @@ struct ChromiumArcImportResult: Decodable {
 
 /// A bounded, value-only request. Chromium owns the destination profiles and
 /// writes through its normal history, bookmarks and space services.
-enum ChromiumArcImport {
-    static func payload(plan: ArcImportPlan, root: URL, profiles: Set<String>, spaces: Set<String>,
+enum ChromiumBarkImport {
+    static func payload(plan: BarkImportPlan, root: URL, profiles: Set<String>, spaces: Set<String>,
                         pinned: Bool, open: Bool, folders: Bool, bookmarks: Bool,
                         history: Bool, extensions: Bool, request: String) throws -> String {
         guard !profiles.isEmpty,
               !history || profiles.isDisjoint(with: plan.unavailableHistoryProfiles),
               !extensions || profiles.isDisjoint(with: plan.unavailableExtensionProfiles),
               !bookmarks || profiles.isDisjoint(with: plan.unavailableBookmarkProfiles) else {
-            throw ArcImportError.unavailableCategory
+            throw BarkImportError.unavailableCategory
         }
         var output: [[String: Any]] = []
         var tabCount = 0, spaceCount = 0
         for directory in profiles.sorted() {
-            let source = ArcImport.identifier(root.resolvingSymlinksInPath().standardizedFileURL.path + "/" + directory)
+            let source = BarkImport.identifier(root.resolvingSymlinksInPath().standardizedFileURL.path + "/" + directory)
             let selected = plan.spaces.filter { $0.profileDirectory == directory && spaces.contains($0.id) }
             var importedSpaces: [[String: Any]] = []
             var nodes: [[String: Any]] = []
@@ -42,7 +42,7 @@ enum ChromiumArcImport {
             for item in selected {
                 let tabs = item.tabs.filter { $0.pinned ? pinned : open }
                 tabCount += tabs.count
-                importedSpaces.append(["id": ArcImport.identifier(source + item.id), "name": item.space.name,
+                importedSpaces.append(["id": BarkImport.identifier(source + item.id), "name": item.space.name,
                                        "theme": item.space.theme.rawValue, "emoji": item.space.emoji,
                                        "tabs": tabs.map { ["id": $0.id, "title": $0.title, "url": $0.url, "pinned": $0.pinned] as [String: Any] }])
                 if folders {
@@ -62,8 +62,8 @@ enum ChromiumArcImport {
             // space catalog, including a durable source-to-profile mapping.
             let name = plan.profileNames[directory] ?? (directory == "Default" ? "Personal" : directory)
             if importedSpaces.isEmpty {
-                importedSpaces.append(["id": ArcImport.identifier(source + "/profile"), "name": String(name.prefix(32)),
-                                       "theme": "gray", "emoji": "🍃", "tabs": []])
+                importedSpaces.append(["id": BarkImport.identifier(source + "/profile"), "name": String(name.prefix(32)),
+                                       "theme": "gray", "emoji": "", "tabs": []])
             }
             spaceCount += importedSpaces.count
             if bookmarks {
@@ -73,29 +73,29 @@ enum ChromiumArcImport {
             if extensions, let items = plan.extensions[directory], !items.isEmpty {
                 nodes.append(node("extensions", "", "Extensions to reinstall"))
                 for item in items {
-                    nodes.append(node("extension/" + item.id, "extensions", item.name + (item.enabled ? "" : " (disabled in Arc)"),
+                    nodes.append(node("extension/" + item.id, "extensions", item.name + (item.enabled ? "" : " (disabled in source browser)"),
                                       "https://chromewebstore.google.com/detail/" + item.id))
                 }
                 extensionCount = items.count
             }
             let visits = history ? plan.history[directory] ?? [] : []
-            guard nodes.count <= 20_000, visits.count <= BrowserState.historyLimit else { throw ArcImportError.capacity }
-            output.append(["source": source, "name": "Arc — " + name, "spaces": importedSpaces,
+            guard nodes.count <= 20_000, visits.count <= BrowserState.historyLimit else { throw BarkImportError.capacity }
+            output.append(["source": source, "name": "Imported — " + name, "spaces": importedSpaces,
                            "bookmarks": nodes, "extensions": extensionCount,
                            "history": visits.map { ["title": $0.title, "url": $0.url, "visitedAt": $0.visitedAt] as [String: Any] }])
         }
-        guard spaceCount <= 100, tabCount <= 5_000 else { throw ArcImportError.capacity }
+        guard spaceCount <= 100, tabCount <= 5_000 else { throw BarkImportError.capacity }
         let data = try JSONSerialization.data(withJSONObject: ["request": request, "profiles": output])
-        guard data.count <= 64 * 1024 * 1024 else { throw ArcImportError.capacity }
+        guard data.count <= 64 * 1024 * 1024 else { throw BarkImportError.capacity }
         return String(decoding: data, as: UTF8.self)
     }
 }
 
-struct ChromiumArcImportView: View {
+struct ChromiumBarkImportView: View {
     @ObservedObject var model: ChromiumSidebarModel
     @Environment(\.dismiss) private var dismiss
-    @State private var root = ArcImportReader.defaultRoot
-    @State private var plan: ArcImportPlan?
+    @State private var root = BarkImportReader.defaultRoot
+    @State private var plan: BarkImportPlan?
     @State private var selectedProfiles = Set<String>()
     @State private var selectedSpaces = Set<String>()
     @State private var pinned = true
@@ -109,9 +109,9 @@ struct ChromiumArcImportView: View {
     @State private var error: String?
     @State private var request = UUID().uuidString
 
-    private var result: ChromiumArcImportResult? {
-        guard model.snapshot.arcImportResult?.request == request else { return nil }
-        return model.snapshot.arcImportResult
+    private var result: ChromiumBarkImportResult? {
+        guard model.snapshot.browserImportResult?.request == request else { return nil }
+        return model.snapshot.browserImportResult
     }
     private var profileIDs: [String] {
         guard let plan else { return [] }
@@ -126,7 +126,7 @@ struct ChromiumArcImportView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text(result?.success == true ? "Imported from Arc" : "Import from Arc").font(.title2.bold())
+            Text(result?.success == true ? "Imported into Bark" : "Import into Bark").font(.title2.bold())
             if let result {
                 resultView(result)
             } else {
@@ -134,7 +134,7 @@ struct ChromiumArcImportView: View {
                     .foregroundStyle(.secondary)
                 HStack {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("Arc data folder").font(.caption.bold())
+                        Text("Source browser data folder").font(.caption.bold())
                         Text(root.path).font(.caption).foregroundStyle(.secondary).lineLimit(2).textSelection(.enabled)
                     }
                     Spacer()
@@ -142,7 +142,7 @@ struct ChromiumArcImportView: View {
                     Button("Scan again") { scan() }
                 }.disabled(scanning || importing)
                 if scanning {
-                    HStack { ProgressView().controlSize(.small); Text("Reading Arc data…") }.padding(.vertical, 20)
+                    HStack { ProgressView().controlSize(.small); Text("Reading browser data…") }.padding(.vertical, 20)
                 } else if let plan {
                     ScrollView {
                         VStack(alignment: .leading, spacing: 12) {
@@ -158,9 +158,9 @@ struct ChromiumArcImportView: View {
                             Toggle("Bookmarks", isOn: $bookmarks)
                             Toggle("Recent browsing history", isOn: $history)
                             Toggle("Extension reinstall list", isOn: $extensions)
-                            Text("Favorites and tabs inside Arc folders appear as pinned tabs in Bark. Folder structure is preserved under Bookmarks → Imported from Arc. Extensions get Chrome Web Store links in each imported profile’s bookmarks so you can review and reinstall them.")
+                            Text("Bark pins favorites and tabs from sidebar folders. The imported profile’s bookmarks preserve the folder structure. Extensions get Chrome Web Store links in each imported profile’s bookmarks so you can review and reinstall them.")
                                 .font(.caption).foregroundStyle(.secondary)
-                            Text("Saved passwords, cookies, sign-ins, extension settings, and Arc-specific features such as Boosts and Easels aren’t transferred.")
+                            Text("The import skips saved passwords, cookies, sign-ins, extension settings, Boosts, and Easels.")
                                 .font(.caption).foregroundStyle(.secondary)
                             ForEach(Array(plan.warnings.enumerated()), id: \.offset) { _, warning in
                                 Label(warning, systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(.orange)
@@ -171,7 +171,7 @@ struct ChromiumArcImportView: View {
                 }
                 if let error { Text(error).font(.callout).foregroundStyle(.red).textSelection(.enabled) }
                 if blockedCategory && plan != nil && !scanning {
-                    Text("A selected category is unavailable. Uncheck it above, or quit Arc and scan again.")
+                    Text("A selected category is unavailable. Deselect it or quit the source browser and scan again.")
                         .font(.caption).foregroundStyle(.orange)
                 }
             }
@@ -193,7 +193,7 @@ struct ChromiumArcImportView: View {
             .task { scan() }
     }
 
-    private func profileRow(_ directory: String, plan: ArcImportPlan) -> some View {
+    private func profileRow(_ directory: String, plan: BarkImportPlan) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Toggle(plan.profileNames[directory] ?? directory, isOn: Binding(
                 get: { selectedProfiles.contains(directory) },
@@ -203,14 +203,14 @@ struct ChromiumArcImportView: View {
             ForEach(spaces) { space in
                 Toggle(isOn: Binding(get: { selectedSpaces.contains(space.id) },
                                      set: { if $0 { selectedSpaces.insert(space.id) } else { selectedSpaces.remove(space.id) } })) {
-                    Text("\(space.space.emoji) \(space.space.name) · \(space.tabs.count) \(space.tabs.count == 1 ? "tab" : "tabs")")
+                    Text("\(space.space.emoji.isEmpty ? "" : space.space.emoji + " ")\(space.space.name) · \(space.tabs.count) \(space.tabs.count == 1 ? "tab" : "tabs")")
                 }.padding(.leading, 24).disabled(!selectedProfiles.contains(directory))
             }
             Text("\((plan.history[directory] ?? []).count.formatted()) history entries · \((plan.extensions[directory] ?? []).count) \((plan.extensions[directory] ?? []).count == 1 ? "extension" : "extensions")")
                 .font(.caption).foregroundStyle(.secondary).padding(.leading, 24)
         }
     }
-    @ViewBuilder private func resultView(_ result: ChromiumArcImportResult) -> some View {
+    @ViewBuilder private func resultView(_ result: ChromiumBarkImportResult) -> some View {
         Label(result.success ? "Your import is complete." : "The import could not finish.",
               systemImage: result.success ? "checkmark.circle.fill" : "exclamationmark.triangle")
             .foregroundStyle(result.success ? Color.green : Color.orange)
@@ -219,7 +219,7 @@ struct ChromiumArcImportView: View {
             Text("\(expired.formatted()) older history entries were outside Bark’s history retention period and were skipped.").font(.caption).foregroundStyle(.secondary)
         }
         if result.extensions > 0 {
-            Text("\(result.extensions) extensions are listed under Bookmarks → Imported from Arc → Extensions to reinstall in their imported profiles.")
+            Text("\(result.extensions) extensions are listed in the “Extensions to reinstall” folder in the imported profiles’ bookmarks.")
         }
         Text("Select an imported space to open its tabs. You can import again without duplicating items already imported.")
             .foregroundStyle(.secondary)
@@ -228,8 +228,8 @@ struct ChromiumArcImportView: View {
     }
     private func chooseFolder() {
         let panel = NSOpenPanel()
-        panel.title = "Choose Arc’s Application Support folder"
-        panel.message = "Choose the Arc folder containing StorableSidebar.json and User Data."
+        panel.title = "Choose the source browser’s Application Support folder"
+        panel.message = "Choose the folder containing StorableSidebar.json and User Data."
         panel.canChooseDirectories = true; panel.canChooseFiles = false
         panel.allowsMultipleSelection = false; panel.directoryURL = root
         if panel.runModal() == .OK, let url = panel.url { root = url; scan() }
@@ -240,12 +240,12 @@ struct ChromiumArcImportView: View {
         let folder = root
         Task { @MainActor in
             do {
-                let scanned = try await Task.detached(priority: .userInitiated) { try ArcImportReader.read(folder) }.value
+                let scanned = try await Task.detached(priority: .userInitiated) { try BarkImportReader.read(folder) }.value
                 plan = scanned
                 selectedProfiles = Set(scanned.profileNames.keys).union(scanned.spaces.map(\.profileDirectory))
                 selectedSpaces = Set(scanned.spaces.map(\.id))
             } catch {
-                self.error = "Couldn’t read Arc data. Quit Arc and try again, or choose its Application Support folder. \(error.localizedDescription)"
+                self.error = "Bark couldn’t read the selected folder. Quit the source browser and try again, or choose its Application Support folder. \(error.localizedDescription)"
             }
             scanning = false
         }
@@ -253,23 +253,23 @@ struct ChromiumArcImportView: View {
     private func startImport() {
         guard let plan else { return }
         do {
-            let payload = try ChromiumArcImport.payload(plan: plan, root: root, profiles: selectedProfiles, spaces: selectedSpaces,
+            let payload = try ChromiumBarkImport.payload(plan: plan, root: root, profiles: selectedProfiles, spaces: selectedSpaces,
                 pinned: pinned, open: open, folders: folders, bookmarks: bookmarks, history: history, extensions: extensions, request: request)
             importing = true; error = nil
-            model.send("importArc", text: payload)
+            model.send("importBrowserData", text: payload)
         } catch { self.error = error.localizedDescription }
     }
 }
 
 /// Keep import discoverable even when the sidebar is collapsed.
-@MainActor final class ArcImportMenu: NSObject, NSMenuItemValidation {
-    static let shared = ArcImportMenu()
+@MainActor final class BarkImportMenu: NSObject, NSMenuItemValidation {
+    static let shared = BarkImportMenu()
     private let models = NSHashTable<ChromiumSidebarModel>.weakObjects()
     private var item: NSMenuItem?
     func register(_ model: ChromiumSidebarModel) {
         models.add(model)
         guard item?.menu == nil, let menu = NSApp.mainMenu?.items.first?.submenu else { return }
-        let entry = NSMenuItem(title: "Import from Arc…", action: #selector(showImport(_:)), keyEquivalent: "")
+        let entry = NSMenuItem(title: "Import into Bark…", action: #selector(showImport(_:)), keyEquivalent: "")
         entry.target = self
         menu.insertItem(entry, at: min(3, menu.numberOfItems))
         item = entry
@@ -278,5 +278,5 @@ struct ChromiumArcImportView: View {
         models.allObjects.first { $0.hostView?.window != nil && $0.hostView?.window === NSApp.keyWindow && !$0.isIncognito }
     }
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool { current != nil }
-    @objc private func showImport(_ sender: Any?) { current?.arcImportRequests += 1 }
+    @objc private func showImport(_ sender: Any?) { current?.browserImportRequests += 1 }
 }

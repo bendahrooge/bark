@@ -24,12 +24,11 @@ def stage(source, destination, info_updates=None):
     info_path = destination / 'Contents/Info.plist'
     info = plistlib.loads(info_path.read_bytes())
     info['CFBundleIdentifier'] = 'app.bark.browser.chromium-development'
-    info['CFBundleName'] = info['CFBundleDisplayName'] = 'Bark'
-    # The packaged, signed app owns the user's profile and its keychain key.
-    # The raw build output uses separate ones (see 0001-identity.patch), so
-    # running it can never trip Chromium's settings tamper protection here.
-    info['CrProductDirName'] = 'BarkChromium'
-    info['BarkSafeStorageName'] = 'Bark Safe Storage'
+    info['CFBundleName'] = info['CFBundleDisplayName'] = 'Bark-dev'
+    # Development packages have their own profile/keychain. Release staging
+    # explicitly supplies the production identity and existing data locations.
+    info['CrProductDirName'] = 'BarkChromium Development'
+    info['BarkSafeStorageName'] = 'Bark Development Safe Storage'
     info['CFBundleIconFile'] = 'Bark.icns'
     info.pop('CFBundleIconName', None)
     if info_updates:
@@ -63,8 +62,8 @@ def package(source, destination, identity):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--source', type=Path, default=ROOT / '.deps/chromium-source/src/out/Bark-mac-arm64/Bark.app')
-    parser.add_argument('--output', type=Path, default=ROOT / 'release/chromium-development/Bark Chromium.app')
+    parser.add_argument('--source', type=Path, default=ROOT / '.deps/chromium-source/src/out/Bark-mac-arm64/Bark-dev.app')
+    parser.add_argument('--output', type=Path, default=ROOT / 'release/chromium-development/Bark-dev.app')
     parser.add_argument('--identity', required=True, help='Existing development signing identity; use - only for disposable ad-hoc tests')
     args = parser.parse_args()
     package(args.source, args.output, args.identity)

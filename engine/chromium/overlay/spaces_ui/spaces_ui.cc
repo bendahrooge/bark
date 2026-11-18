@@ -137,7 +137,7 @@ class SpacesHandler : public content::WebUIMessageHandler,
     std::map<std::string, int> counts;
     for (const auto& value : catalog_.List()) {
       const auto* item = value.GetIfDict();
-      if (!item) continue;
+      if (!item || item->FindBool("hidden").value_or(false)) continue;
       const auto* id = item->FindString("id");
       const auto* profile = item->FindString("profile");
       if (!id || !profile || !keys.contains(*profile)) continue;
@@ -190,7 +190,7 @@ class SpacesHandler : public content::WebUIMessageHandler,
     const std::string& emoji = (*values)[3];
     const std::string name = CleanName((*values)[1]);
     if (name.empty() || std::ranges::find(kThemes, theme) == std::end(kThemes) ||
-        emoji.empty() || emoji.size() > 64) {
+        emoji.size() > 64) {
       Push();
       return;
     }
@@ -206,7 +206,19 @@ class SpacesHandler : public content::WebUIMessageHandler,
 
   // [id]
   void HandleDeleteSpace(const base::ListValue& args) {
-    if (auto values = Strings(args, 1)) catalog_.Remove((*values)[0]);
+    if (auto values = Strings(args, 1)) {
+      std::string replacement;
+      for (const auto& value : catalog_.List()) {
+        const auto* space = value.GetIfDict();
+        const auto* id = space ? space->FindString("id") : nullptr;
+        const auto* profile = space ? space->FindString("profile") : nullptr;
+        if (id && *id != (*values)[0] && !catalog_.IsHidden(*id) && profile && FindProfile(*profile)) {
+          replacement = *id;
+          break;
+        }
+      }
+      catalog_.Remove((*values)[0], replacement);
+    }
     Push();
   }
 
@@ -237,7 +249,7 @@ class SpacesHandler : public content::WebUIMessageHandler,
           // check first, on the UI thread, so only one is created.
           SpaceCatalog catalog(g_browser_process->local_state());
           const std::string key = ProfileKey(profile->GetPath());
-          if (catalog.FirstForProfile(key).empty()) catalog.Create(name, key, "gray", "🍃");
+          if (catalog.FirstForProfile(key).empty()) catalog.Create(name, key, "gray", "");
         }, name));
   }
 

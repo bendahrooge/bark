@@ -14,15 +14,15 @@
     },
     {
       "file": "0002-mac-sidebar.patch",
-      "sha256": "33657ce0dadfec01e00ac8f98645dedda582b3b709f440c11102c65bdff7df3d"
+      "sha256": "35dab0a6816ff7f6998332e00392d52ed2afc79e0b64d4688c5af95c072deb97"
     },
     {
       "file": "0003-branding.patch",
-      "sha256": "b919a4f05b7b3b37b2ae32b3ef016f480d3e0f814d866ede19b219e52d070c99"
+      "sha256": "b8ee454e3da047b8c3982da3cc019c1828ddc905a83f98125801a4d36cbae4da"
     },
     {
       "file": "0004-spaces-sessions.patch",
-      "sha256": "9ee557b99802ad075164c95d29b97d2e9f806019dc402ec9d2d386a320ce9c85"
+      "sha256": "b688f13163f0168f1ba55840a71e7c3fa3d8f542232c8713a9c7df1058df6a56"
     },
     {
       "file": "0005-extensions.patch",
@@ -43,6 +43,54 @@
     {
       "file": "0009-immediate-quit.patch",
       "sha256": "5fc18adde419386007ebdc5c0a596ff19da1267ab4b91d3333559802f5cf0d1e"
+    },
+    {
+      "file": "0010-lazy-pinned-tabs.patch",
+      "sha256": "de9c2a19739c93f3b09069134e279cf33a070ed86cd344d31b5fef347e413f19"
+    },
+    {
+      "file": "0011-close-pins-without-removing.patch",
+      "sha256": "bfeb9f91bd9628c96c4fba28e2c4115344f44fae498122447e158b5b3b21cdb4"
+    },
+    {
+      "file": "0012-development-app-identity.patch",
+      "sha256": "010b05219cf49fd459e2f553f05d9de545231ed19af7d032df14a1b2b069395b"
+    },
+    {
+      "file": "0013-bark-features.patch",
+      "sha256": "ec7a604cf7a076d91b4140586790506f9e737dee8afb6dce368b3cd672e1922f"
+    },
+    {
+      "file": "0014-reuse-new-tab.patch",
+      "sha256": "27f297ed81d1c11c4d8b70b28b672bae714610a28f504917573d939a01444007"
+    },
+    {
+      "file": "0015-no-notification-banners.patch",
+      "sha256": "73385e3ceb8a96143b000e741aa649e512746fa25c785606659bb5861d2ab875"
+    },
+    {
+      "file": "0016-page-frame.patch",
+      "sha256": "cfb9ef85ee2858abe2226e39ce9a3c1ba3da929bfb85281b7ddb949761b41a3d"
+    },
+    {
+      "file": "0017-native-preferences.patch",
+      "sha256": "2511026f064de7910dc38ce49e37dbef0d590681a8f0625d86059a351d22e3ef"
+    },
+    {
+      "file": "0018-external-link-startup.patch",
+      "sha256": "28481c21665c9fbaf945012105039e22375031e976b6e3bfdaae3ced39caa50b"
+    },
+    {
+      "file": "0019-remove-new-tab-promos.patch",
+      "sha256": "eace262808eba1bb3be2b38386185a5abe19a556828533b273aa22c634dd01f5"
+    },
+    {
+      "file": "0020-remove-tab-tutorial-promos.patch",
+      "sha256": "781846a9127faefb2ddcd93d667a16bcd050ea09fd125dde1e99908d7d5e7801"
+    },
+    {
+      "file": "0021-release-new-tab.patch",
+      "sha256": "8ed9b4826b286228bc839184b37ce972209efae884b39a677fd6ee6782d9a96c"
     }
   ]
 }

@@ -2,6 +2,7 @@ import hashlib
 import json
 from pathlib import Path
 import plistlib
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -11,6 +12,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import release_macos as release
 import publish_release as publish
+import package_chromium_macos as package
 
 
 class ReleaseTests(unittest.TestCase):
@@ -20,6 +22,10 @@ class ReleaseTests(unittest.TestCase):
     def test_release_identity_and_signed_updates(self):
         info = release.release_info(self.config, '0.1.0', '1')
         self.assertEqual(info['CFBundleIdentifier'], 'app.bark.browser')
+        self.assertEqual(info['CFBundleName'], 'Bark')
+        self.assertEqual(info['CFBundleDisplayName'], 'Bark')
+        self.assertEqual(info['CrProductDirName'], 'BarkChromium')
+        self.assertEqual(info['BarkSafeStorageName'], 'Bark Safe Storage')
         self.assertEqual(info['CFBundleVersion'], '1')
         self.assertEqual(info['SUFeedURL'], 'https://github.com/bendahrooge/bark/releases/latest/download/appcast.xml')
         self.assertTrue(info['SURequireSignedFeed'])
@@ -30,6 +36,40 @@ class ReleaseTests(unittest.TestCase):
         for version, build in [('v1.0.0', '1'), ('../1.0.0', '1'), ('1.0.0', '-1'), ('1.0.0', '0'), ('1.0.0', '1;echo bad')]:
             with self.subTest(version=version, build=build), self.assertRaises(ValueError):
                 release.release_info(self.config, version, build)
+
+    def test_staging_separates_development_and_release_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / 'source/Bark-dev.app'
+            executable = source / 'Contents/MacOS/Bark'
+            executable.parent.mkdir(parents=True)
+            executable.touch()
+            (source / 'Contents/Info.plist').write_bytes(plistlib.dumps({
+                'CFBundleExecutable': 'Bark', 'CFBundleName': 'Bark-dev',
+                'CFBundleIdentifier': 'app.bark.browser.chromium-development',
+                'CFBundleIconName': 'AppIcon',
+            }))
+
+            def stage_command(args, **kwargs):
+                if args[0] == 'ditto':
+                    shutil.copytree(args[1], args[2])
+
+            with patch.object(package.subprocess, 'check_output', return_value=''), \
+                    patch.object(package.subprocess, 'run', side_effect=stage_command):
+                dev, production = root / 'Bark-dev.app', root / 'Bark.app'
+                package.stage(source, dev)
+                package.stage(source, production, release.release_info(self.config, '0.1.0', '1'))
+            dev_info = plistlib.loads((dev / 'Contents/Info.plist').read_bytes())
+            release_info = plistlib.loads((production / 'Contents/Info.plist').read_bytes())
+            self.assertEqual(dev_info['CFBundleName'], 'Bark-dev')
+            self.assertEqual(dev_info['CFBundleDisplayName'], 'Bark-dev')
+            self.assertEqual(release_info['CFBundleName'], 'Bark')
+            self.assertEqual(release_info['CFBundleDisplayName'], 'Bark')
+            for key in ['CFBundleIdentifier', 'CrProductDirName', 'BarkSafeStorageName']:
+                self.assertNotEqual(dev_info[key], release_info[key])
+            for info in [dev_info, release_info]:
+                self.assertEqual(info['CFBundleExecutable'], 'Bark')
+                self.assertNotIn('CFBundleIconName', info)
 
     def test_signing_inventory_includes_nested_tools_without_following_symlinks(self):
         with tempfile.TemporaryDirectory() as directory:

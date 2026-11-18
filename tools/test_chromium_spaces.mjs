@@ -163,6 +163,7 @@ try {
   const personal = current.activeSpaceId;
   const originalBounds = current.bounds;
   assert.equal(current.profiles.length, 1);
+  assert.equal(current.spaces.find(space => space.id === personal).emoji, '👤', 'A fresh Personal space uses the person icon');
   await command('navigate', {windowId: firstWindow, text: urls.personal});
   const firstPage = await sessionFor(browser, urls.personal);
   await browser.send('Extensions.loadUnpacked', {path: path.join(root, 'tools/fixtures/extension')});
@@ -291,6 +292,28 @@ try {
   await waitState(state => state.windows.length === 0, 'closing the logical window closes background profile hosts');
   await browser.send('Browser.getVersion');
   checks.push('Closing the Bark window also closes its background profile hosts without crashing');
+  await browser.close(); browser = null;
+
+  // Reopen an older stock Personal space, then choose the old icon explicitly.
+  // The migration must run once without overriding a later user choice.
+  const localStatePath = path.join(profile, 'Local State');
+  const localState = JSON.parse(fs.readFileSync(localStatePath, 'utf8'));
+  const stockPersonal = localState.bark.spaces.find(space => space.id === personal);
+  Object.assign(stockPersonal, {name: 'Personal', theme: 'gray', emoji: '🍃'});
+  delete stockPersonal.personalIconMigrated;
+  fs.writeFileSync(localStatePath, JSON.stringify(localState));
+  browser = launch('personal-icon-migration');
+  state = await waitState(state => visible(state)[0]?.spaces.some(space => space.id === personal), 'Personal icon migration');
+  assert.equal(visible(state)[0].spaces.find(space => space.id === personal).emoji, '👤');
+  assert.equal(visible(state)[0].spaces.find(space => space.id === research).emoji, '📚', 'A custom space icon is preserved');
+  checks.push('Fresh and unchanged legacy Personal spaces use the person icon while custom spaces retain their icons');
+  await command('customizeSpace', {windowId: visible(state)[0].windowId,
+    metadata: {space: personal, name: 'Personal', theme: 'gray', emoji: '🍃'}});
+  await browser.close(); browser = null;
+  browser = launch('personal-custom-icon');
+  state = await waitState(state => visible(state)[0]?.spaces.some(space => space.id === personal), 'custom Personal icon');
+  assert.equal(visible(state)[0].spaces.find(space => space.id === personal).emoji, '🍃');
+  checks.push('Choosing a different Personal icon after migration survives restart');
   await browser.close(); browser = null;
   report.passed = true;
   console.log(`${checks.length} native space/profile/settings checks passed`);

@@ -42,7 +42,7 @@ jobs:
           flags=(--all --headless)
           if [[ '${{ inputs.target }}' == 'mac-arm64' ]]; then
             node_binary="$source_root/third_party/node/mac_arm64/node-darwin-arm64/bin/node"
-            browser_binary="$source_root/out/Bark-mac-arm64/Bark.app/Contents/MacOS/Bark"
+            browser_binary="$source_root/out/Bark-mac-arm64/Bark-dev.app/Contents/MacOS/Bark"
             if [[ '${{ inputs.native_ui_checks }}' == 'true' ]]; then
               flags=(--all)
             fi

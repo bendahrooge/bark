@@ -1,0 +1,82 @@
+diff --git a/chrome/browser/ui/browser_commands.cc b/chrome/browser/ui/browser_commands.cc
+--- a/chrome/browser/ui/browser_commands.cc
++++ b/chrome/browser/ui/browser_commands.cc
+@@ -29,6 +29,9 @@
+ #include "base/time/time.h"
+ #include "base/trace_event/trace_event.h"
+ #include "build/build_config.h"
++#if BUILDFLAG(IS_MAC)
++#include "bark/pinned_tab_close.h"
++#endif
+ #include "chrome/app/chrome_command_ids.h"
+ #include "chrome/browser/autocomplete/autocomplete_classifier_factory.h"
+ #include "chrome/browser/bookmarks/bookmark_model_factory.h"
+@@ -1462,6 +1465,12 @@
+     return;
+   }
+ 
++#if BUILDFLAG(IS_MAC)
++  if (bark::HandlePinnedTabClose(browser, active_tab->GetContents())) {
++    return;
++  }
++#endif
++
+   // If the selection model consists of only the indices of a single split tab,
+   // decide if just the active tab in the split is closed instead of all tabs in
+   // the split.
+diff --git a/chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.cc b/chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.cc
+--- a/chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.cc
++++ b/chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.cc
+@@ -3,6 +3,11 @@
+ // found in the LICENSE file.
+ 
+ #include "chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.h"
++
++#include "build/build_config.h"
++#if BUILDFLAG(IS_MAC)
++#include "bark/pinned_tab_close.h"
++#endif
+ 
+ #include "base/check_deref.h"
+ #include "base/feature_list.h"
+@@ -917,6 +922,14 @@
+     content::WebContents* web_contents,
+     bool proceed,
+     bool* proceed_to_fire_unload) {
++#if BUILDFLAG(IS_MAC)
++  if (bark::HandlePinnedTabClose(&browser_.get(), web_contents,
++          proceed ? bark::PinnedTabCloseAction::kConfirm
++                  : bark::PinnedTabCloseAction::kCancel)) {
++    *proceed_to_fire_unload = false;
++    return;
++  }
++#endif
+   unload_controller_->BeforeUnloadFired(web_contents, proceed,
+                                         proceed_to_fire_unload);
+ }
+diff --git a/chrome/browser/ui/BUILD.gn b/chrome/browser/ui/BUILD.gn
+--- a/chrome/browser/ui/BUILD.gn
++++ b/chrome/browser/ui/BUILD.gn
+@@ -839,6 +839,9 @@
+   source_set("browser_commands_impl") {
+     sources = [ "browser_commands.cc" ]
+     public_deps = [ ":browser_commands" ]
++    if (is_mac) {
++      public_deps += [ "//bark:pinned_tab_close" ]
++    }
+     deps = [
+       ":accelerator_utils_headers",
+       ":browser_command_controller",
+diff --git a/chrome/browser/ui/browser_web_contents_delegate/BUILD.gn b/chrome/browser/ui/browser_web_contents_delegate/BUILD.gn
+--- a/chrome/browser/ui/browser_web_contents_delegate/BUILD.gn
++++ b/chrome/browser/ui/browser_web_contents_delegate/BUILD.gn
+@@ -46,6 +46,9 @@
+       "//content/public/browser",
+       "//ui/base",
+     ]
++    if (is_mac) {
++      deps += [ "//bark:pinned_tab_close" ]
++    }
+     if (use_aura) {
+       deps += [ "//chrome/browser/ui:overscroll_pref_manager" ]
+     }

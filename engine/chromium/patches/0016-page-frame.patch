@@ -1,0 +1,136 @@
+diff --git a/chrome/browser/ui/views/frame/multi_contents_view.cc b/chrome/browser/ui/views/frame/multi_contents_view.cc
+--- a/chrome/browser/ui/views/frame/multi_contents_view.cc
++++ b/chrome/browser/ui/views/frame/multi_contents_view.cc
+@@ -54,6 +54,17 @@
+ 
+ namespace {
+ constexpr int kSnapDistance = 15;
++constexpr int kBarkPageGutter = 7;
++constexpr float kBarkPageCornerRadius = 10;
++
++bool HasBarkPageFrame(BrowserView* browser_view) {
++#if BUILDFLAG(IS_MAC)
++  // Bark's anchors exist only in normal sidebar windows outside fullscreen.
++  return browser_view->GetBarkToolbarAnchor(false) != nullptr;
++#else
++  return false;
++#endif
++}
+ }
+ 
+ void MultiContentsView::ContentsSeparators::Reset() {
+@@ -221,14 +232,20 @@
+ }
+ 
+ void MultiContentsView::SetBackgroundRadii(const gfx::RoundedCornersF& radii) {
+-  if (radii == GetBackgroundRadii()) {
++  requested_background_radii_ = radii;
++  const auto corners = HasBarkPageFrame(browser_view_)
++                           ? gfx::RoundedCornersF(kBarkPageCornerRadius)
++                           : radii;
++  if (corners == GetBackgroundRadii()) {
+     return;
+   }
+ 
+-  background_view_->SetRoundedCorners(radii);
+-
+-  if (!IsInSplitView()) {
+-    GetActiveContentsContainerView()->SetRoundedCorners(radii);
++  background_view_->SetRoundedCorners(corners);
++
++  if (IsInSplitView()) {
++    UpdateContentsBorderAndOverlay();
++  } else {
++    GetActiveContentsContainerView()->SetRoundedCorners(corners);
+     GetInactiveContentsContainerView()->SetRoundedCorners(
+         gfx::RoundedCornersF());
+   }
+@@ -506,6 +523,12 @@
+   const int height = size_bounds.height().value();
+ 
+   gfx::Rect available_space = gfx::Rect(width, height);
++  const bool bark_frame = HasBarkPageFrame(browser_view_);
++  if (bark_frame) {
++    // Reserve real layout space; page pixels and input never sit under the
++    // decorative frame. Apply once for both single-page and split layouts.
++    available_space.Inset(gfx::Insets(kBarkPageGutter));
++  }
+ 
+   const bool show_background =
+       drop_target_view_->GetVisible() || IsInSplitView();
+@@ -520,7 +543,7 @@
+   available_space =
+       CalculateSeparatorLayouts(available_space, layouts.child_layouts);
+ 
+-  if (IsInSplitView()) {
++  if (IsInSplitView() && !bark_frame) {
+     available_space.Inset(split_view_insets_);
+   }
+   ViewSizes sizes = GetViewSizes(available_space);
+@@ -559,6 +582,15 @@
+ }
+ 
+ void MultiContentsView::BeforeApplyLayout(const views::ProposedLayout& layout) {
++  const bool bark_frame = HasBarkPageFrame(browser_view_);
++  if (bark_frame != bark_page_frame_applied_) {
++    // Upstream only sets background radii from the glass-mode layout. Bark
++    // also needs native clipping in non-glass mode, and must restore upstream
++    // radii and split padding when entering fullscreen.
++    bark_page_frame_applied_ = bark_frame;
++    SetBackgroundRadii(requested_background_radii_);
++    UpdateContentsBorderAndOverlay();
++  }
+   if (!target_content_bounds_) {
+     for (auto& contents : contents_container_views_) {
+       contents->SetTargetContentBounds(std::nullopt);
+@@ -800,9 +832,11 @@
+     const bool is_active =
+         contents_container_view->contents_view() == GetActiveContentsView();
+     contents_container_view->SetRoundedCorners(
+-        is_in_split
+-            ? kSplitViewContentRoundedCorners
+-            : (is_active ? GetBackgroundRadii() : gfx::RoundedCornersF()));
++        HasBarkPageFrame(browser_view_) && (is_in_split || is_active)
++            ? gfx::RoundedCornersF(kBarkPageCornerRadius)
++            : is_in_split
++                  ? kSplitViewContentRoundedCorners
++                  : (is_active ? GetBackgroundRadii() : gfx::RoundedCornersF()));
+     contents_container_view->UpdateBorderAndOverlay(
+         is_in_split, is_active, is_active && active_contents_view_highlighted_);
+   }
+diff --git a/chrome/browser/ui/views/frame/multi_contents_view.h b/chrome/browser/ui/views/frame/multi_contents_view.h
+--- a/chrome/browser/ui/views/frame/multi_contents_view.h
++++ b/chrome/browser/ui/views/frame/multi_contents_view.h
+@@ -291,6 +291,9 @@
+   std::unique_ptr<MultiContentsViewDelegate> delegate_;
+ 
+   raw_ptr<MultiContentsBackgroundView> background_view_;
++  // Keep upstream's requested radii separate from Bark's temporary frame.
++  gfx::RoundedCornersF requested_background_radii_;
++  bool bark_page_frame_applied_ = false;
+ 
+   // Holds ContentsContainerViews, when not in a split view the second
+   // ContentsContainerView is not visible.
+diff --git a/chrome/browser/ui/views/frame/contents_container_view.cc b/chrome/browser/ui/views/frame/contents_container_view.cc
+--- a/chrome/browser/ui/views/frame/contents_container_view.cc
++++ b/chrome/browser/ui/views/frame/contents_container_view.cc
+@@ -211,9 +211,16 @@
+       }
+     }
+   } else {
+-    if (split_changed) {
+-      SetBorder(views::CreateEmptyBorder(gfx::Insets(
+-          kSplitViewContentPadding + ContentsContainerOutline::kThickness)));
++    int padding = kSplitViewContentPadding + ContentsContainerOutline::kThickness;
++#if BUILDFLAG(IS_MAC)
++    if (browser_view_->GetBarkToolbarAnchor(false)) {
++      // Bark reserves its own surrounding gutter; keep only the focus outline.
++      padding = ContentsContainerOutline::kThickness;
++    }
++#endif
++    const gfx::Insets insets(padding);
++    if (split_changed || GetInsets() != insets) {
++      SetBorder(views::CreateEmptyBorder(insets));
+       UpdateBorderRoundedCorners();
+     }
+ 

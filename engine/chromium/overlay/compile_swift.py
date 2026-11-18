@@ -28,7 +28,7 @@ def main():
     subprocess.run([*common, '-module-name', 'BarkCore', '-emit-module',
                     '-emit-module-path', str(output / 'BarkCore.swiftmodule'),
                     *map(str, core), '-o', str(output / 'libBarkCore.a')], check=True)
-    ui = [source / 'mac' / name for name in ('ChromiumSidebar.swift', 'SidebarBackground.swift', 'SpaceEditor.swift', 'ArcImportReader.swift', 'ChromiumArcImport.swift')]
+    ui = [source / 'mac' / name for name in ('ChromiumSidebar.swift', 'BarkFeatures.swift', 'SiteControls.swift', 'PageFrame.swift', 'Organization.swift', 'CommandBar.swift', 'Preferences.swift', 'Feedback.swift', 'SidebarBackground.swift', 'SpaceEditor.swift', 'BarkImportReader.swift', 'ChromiumBarkImport.swift')]
     subprocess.run([*common, '-module-name', 'BarkSidebar', '-I', str(output),
                     *map(str, ui), '-o', str(output / 'libBarkSidebar.a')], check=True)
 

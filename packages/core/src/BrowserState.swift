@@ -5,7 +5,7 @@ public struct Space: Codable, Equatable, Identifiable, Sendable {
     public var name: String
     public var color: String
     public var icon: String
-    public init(id: String = UUID().uuidString, name: String, color: String = "gray", icon: String = "🍃") {
+    public init(id: String = UUID().uuidString, name: String, color: String = "gray", icon: String = "") {
         self.id = id; self.name = name; self.color = color; self.icon = icon
     }
 }
@@ -44,7 +44,7 @@ public struct Settings: Codable, Equatable, Sendable {
 
 public struct BrowserState: Codable, Equatable, Sendable {
     public var version = 1
-    public var spaces = [Space(id: "personal", name: "Personal"), Space(id: "work", name: "Work", color: "clay", icon: "💼")]
+    public var spaces = [Space(id: "personal", name: "Personal", icon: "👤"), Space(id: "work", name: "Work", color: "clay", icon: "💼")]
     public var tabs: [Tab] = []
     public var activeSpaceId = "personal"
     public var activeTabs: [String: String] = [:]
@@ -157,7 +157,7 @@ public struct BrowserState: Codable, Equatable, Sendable {
         if let index = tabs.firstIndex(where: { $0.id == targetID }) { tabs.insert(tab, at: index) }
         for (order, i) in tabs.indices.filter({ tabs[$0].spaceId == tab.spaceId && tabs[$0].folderID == tab.folderID }).enumerated() { tabs[i].sidebarOrder = order }
     }
-    public mutating func addSpace(name: String, color: String = "gray", icon: String = "🍃") {
+    public mutating func addSpace(name: String, color: String = "gray", icon: String = "") {
         let name = String(name.trimmingCharacters(in: .whitespacesAndNewlines).prefix(32))
         guard !name.isEmpty, spaces.count < 100 else { return }
         let space = Space(name: name, color: color, icon: icon)
@@ -165,7 +165,7 @@ public struct BrowserState: Codable, Equatable, Sendable {
     }
     public mutating func updateSpace(_ id: String, name: String, theme: SpaceTheme, emoji: String) {
         let name = String(name.trimmingCharacters(in: .whitespacesAndNewlines).prefix(32))
-        guard !name.isEmpty, let emoji = Space.normalizedEmoji(emoji),
+        guard !name.isEmpty, let emoji = Space.normalizedIcon(emoji),
               let index = spaces.firstIndex(where: { $0.id == id }) else { return }
         spaces[index].name = name
         spaces[index].color = theme.rawValue

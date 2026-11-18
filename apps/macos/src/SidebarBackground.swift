@@ -4,18 +4,25 @@ import BarkCore
 
 struct SidebarBackground: View {
     let theme: SpaceTheme
-    @Environment(\.colorScheme) private var scheme
+    var style = SpaceStyle()
+    var canvasSize: CGSize? = nil
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     var body: some View {
         Group {
             if reduceTransparency {
-                theme.sidebar(scheme)
+                Color.clear
             } else {
                 SidebarVisualEffect()
-                    .overlay(theme.sidebar(scheme).opacity(scheme == .dark ? 0.48 : 0.42))
             }
         }
+        .overlay(alignment: .topLeading) {
+            // The floating panel shows the same slice as the attached sidebar.
+            SpaceThemeSurface(theme: theme, style: style)
+                .frame(width: canvasSize?.width, height: canvasSize?.height)
+                .opacity(reduceTransparency ? 1 : 0.90)
+        }
+        .clipped()
         .allowsHitTesting(false)
         .accessibilityHidden(true)
     }

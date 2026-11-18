@@ -29,10 +29,20 @@ def main():
                         '-sdk', sdk, '-target', architecture + '-apple-macosx13.0',
                         '-module-cache-path', output / 'module-cache', '-I', output,
                         '-L', output, '-lBarkCore', stage / 'mac/ChromiumSidebar.swift',
+                        stage / 'mac/BarkFeatures.swift',
+                        stage / 'mac/SiteControls.swift',
+                        stage / 'mac/PageFrame.swift', stage / 'mac/Organization.swift',
+                        stage / 'mac/CommandBar.swift', stage / 'mac/Preferences.swift',
+                        stage / 'mac/Feedback.swift',
                         stage / 'mac/SidebarBackground.swift', stage / 'mac/SpaceEditor.swift',
-                        stage / 'mac/ArcImportReader.swift', stage / 'mac/ChromiumArcImport.swift',
+                        stage / 'mac/BarkImportReader.swift', stage / 'mac/ChromiumBarkImport.swift',
                         chromium.ROOT / 'tools/fixtures/ChromiumSidebarTests.swift',
-                        chromium.ROOT / 'tools/fixtures/ArcImportReaderTests.swift',
+                        chromium.ROOT / 'tools/fixtures/BarkImportReaderTests.swift',
+                        chromium.ROOT / 'tools/fixtures/OrganizationTests.swift',
+                        chromium.ROOT / 'tools/fixtures/CommandBarTests.swift',
+                        chromium.ROOT / 'tools/fixtures/PreferencesTests.swift',
+                        chromium.ROOT / 'tools/fixtures/PeekTests.swift',
+                        chromium.ROOT / 'tools/fixtures/FeedbackTests.swift',
                         '-o', executable], check=True)
         subprocess.run([executable], check=True)
 

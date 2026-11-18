@@ -88,6 +88,10 @@ def release_info(config, version, build):
         raise ValueError('Build number must be a positive integer of at most 9 digits')
     return {
         'CFBundleIdentifier': config['bundle_id'],
+        'CFBundleName': 'Bark',
+        'CFBundleDisplayName': 'Bark',
+        'CrProductDirName': 'BarkChromium',
+        'BarkSafeStorageName': 'Bark Safe Storage',
         'CFBundleShortVersionString': version,
         'CFBundleVersion': str(build),
         'BarkEnableSwiftUI': True,
@@ -206,7 +210,7 @@ def generate_feed(sparkle, config, archive, version, build):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--source', type=Path, default=ROOT / '.deps/chromium-source/src/out/Bark-mac-arm64/Bark.app')
+    parser.add_argument('--source', type=Path, default=ROOT / '.deps/chromium-source/src/out/Bark-mac-arm64/Bark-dev.app')
     parser.add_argument('--chromium-src', type=Path, default=ROOT / '.deps/chromium-source/src')
     parser.add_argument('--config', type=Path, default=CONFIG)
     parser.add_argument('--version', required=True)

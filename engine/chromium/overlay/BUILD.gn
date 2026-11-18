@@ -5,6 +5,24 @@ source_set("space_tab_data") {
   public_deps = [ "//base", "//content/public/browser" ]
 }
 
+source_set("lazy_tab") {
+  sources = [ "lazy_tab.h" ]
+  public_deps = [ "//content/public/browser", "//content/public/common", "//ui/base", "//url" ]
+}
+
+source_set("pinned_tab_close") {
+  sources = [ "pinned_tab_close.h" ]
+}
+
+source_set("browser_hooks") {
+  sources = [ "browser_hooks.h" ]
+  if (is_mac) {
+    sources += [ "native_ui_mac.h", "native_ui_mac.mm" ]
+    deps = [ "//base" ]
+    frameworks = [ "Foundation.framework" ]
+  }
+}
+
 source_set("space_catalog") {
   sources = [ "space_catalog.cc", "space_catalog.h" ]
   deps = [ "//base", "//components/prefs" ]
@@ -37,6 +55,7 @@ source_set("spaces_ui") {
     "//chrome/browser:browser_process",
     "//chrome/browser/profiles:profile",
     "//chrome/browser/profiles:profile_manager",
+    "//chrome/browser/profiles:profile_util",
     "//chrome/browser/ui:ui_features",
     "//chrome/browser/ui/webui:theme_source",
     "//components/prefs",
@@ -69,11 +88,18 @@ if (is_mac) {
     script = "compile_swift.py"
     sources = [
       "mac/ChromiumSidebar.swift",
-      "mac/ChromiumArcImport.swift",
-      "mac/ArcImportReader.swift",
+      "mac/BarkFeatures.swift",
+      "mac/SiteControls.swift",
+      "mac/PageFrame.swift",
+      "mac/Organization.swift",
+      "mac/CommandBar.swift",
+      "mac/Preferences.swift",
+      "mac/Feedback.swift",
+      "mac/ChromiumBarkImport.swift",
+      "mac/BarkImportReader.swift",
       "mac/SidebarBackground.swift",
       "mac/SpaceEditor.swift",
-      "core/ArcImport.swift",
+      "core/BarkImport.swift",
       "core/BrowserState.swift",
       "core/Navigation.swift",
       "core/SidebarItems.swift",
@@ -127,48 +153,74 @@ if (is_mac) {
   }
 
   source_set("sidebar") {
-    sources = [ "mac/arc_importer.h", "mac/arc_importer.cc", "mac/sidebar_mac.h", "mac/sidebar_mac.mm", "mac/space_test_driver.h", "mac/space_test_driver.cc" ]
+    sources = [ "mac/bark_importer.h", "mac/bark_importer.cc", "mac/sidebar_mac.h", "mac/sidebar_mac.mm", "mac/space_test_driver.h", "mac/space_test_driver.cc" ]
     deps = [
+      ":browser_hooks",
+      ":lazy_tab",
+      ":pinned_tab_close",
       ":updater",
       ":swift_sidebar",
       ":space_catalog",
       ":space_tab_data",
       "//base",
       "//chrome/browser:browser_process",
+      "//chrome/app:command_ids",
       "//chrome/browser/autocomplete",
       "//chrome/browser/bookmarks",
+      "//chrome/browser/content_settings:content_settings_factory",
+      "//chrome/browser/download",
       "//chrome/browser/history",
+      "//chrome/browser/permissions",
       "//chrome/browser/profiles/keep_alive",
       "//components/bookmarks/browser",
       "//components/history/core/browser",
       "//chrome/browser/profiles:profile",
       "//chrome/browser/profiles:profile_manager",
+      "//chrome/browser/search_engines",
       "//chrome/browser/sessions",
       "//chrome/browser/themes",
       "//chrome/browser/ui:browser_commands",
+      "//chrome/browser/ui:chrome_pages",
       "//chrome/browser/ui/browser_window",
+      "//chrome/browser/ui/browser_window:create_browser_window",
       "//chrome/browser/ui:bubble_anchor_util",
       "//chrome/browser/ui/extensions",
       "//chrome/browser/ui/page_info",
+      "//chrome/browser/ui/startup/default_browser_prompt",
+      "//chrome/browser/ui/views/infobars",
       "//chrome/browser/ui:recently_audible_helper",
       "//chrome/browser/ui/navigator",
       "//chrome/browser/ui/tabs:tab_strip",
       "//chrome/browser/ui/tabs:tab_strip_model_observer",
+      "//chrome/browser/ui/thumbnails",
+      "//chrome/browser/ui/toolbar",
       "//chrome/browser/ui/views/frame:browser_view_header",
       "//chrome/browser/ui/views/frame:browser_frame_view",
+      "//components/content_settings/core/browser",
+      "//components/content_settings/core/common",
       "//components/download/content/public",
       "//components/download/public/common:public",
       "//components/favicon/content",
+      "//components/infobars/content",
+      "//components/infobars/core",
       "//components/omnibox/browser",
+      "//components/permissions",
       "//components/prefs",
       "//components/sessions",
+      "//components/search_engines",
       "//components/split_tabs",
       "//components/tabs:public",
       "//components/url_formatter",
+      "//components/viz/common",
       "//content/public/browser",
       "//net",
+      "//services/media_session/public/cpp",
+      "//services/media_session/public/mojom",
+      "//services/network/public/cpp",
+      "//third_party/blink/public/common",
       "//third_party/metrics_proto",
       "//ui/base",
+      "//ui/compositor",
       "//ui/gfx",
       "//ui/views",
       "//url",

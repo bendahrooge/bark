@@ -12,7 +12,7 @@ import {Browser} from './test_chromium_browser.mjs';
 assert.equal(process.platform, 'darwin', 'The Sparkle About page is macOS-only');
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const binary = path.resolve(process.argv[2] || path.join(root,
-  '.deps/chromium-source/src/out/Bark-mac-arm64/Bark.app/Contents/MacOS/Bark'));
+  '.deps/chromium-source/src/out/Bark-mac-arm64/Bark-dev.app/Contents/MacOS/Bark'));
 const info = JSON.parse(execFileSync('plutil', ['-convert', 'json', '-o', '-',
   path.join(path.dirname(binary), '../Info.plist')], {encoding: 'utf8'}));
 const configured = !!(info.SUFeedURL && info.SUPublicEDKey);

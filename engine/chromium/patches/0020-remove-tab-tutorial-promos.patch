@@ -1,0 +1,45 @@
+diff --git a/chrome/browser/ui/views/user_education/browser_user_education_service.cc b/chrome/browser/ui/views/user_education/browser_user_education_service.cc
+--- a/chrome/browser/ui/views/user_education/browser_user_education_service.cc
++++ b/chrome/browser/ui/views/user_education/browser_user_education_service.cc
+@@ -1486,19 +1486,6 @@
+               141, "lugli@google.com",
+               "Triggered when user tried to create split view twice.")));
+ 
+-  // kIPHSideBySideTabSwitchFeature:
+-  registry.RegisterFeature(std::move(
+-      FeaturePromoSpecification::CreateForTutorialPromo(
+-          feature_engagement::kIPHSideBySideTabSwitchFeature,
+-          kBrowserDialogAnchorElementId,
+-          IDS_SPLIT_VIEW_TAB_SWITCH_ENTRY_IPH_BODY, kSplitViewTutorialId)
+-          .SetBubbleArrow(HelpBubbleArrow::kNone)
+-          .SetBubbleIcon(kLightbulbOutlineIcon)
+-          .SetBubbleTitleText(IDS_SPLIT_VIEW_TAB_SWITCH_ENTRY_IPH_TITLE)
+-          .SetMetadata(141, "lugli@google.com",
+-                       "Triggered when user swaps between two tabs three times "
+-                       "quickly.")));
+-
+   // kIPHSendTabToSelfTutorialFeature:
+   registry.RegisterFeature(std::move(
+       FeaturePromoSpecification::CreateForTutorialPromo(
+@@ -2195,21 +2182,6 @@
+                     .SetBubbleArrow(HelpBubbleArrow::kBottomRight)));
+ #endif  // BUILDFLAG(ENABLE_COMPOSE)
+ 
+-  // kIPHVerticalTabstripTutorialFeature:
+-  registry.RegisterFeature(std::move(
+-      FeaturePromoSpecification::CreateForTutorialPromo(
+-          feature_engagement::kIPHVerticalTabstripTutorialFeature,
+-          kBrowserDialogAnchorElementId, IDS_VERTICAL_TABS_IPH_BODY,
+-          kVerticalTabsTutorialId)
+-          .SetBubbleArrow(HelpBubbleArrow::kNone)
+-          .SetBubbleIcon(kLightbulbOutlineIcon)
+-          .SetBubbleTitleText(IDS_VERTICAL_TABS_IPH_TITLE)
+-          .SetMetadata(
+-              147, "charlesmeng@google.com",
+-              "Triggered when there are enough tabs in the tabstrip and"
+-              "the size of the tabs are shrunk significantly compared to their "
+-              "ideal width.")));
+-
+   // kIPHTabGroupsFocusingFeature:
+   registry.RegisterFeature(std::move(
+       FeaturePromoSpecification::CreateForSnoozePromo(

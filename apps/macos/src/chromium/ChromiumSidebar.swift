@@ -13,6 +13,7 @@ struct ChromiumTab: Decodable, Identifiable {
     let active: Bool
     let loading: Bool
     let favicon: String?
+    var faviconValid: Bool? = nil
     // Playing sound now or moments ago, and silenced by the user.
     var audible: Bool? = nil
     var muted: Bool? = nil
@@ -20,8 +21,41 @@ struct ChromiumTab: Decodable, Identifiable {
     // split is the one on screen.
     var split: String? = nil
     var splitActive: Bool? = nil
-    var isBlank: Bool { url == "about:blank" || url == "chrome://newtab/" }
-    var faviconImage: NSImage? { FaviconCache.image(favicon) }
+    // A title the person gave the tab, shown instead of the page's.
+    var customTitle: String? = nil
+    // A pinned tab's own page, and whether the tab has navigated away from it.
+    var pinnedURL: String? = nil
+    var drifted: Bool? = nil
+    var sessionClosed: Bool? = nil
+    var keepVisibleAfterClose: Bool? = nil
+    var visibleWhenCollapsed: Bool { active || keepVisibleAfterClose == true }
+    var closeLabel: String { pinned ? "Close pinned tab session" : "Close tab" }
+    // The sidebar folder of a pinned tab.
+    var folder: String? = nil
+    // A JPEG of the page, in the Control-Tab switcher only.
+    var thumbnail: String? = nil
+    // Set by Chromium from the committed entry, even while another URL is loading.
+    var blankPlaceholder: Bool? = nil
+    var isBlank: Bool {
+        if url.isEmpty { return true }
+        if url.hasPrefix("about:blank") {
+            let page = url.prefix { $0 != "?" && $0 != "#" }
+            return page == "about:blank" || page == "about:blank/"
+        }
+        return url.hasPrefix("chrome://") && URL(string: url)?.host == "newtab"
+    }
+    var isSidebarPlaceholder: Bool { !pinned && split == nil && (blankPlaceholder ?? isBlank) }
+    var pageTitle: String {
+        if isBlank { return "New tab" }
+        return title.isEmpty ? (URL(string: url)?.host ?? url) : title
+    }
+    // Chromium may supply its default globe even when the page has no favicon.
+    var faviconImage: NSImage? { faviconValid == false ? nil : FaviconCache.image(favicon) }
+    var displayTitle: String {
+        if let customTitle, !customTitle.isEmpty { return customTitle }
+        return pageTitle
+    }
+    var thumbnailImage: NSImage? { thumbnail.flatMap { Data(base64Encoded: $0) }.flatMap(NSImage.init(data:)) }
 }
 
 /// Decoded favicons by their encoded form. Rows are rebuilt on every snapshot,
@@ -66,7 +100,16 @@ struct ChromiumSpace: Decodable, Identifiable {
     var profile: String? = nil
     var theme: String? = nil
     var emoji: String? = nil
+    var gradient: String? = nil
+    var gradientCanvas: SpaceGradientCanvas? = nil
+    var folders: [ChromiumFolder]? = nil
+    var pinsCollapsed: Bool? = nil
     var displayName: String { name == "Your Chromium" ? "Personal" : name }
+    var style: SpaceStyle {
+        SpaceStyle(gradient: gradient.flatMap(SpaceTheme.init(rawValue:)),
+                   canvas: gradientCanvas?.isValid == true ? gradientCanvas : nil)
+    }
+    var themeValue: SpaceTheme { SpaceTheme(rawValue: theme ?? "gray") ?? .gray }
 }
 
 struct ChromiumProfile: Decodable, Identifiable {
@@ -76,6 +119,7 @@ struct ChromiumProfile: Decodable, Identifiable {
 
 struct ChromiumSnapshot: Decodable {
     let tabs: [ChromiumTab]
+    var sidebarTabs: [ChromiumTab] { tabs.filter { !$0.isSidebarPlaceholder } }
     let spaces: [ChromiumSpace]
     let profile: String
     let canGoBack: Bool
@@ -96,12 +140,19 @@ struct ChromiumSnapshot: Decodable {
     var favorites: [ChromiumTab]? = nil
     // Tabs archived from the active space, most recent first.
     var archivedTabs: [ChromiumArchivedTab]? = nil
+    var organizationUndoLabel: String? = nil
     var downloads: ChromiumDownloads? = nil
     // False once this profile's window is hidden behind another space's window.
     var windowVisible: Bool? = nil
     // Read-only tabs of the spaces adjacent to the active one, keyed by space ID.
     var spacePreviews: [String: [ChromiumTab]]? = nil
-    var arcImportResult: ChromiumArcImportResult? = nil
+    var browserImportResult: ChromiumBarkImportResult? = nil
+    // Media playing in a tab that is not on screen.
+    var media: ChromiumMedia? = nil
+    var features: ChromiumFeatures? = nil
+    var siteControls: ChromiumSiteControls? = nil
+    var notices: [ChromiumNotice]? = nil
+    var preferences: ChromiumPreferences? = nil
 }
 
 typealias ChromiumCommand = @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<CChar>?) -> Void
@@ -119,30 +170,62 @@ struct AddressSuggestion: Decodable, Identifiable, Equatable {
     let url: String
     var id: Int? = nil
     var favicon: String? = nil
+    var faviconValid: Bool? = nil
     var space: String? = nil
+    var commandID: String? = nil
+    var detail: String? = nil
+    var symbol: String? = nil
+    var contextURL: String? = nil
+    var contextSpace: String? = nil
+    var invokerID: Int? = nil
+    var invokerURL: String? = nil
     var isTab: Bool { kind == "tab" }
-    var listID: String { kind + ":" + (id.map(String.init) ?? url) }
+    var isCommand: Bool { kind == "command" && commandID != nil }
+    var listID: String { kind + ":" + (commandID ?? id.map(String.init) ?? url) }
 }
 
 private struct AddressSuggestions: Decodable {
     let query: String
     let items: [AddressSuggestion]
+    var action: String? = nil
+}
+
+enum AddressBarIcon: Equatable {
+    case favicon(String), command(String), globe, search
+}
+
+enum AddressDisposition {
+    case currentTab, newTab
 }
 
 @MainActor final class ChromiumSidebarModel: ObservableObject {
     @Published private(set) var snapshot = ChromiumSnapshot(tabs: [], spaces: [], profile: "", canGoBack: false, canGoForward: false)
     @Published var address = ""
+    @Published var archivePresented = false
     @Published var editingAddress = false
+    private(set) var addressDisposition: AddressDisposition = .currentTab
+    @Published var siteControlsOpen = false
+    @Published var noticesOpen = false
     // Presents the centered address bar over this sidebar's browser window.
     var presentAddressBar: (() -> Void)?
     // The sidebar's AppKit view, for window geometry and keyboard shortcuts.
     weak var hostView: NSView?
+    weak var tabScrollView: NSScrollView?
     let splitDrop = SplitDropController()
     // Incremented by the keyboard shortcut; the sidebar archives with undo.
     @Published private(set) var archiveRequests = 0
-    @Published var arcImportRequests = 0
+    @Published var browserImportRequests = 0
+    /// A folder the sidebar should offer to rename as soon as it appears.
+    @Published var renameNextFolder = false
+
+    func requestNewFolder(containing tab: Int? = nil) {
+        renameNextFolder = true
+        send("newFolder", id: tab, text: "New Folder")
+    }
     @Published private(set) var suggestions: [AddressSuggestion] = []
     @Published var selectedSuggestion: Int?
+    @Published private var addressAction: String?
+    private var addressActionQuery: String?
     private var suggestionQuery: String?
 
     /// Requests suggestions for `text`; results arrive via `updateSuggestions`.
@@ -156,13 +239,20 @@ private struct AddressSuggestions: Decodable {
               let result = try? JSONDecoder().decode(AddressSuggestions.self, from: data),
               result.query == suggestionQuery else { return }
         let previous = selectedSuggestion.flatMap { suggestions.indices.contains($0) ? suggestions[$0].listID : nil }
+        addressActionQuery = result.query
+        addressAction = result.action
         suggestions = result.items
         // Keep the highlighted row if it is still present; otherwise clear it.
         selectedSuggestion = previous.flatMap { id in suggestions.firstIndex { $0.listID == id } }
+        if selectedSuggestion == nil {
+            selectedSuggestion = CommandBarSelection.initialSelection(query: result.query, suggestions: suggestions)
+        }
     }
 
     func clearSuggestions() {
         suggestionQuery = nil
+        addressActionQuery = nil
+        addressAction = nil
         suggestions = []
         selectedSuggestion = nil
     }
@@ -173,28 +263,52 @@ private struct AddressSuggestions: Decodable {
         selectedSuggestion = next < 0 ? nil : min(next, suggestions.count - 1)
     }
 
-    /// Opens a suggestion: switches to an open tab, otherwise navigates.
-    func openSuggestion(_ suggestion: AddressSuggestion) {
-        if suggestion.isTab, let id = suggestion.id { send("switchToTab", id: id) }
-        else { send("navigate", text: suggestion.url) }
+    /// Commands stay separate from navigation and use the page they described.
+    func openSuggestion(_ suggestion: AddressSuggestion, in disposition: AddressDisposition? = nil) {
+        if suggestion.isCommand { performCommandBarAction(suggestion) }
+        else if suggestion.isTab, let id = suggestion.id { send("switchToTab", id: id) }
+        else { submitAddress(suggestion.url, in: disposition) }
+    }
+
+    func submitAddress(_ text: String, in disposition: AddressDisposition? = nil) {
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        send((disposition ?? addressDisposition) == .newTab ? "navigateNew" : "navigate", text: text)
     }
     var presentingSidebarUI = false
+    var draggingTab = false
+    var resizingSidebar = false
     @Published var theme: SpaceTheme = .gray
-    @Published var emoji = "🍃"
+    @Published var emoji = "👤"
     private var callback: ChromiumCommand?
     private let context: UnsafeMutableRawPointer?
     private var previousActiveID: Int?
     private var lastJSON = ""
-    // Two-finger horizontal swipe between spaces. The offset follows the
-    // fingers; releasing past the threshold commits to the adjacent space.
+    // Chromium can activate a tab as soon as the user commits. Keep the
+    // outgoing rows and backdrop in place until the sidebar has slid past them.
+    private struct SpaceSlide {
+        let origin: ChromiumSpace
+        let originTabs: [ChromiumTab]
+        let theme: SpaceTheme
+        let emoji: String
+        let target: ChromiumSpace?
+        let direction: CGFloat
+        let committed: Bool
+    }
+    @Published private var slide: SpaceSlide?
     @Published private(set) var spaceSwipeOffset: CGFloat = 0
     private var rawSwipeOffset: CGFloat = 0
-    private var swipeCommitTarget: String?
+    private var swipeCommitTarget: String? { slide?.committed == true ? slide?.target?.id : nil }
+    private var slideLanded = false
     private var swipeResetWork: DispatchWorkItem?
+    private static let spaceDragGain: CGFloat = 0.5
 
-    init(context: UnsafeMutableRawPointer?, callback: ChromiumCommand?) {
+    private let reduceSpaceMotion: () -> Bool
+
+    init(context: UnsafeMutableRawPointer?, callback: ChromiumCommand?,
+         reduceSpaceMotion: @escaping () -> Bool = { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }) {
         self.context = context
         self.callback = callback
+        self.reduceSpaceMotion = reduceSpaceMotion
     }
 
     func update(_ json: String) {
@@ -209,17 +323,27 @@ private struct AddressSuggestions: Decodable {
             snapshot = decoded
         }
         let next = snapshot
-        // A swipe ends when its space is shown here, or when another
-        // profile's window took over and this one was hidden.
-        if let target = swipeCommitTarget, next.activeSpaceId == target || next.windowVisible == false { finishSpaceSwipe() }
-        let active = next.tabs.first { $0.active }
-        if !editingAddress || previousActiveID != active?.id {
+        if let slide {
+            let interrupted = next.activeSpaceId != slide.origin.id && next.activeSpaceId != swipeCommitTarget
+            let missingTarget = slide.target.map { target in !next.spaces.contains { $0.id == target.id } } ?? false
+            if next.windowVisible == false || interrupted || missingTarget || isIncognito {
+                queuedSpaceSelection = nil
+                finishSpaceSwipe()
+            } else if slideLanded, let target = swipeCommitTarget, next.activeSpaceId == target {
+                finishSpaceSwipe()
+            }
+        } else if changedProfile, rawSwipeOffset != 0 {
+            finishSpaceSwipe()
+        }
+        let active = activeTab
+        if !editingAddress || (addressDisposition == .currentTab && previousActiveID != active?.id) {
             address = active?.isBlank == true ? "" : active?.url ?? ""
         }
         previousActiveID = active?.id
         if changedProfile || activeSpace?.theme != nil {
             theme = isIncognito ? .gray : SpaceTheme(rawValue: activeSpace?.theme ?? UserDefaults.standard.string(forKey: settingsKey("theme")) ?? "gray") ?? .gray
-            emoji = isIncognito ? "" : Space.normalizedEmoji(activeSpace?.emoji ?? UserDefaults.standard.string(forKey: settingsKey("emoji")) ?? "🍃") ?? "🍃"
+            let fallback = activeSpace?.displayName == "Personal" || activeSpace == nil ? "👤" : ""
+            emoji = isIncognito ? "" : Space.normalizedIcon(activeSpace?.emoji ?? UserDefaults.standard.string(forKey: settingsKey("emoji")) ?? fallback) ?? fallback
         }
     }
 
@@ -230,37 +354,53 @@ private struct AddressSuggestions: Decodable {
         send("setSpaceProfile", metadata: ["space": space.id, "profile": profile])
     }
 
-    func saveSpaceSettings(_ space: ChromiumSpace, name: String, theme: SpaceTheme, emoji: String, profile: String) {
-        guard !isIncognito, let emoji = Space.normalizedEmoji(emoji) else { return }
+    func saveSpaceSettings(_ space: ChromiumSpace, name: String, theme: SpaceTheme, emoji: String,
+                           style: SpaceStyle = SpaceStyle(), profile: String) {
+        guard !isIncognito, let emoji = Space.normalizedIcon(emoji) else { return }
         if space.active { self.theme = theme; self.emoji = emoji }
         send("customizeSpace", metadata: ["space": space.id, "name": String(name.prefix(32)),
-                                          "theme": theme.rawValue, "emoji": emoji])
+                                          "theme": theme.rawValue, "emoji": emoji].merging(style.metadata) { $1 })
         if !profile.isEmpty, profile != space.profile { moveSpace(space, toProfile: profile) }
     }
 
     /// Changes another space's color or emoji without switching to it.
     func customize(_ space: ChromiumSpace, theme: SpaceTheme? = nil, emoji: String? = nil) {
         guard !isIncognito else { return }
-        if space.active { customize(theme: theme ?? self.theme, emoji: emoji ?? self.emoji); return }
+        if space.active { customize(theme: theme ?? self.theme, emoji: emoji ?? self.emoji, recolor: theme != nil); return }
         let current = SpaceTheme(rawValue: space.theme ?? "gray") ?? .gray
-        send("customizeSpace", metadata: ["space": space.id, "theme": (theme ?? current).rawValue,
-                                          "emoji": Space.normalizedEmoji(emoji ?? "") ?? self.emoji(for: space)])
+        var metadata = ["space": space.id, "theme": (theme ?? current).rawValue,
+                        "emoji": emoji.flatMap(Space.normalizedIcon) ?? self.emoji(for: space)]
+        if let theme, var canvas = space.style.canvas {
+            canvas.startColor = theme.accentHex
+            metadata["gradientCanvas"] = canvas.json
+        }
+        send("customizeSpace", metadata: metadata)
     }
 
-    func customize(theme: SpaceTheme, emoji: String) {
+    func customize(theme: SpaceTheme, emoji: String, recolor: Bool = true) {
         guard !isIncognito else { return }
         self.theme = theme
-        self.emoji = Space.normalizedEmoji(emoji) ?? "🍃"
+        self.emoji = Space.normalizedIcon(emoji) ?? ""
         if snapshot.activeSpaceId != nil {
-            send("customizeSpace", metadata: ["theme": theme.rawValue, "emoji": self.emoji])
+            var metadata = ["theme": theme.rawValue, "emoji": self.emoji]
+            if recolor, var canvas = activeSpace?.style.canvas {
+                canvas.startColor = theme.accentHex
+                metadata["gradientCanvas"] = canvas.json
+            }
+            send("customizeSpace", metadata: metadata)
             return
         }
         UserDefaults.standard.set(theme.rawValue, forKey: settingsKey("theme"))
         UserDefaults.standard.set(self.emoji, forKey: settingsKey("emoji"))
     }
 
+    func close(_ tab: ChromiumTab) {
+        guard tab.sessionClosed != true else { return }
+        send(tab.pinned ? "closePinnedSession" : "close", id: tab.id)
+    }
+
     func send(_ action: String, id: Int? = nil, text: String? = nil, width: Double? = nil, metadata: [String: String]? = nil) {
-        if isIncognito && ["space", "createSpace", "deleteSpace", "manageSpaces", "moveTabToSpace", "createProfile", "customizeSpace", "appearance", "importArc"].contains(action) { return }
+        if isIncognito && ["space", "createSpace", "deleteSpace", "manageSpaces", "moveTabToSpace", "createProfile", "customizeSpace", "appearance", "importBrowserData"].contains(action) { return }
         var message: [String: Any] = ["action": action]
         if let id { message["id"] = id }
         if let text { message["text"] = text }
@@ -279,9 +419,9 @@ private struct AddressSuggestions: Decodable {
         isIncognito ? "Incognito" : snapshot.spaces.first(where: { $0.active })?.displayName ?? "Personal"
     }
 
-    /// A space can be deleted unless it is the last one of its profile.
+    /// Keep one sidebar space; profiles may have no visible spaces.
     func canDelete(_ space: ChromiumSpace) -> Bool {
-        !isIncognito && snapshot.spaces.filter { $0.profile == space.profile }.count > 1
+        !isIncognito && snapshot.spaces.count > 1
     }
     /// Other spaces of this window's profile, where a tab can be moved.
     var moveTargets: [ChromiumSpace] {
@@ -291,32 +431,77 @@ private struct AddressSuggestions: Decodable {
         (snapshot.tabs + (snapshot.favorites ?? [])).contains { $0.active && $0.loading }
     }
 
-    func emoji(for space: ChromiumSpace) -> String {
-        if let emoji = space.emoji { return Space.normalizedEmoji(emoji) ?? "🍃" }
-        if space.active { return emoji }
-        return Space.normalizedEmoji(UserDefaults.standard.string(forKey: "BarkChromium.\(space.id).emoji") ?? "🍃") ?? "🍃"
+    var activeTab: ChromiumTab? {
+        (snapshot.tabs + (snapshot.favorites ?? [])).first { $0.active }
     }
 
+    /// Match the destination that Return will open. Native suggestions carry
+    /// the same URL/search classification used by the navigation command.
+    var addressBarIcon: AddressBarIcon {
+        func siteIcon(_ encoded: String?, valid: Bool?) -> AddressBarIcon {
+            if valid != false, let encoded, FaviconCache.image(encoded) != nil { return .favicon(encoded) }
+            return .globe
+        }
+        if let index = selectedSuggestion, suggestions.indices.contains(index) {
+            let suggestion = suggestions[index]
+            if suggestion.isCommand { return .command(suggestion.symbol ?? "command") }
+            return suggestion.kind == "search" ? .search : siteIcon(suggestion.favicon, valid: suggestion.faviconValid)
+        }
+        let text = address.trimmingCharacters(in: .whitespacesAndNewlines)
+        if CommandBarSelection.isActionQuery(text) { return .command("command") }
+        if let active = activeTab, !active.isBlank, text == active.url { return siteIcon(active.favicon, valid: active.faviconValid) }
+        if text.isEmpty { return .search }
+        return addressActionQuery == address && addressAction == "navigate" ? .globe : .search
+    }
+
+    func emoji(for space: ChromiumSpace) -> String {
+        if let emoji = space.emoji { return Space.normalizedIcon(emoji) ?? "" }
+        if space.active { return emoji }
+        return Space.normalizedIcon(UserDefaults.standard.string(forKey: "BarkChromium.\(space.id).emoji") ?? "") ?? ""
+    }
+
+    var sidebarAddress: String { addressDisposition == .newTab ? currentPageAddress : address }
+
     var addressSummary: String {
-        guard !address.isEmpty, let url = URL(string: address), let host = url.host,
-              ["http", "https"].contains(url.scheme?.lowercased() ?? "") else { return address }
+        let value = sidebarAddress
+        guard !value.isEmpty, let url = URL(string: value), let host = url.host,
+              ["http", "https"].contains(url.scheme?.lowercased() ?? "") else { return value }
         let origin = host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
         return origin + (url.port.map { ":\($0)" } ?? "")
     }
 
     func cancelAddressEditing() {
         editingAddress = false
-        let active = snapshot.tabs.first(where: { $0.active })
-        address = active?.isBlank == true ? "" : active?.url ?? ""
+        addressDisposition = .currentTab
+        address = currentPageAddress
     }
 
-    func focusAddress() { presentAddressBar?() }
+    private var currentPageAddress: String {
+        guard let tab = activeTab, !tab.isBlank else { return "" }
+        return tab.url
+    }
+
+    func composeAddress() {
+        presentAddress(.newTab)
+    }
+
+    func focusAddress() {
+        presentAddress(.currentTab)
+    }
+
+    private func presentAddress(_ disposition: AddressDisposition) {
+        addressDisposition = disposition
+        editingAddress = true
+        address = disposition == .newTab ? "" : currentPageAddress
+        presentAddressBar?()
+    }
 
     // MARK: Keyboard shortcuts
 
     /// Tabs in sidebar order: Favorites, pinned, then the rest.
     private var orderedTabs: [ChromiumTab] {
-        (isIncognito ? [] : snapshot.favorites ?? []) + snapshot.tabs.filter(\.pinned) + snapshot.tabs.filter { !$0.pinned }
+        let tabs = snapshot.sidebarTabs
+        return (isIncognito ? [] : snapshot.favorites ?? []) + tabs.filter(\.pinned) + tabs.filter { !$0.pinned }
     }
 
     func perform(_ action: BarkShortcut.Action) {
@@ -325,14 +510,13 @@ private struct AddressSuggestions: Decodable {
         let spaces = snapshot.spaces
         switch action {
         case .toggleSidebar: send("toggleSidebar")
+        case .undoOrganization: if snapshot.organizationUndoLabel != nil { send("undoOrganization") }
         case .togglePin:
             // Favorites stay where they are; unpinning one would drop it into a space.
-            if let tab = snapshot.tabs.first(where: { $0.active }) { send("pin", id: tab.id) }
+            if let tab = snapshot.sidebarTabs.first(where: { $0.active }) { send("pin", id: tab.id) }
         case .copyURL, .copyMarkdown:
             guard let active, !active.isBlank else { return }
-            let title = active.title.replacingOccurrences(of: "[", with: "\\[").replacingOccurrences(of: "]", with: "\\]")
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(action == .copyURL ? active.url : "[\(title)](\(active.url))", forType: .string)
+            copyLink(active, markdown: action == .copyMarkdown)
         case .nextTab, .previousTab:
             guard tabs.count > 1 else { return }
             let step = action == .nextTab ? 1 : -1
@@ -349,12 +533,71 @@ private struct AddressSuggestions: Decodable {
             send("space", text: spaces[number - 1].id)
         case .addSplit: send("splitNew")
         case .closeSplit: send("unsplit")
+        case .recentTab, .recentTabReverse: break  // Handled with the window by ShortcutMonitor.
         case .archiveTabs:
-            if !isIncognito, snapshot.tabs.contains(where: { !$0.pinned }) { archiveRequests += 1 }
+            if !isIncognito, snapshot.sidebarTabs.contains(where: { !$0.pinned }) { archiveRequests += 1 }
         }
     }
 
-    func shutdown() { callback = nil; swipeResetWork?.cancel() }
+    func shutdown() {
+        PreferencesPresenter.shared.detach(self)
+        callback = nil
+        swipeResetWork?.cancel()
+        if RecentTabSwitcher.shared.isShowing(for: self) { RecentTabSwitcher.shared.end() }
+    }
+
+    /// Copies a tab's link (or a Markdown link to it) and confirms with a toast.
+    func copyLink(_ tab: ChromiumTab, markdown: Bool = false) {
+        guard !tab.isBlank else { return }
+        let title = tab.displayTitle.replacingOccurrences(of: "[", with: "\\[").replacingOccurrences(of: "]", with: "\\]")
+        ToastPresenter.shared.copyLink(markdown ? "[\(title)](\(tab.url))" : tab.url, markdown: markdown,
+                                      over: hostView?.window, tint: theme.accent)
+    }
+
+    /// The tab list Chromium sent for the Control-Tab switcher.
+    func updateSwitcher(_ json: String) {
+        struct Switcher: Decodable { let tabs: [ChromiumTab] }
+        guard let data = json.data(using: .utf8), let switcher = try? JSONDecoder().decode(Switcher.self, from: data) else { return }
+        RecentTabSwitcher.shared.receive(switcher.tabs, from: self)
+    }
+
+    /// A space's dot: its own color.
+    func tint(for space: ChromiumSpace) -> Color { space.active ? theme.accent : space.themeValue.accent }
+    var folders: [ChromiumFolder] { isIncognito ? [] : activeSpace?.folders ?? [] }
+
+    private var queuedSpaceSelection: String?
+
+    /// A different profile takes over this window when its slide finishes.
+    var switchingSpaceProfile: Bool {
+        if snapshot.switchingSpace == true { return true }
+        guard let swipeCommitTarget,
+              let profile = snapshot.spaces.first(where: { $0.id == swipeCommitTarget })?.profile else { return false }
+        return profile != snapshot.profileId
+    }
+
+    func requestSpaceSelection(_ space: ChromiumSpace, width: CGFloat? = nil) {
+        guard !isIncognito, !switchingSpaceProfile,
+              let destination = snapshot.spaces.firstIndex(where: { $0.id == space.id }) else { return }
+        if let swipeCommitTarget {
+            // Keep the latest click, including a click back to the outgoing Space.
+            queuedSpaceSelection = space.id == swipeCommitTarget ? nil : space.id
+            return
+        }
+        guard let source = activeSpaceIndex else { send("space", text: space.id); return }
+        guard source != destination else { return }
+        let pageWidth = width ?? hostView?.bounds.width ?? CGFloat(snapshot.sidebarWidth ?? 260)
+        guard pageWidth > 0 else { send("space", text: space.id); return }
+        settleSpace(to: snapshot.spaces[destination], direction: destination > source ? -1 : 1,
+                    width: pageWidth, velocity: 0, fromClick: true)
+    }
+
+    func continueQueuedSpaceSelection() {
+        guard let id = queuedSpaceSelection else { return }
+        queuedSpaceSelection = nil
+        if snapshot.windowVisible != false, let space = snapshot.spaces.first(where: { $0.id == id }) {
+            requestSpaceSelection(space)
+        }
+    }
 
     // MARK: Space swipe
 
@@ -367,28 +610,38 @@ private struct AddressSuggestions: Decodable {
         guard let i = activeSpaceIndex, i + 1 < snapshot.spaces.count else { return nil }
         return snapshot.spaces[i + 1]
     }
-    /// The space being revealed by the current swipe offset.
+    var outgoingSpace: ChromiumSpace? { slide?.origin ?? activeSpace }
+    var outgoingTabs: [ChromiumTab] { slide?.originTabs ?? snapshot.sidebarTabs }
+    var outgoingTheme: SpaceTheme { slide?.theme ?? theme }
+    var outgoingEmoji: String { slide?.emoji ?? emoji }
+    var spaceInMotion: Bool { slide != nil || spaceSwipeOffset != 0 }
+    var swipeDirection: CGFloat { slide?.direction ?? (spaceSwipeOffset < 0 ? -1 : 1) }
     var swipeNeighbor: ChromiumSpace? {
-        spaceSwipeOffset < 0 ? nextSpace : spaceSwipeOffset > 0 ? previousSpace : nil
+        if let slide { return slide.target }
+        return spaceSwipeOffset < 0 ? nextSpace : spaceSwipeOffset > 0 ? previousSpace : nil
+    }
+    func previewTabs(for space: ChromiumSpace) -> [ChromiumTab] {
+        if snapshot.activeSpaceId == space.id { return snapshot.sidebarTabs }
+        return snapshot.spacePreviews?[space.id]?.filter { !$0.isSidebarPlaceholder } ?? []
     }
     var canSwipeSpaces: Bool {
-        !isIncognito && snapshot.spaces.count > 1 && snapshot.switchingSpace != true && swipeCommitTarget == nil
+        !isIncognito && snapshot.spaces.count > 1 && snapshot.switchingSpace != true && slide == nil
     }
 
     private var preparedSpaces: Set<String> = []
 
     func beginSpaceSwipe() {
-        rawSwipeOffset = spaceSwipeOffset
+        rawSwipeOffset = 0
         preparedSpaces = []
     }
 
     /// `fingerDelta` is positive when the fingers move right.
     func updateSpaceSwipe(by fingerDelta: CGFloat, width: CGFloat) {
-        guard swipeCommitTarget == nil, width > 0 else { return }
+        guard slide == nil, width > 0 else { return }
         rawSwipeOffset += fingerDelta
         let target = rawSwipeOffset < 0 ? nextSpace : previousSpace
         if let target {
-            spaceSwipeOffset = min(width, max(-width, rawSwipeOffset))
+            spaceSwipeOffset = min(width, max(-width, rawSwipeOffset * Self.spaceDragGain))
             // Load another profile as soon as a swipe reveals its space, so a
             // committed switch does not wait for the profile to load.
             if target.profile != nil, target.profile != snapshot.profileId, preparedSpaces.insert(target.id).inserted {
@@ -402,53 +655,118 @@ private struct AddressSuggestions: Decodable {
     }
 
     func endSpaceSwipe(velocity: CGFloat, width: CGFloat, cancelled: Bool) {
-        let offset = spaceSwipeOffset
-        let target = offset < 0 ? nextSpace : offset > 0 ? previousSpace : nil
-        let flicked = abs(velocity) > 10 && (velocity < 0) == (offset < 0)
-        guard !cancelled, let target, width > 0, abs(offset) > width * 0.35 || (flicked && abs(offset) > 12) else {
-            withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) { spaceSwipeOffset = 0 }
-            rawSwipeOffset = 0
+        guard slide == nil, width > 0, rawSwipeOffset != 0 else { return }
+        let direction: CGFloat = rawSwipeOffset < 0 ? -1 : 1
+        let target = direction < 0 ? nextSpace : previousSpace
+        // Keep the physical travel required for a switch independent of drag gain.
+        let travel = abs(rawSwipeOffset)
+        let projected = travel + max(0, velocity * direction) * 0.16
+        if !cancelled, let target, travel > 12, projected > width * 0.35 {
+            settleSpace(to: target, direction: direction, width: width, velocity: velocity, fromClick: false)
+        } else {
+            animateSpaceSlide(target: target, direction: direction, destination: 0,
+                              velocity: velocity, committed: false, fromClick: false)
+        }
+    }
+
+    func settleSpace(to target: ChromiumSpace, direction: CGFloat, width: CGFloat,
+                     velocity: CGFloat, fromClick: Bool) {
+        animateSpaceSlide(target: target, direction: direction, destination: direction * width,
+                          velocity: velocity, committed: true, fromClick: fromClick)
+    }
+
+    private func animateSpaceSlide(target: ChromiumSpace?, direction: CGFloat, destination: CGFloat,
+                                   velocity: CGFloat, committed: Bool, fromClick: Bool) {
+        guard let origin = activeSpace else { return }
+        swipeResetWork?.cancel()
+        slideLanded = false
+        if reduceSpaceMotion() {
+            finishSpaceSwipe()
+            if committed, let target { send("space", text: target.id) }
             return
         }
-        swipeCommitTarget = target.id
-        withAnimation(.easeOut(duration: 0.16)) { spaceSwipeOffset = offset < 0 ? -width : width }
-        if target.profile != nil && target.profile != snapshot.profileId {
-            // Another profile's window: start it now so it renders during the
-            // slide; Chromium reveals it once the slide has finished.
-            send("space", text: target.id, metadata: ["revealAfter": "160"])
+
+        let remaining = destination - spaceSwipeOffset
+        let animation: Animation
+        let duration: TimeInterval
+        if fromClick {
+            // Dock selection has no finger velocity. Start promptly and taper
+            // through the last few pixels.
+            duration = 0.28
+            animation = .timingCurve(0.20, 0.12, 0.18, 1, duration: duration)
         } else {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) { [weak self] in
-                self?.send("space", text: target.id)
+            // A critically damped spring carries the displayed velocity into
+            // release. initialVelocity is measured in remaining distances/sec.
+            let relativeSpeed = abs(remaining) > 1 ? velocity * Self.spaceDragGain / remaining : 0
+            let rate: CGFloat = committed ? 21 : 24
+            animation = .interpolatingSpring(mass: 1, stiffness: rate * rate, damping: 2 * rate,
+                                              initialVelocity: min(rate, max(-rate, relativeSpeed)))
+            duration = committed ? 0.42 : 0.35
+        }
+        slide = SpaceSlide(origin: origin, originTabs: snapshot.sidebarTabs, theme: theme, emoji: emoji,
+                           target: target, direction: direction, committed: committed)
+
+        // Prepare both the slide and its completion before the native switch:
+        // the command can publish a new snapshot immediately.
+        let landed = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.slideLanded = true
+            if !committed || self.snapshot.activeSpaceId == target?.id || self.snapshot.windowVisible == false {
+                self.finishSpaceSwipe()
+            } else {
+                // A different profile may still be drawing its window.
+                let timeout = DispatchWorkItem { [weak self] in self?.finishSpaceSwipe() }
+                self.swipeResetWork = timeout
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: timeout)
             }
         }
-        // Switching to another profile presents a different window; this
-        // sidebar is reset once it is covered, or if the switch never lands.
-        let reset = DispatchWorkItem { [weak self] in self?.finishSpaceSwipe() }
-        swipeResetWork?.cancel()
-        swipeResetWork = reset
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: reset)
+        swipeResetWork = landed
+        let start = { [weak self] in
+            guard let self, !landed.isCancelled else { return }
+            withAnimation(animation) { self.spaceSwipeOffset = destination }
+            DispatchQueue.main.asyncAfter(deadline: .now() + duration, execute: landed)
+        }
+        if fromClick {
+            // Let Chromium activate the tab and mount the incoming page at
+            // its starting position before the animation clock starts.
+            DispatchQueue.main.async { start() }
+        } else {
+            start()
+        }
+        if committed, let target {
+            let crossProfile = target.profile != nil && target.profile != snapshot.profileId
+            let metadata = crossProfile ? ["revealAfter": String(Int((duration * 1000).rounded()))] : [:]
+            send("space", text: target.id, metadata: metadata)
+        }
     }
 
     func finishSpaceSwipe() {
-        swipeResetWork?.cancel(); swipeResetWork = nil
-        swipeCommitTarget = nil
+        swipeResetWork?.cancel()
+        swipeResetWork = nil
         rawSwipeOffset = 0
-        var transaction = Transaction()
+        slideLanded = false
+        var transaction = Transaction(animation: nil)
         transaction.disablesAnimations = true
-        withTransaction(transaction) { spaceSwipeOffset = 0 }
+        withTransaction(transaction) {
+            slide = nil
+            spaceSwipeOffset = 0
+        }
+        continueQueuedSpaceSelection()
     }
+
 }
 
-// The address bar opens as a panel centered over the browser window, with the
-// full URL selected so it can be replaced or edited in place. It is a child
-// window of the browser window, so it moves with it and closes on Escape,
-// on Return (after navigating), or when focus moves elsewhere.
+// The centered panel opens empty for a new destination or with the current URL
+// selected for editing. As a child window, it follows the browser when it moves.
 @MainActor final class AddressBarController: NSObject, NSTextFieldDelegate, NSWindowDelegate {
     private let model: ChromiumSidebarModel
     private var panel: AddressBarPanel?
     private var field: NSTextField?
+    private var icon: NSImageView?
+    private var displayedIcon: AddressBarIcon?
     private weak var parent: NSWindow?
     private var suggestionsObserver: AnyCancellable?
+    private var iconObserver: AnyCancellable?
     private var openedAt: Date?
     private var scrim: AddressBarScrim?
     private static let fieldHeight: CGFloat = 56
@@ -456,8 +774,13 @@ private struct AddressSuggestions: Decodable {
 
     init(model: ChromiumSidebarModel) { self.model = model }
 
+    var isVisible: Bool { panel?.isVisible == true }
+
     func show(over window: NSWindow?) {
-        guard let window, window.isVisible else { return }
+        guard let window, window.isVisible else {
+            model.cancelAddressEditing()
+            return
+        }
         let panel = self.panel ?? makePanel()
         if parent !== window {
             parent?.removeChildWindow(panel)
@@ -467,10 +790,11 @@ private struct AddressSuggestions: Decodable {
                 NotificationCenter.default.addObserver(self, selector: #selector(parentChanged(_:)), name: name, object: window)
             }
         }
-        model.editingAddress = true
         field?.stringValue = model.address
+        model.clearSuggestions()
         // Start with recently used open tabs; typing narrows to matches.
         model.requestSuggestions(for: "")
+        updateIcon()
         position(panel)
         if panel.parent == nil { window.addChildWindow(panel, ordered: .above) }
         openedAt = Date()
@@ -495,9 +819,10 @@ private struct AddressSuggestions: Decodable {
         if let parent { NotificationCenter.default.removeObserver(self, name: nil, object: parent) }
         if let panel { parent?.removeChildWindow(panel); panel.orderOut(nil); panel.delegate = nil }
         suggestionsObserver = nil
+        iconObserver = nil
         scrim?.removeFromSuperview(); scrim = nil
         field?.delegate = nil
-        panel = nil; field = nil; parent = nil
+        panel = nil; field = nil; icon = nil; displayedIcon = nil; parent = nil
     }
 
     private func makePanel() -> AddressBarPanel {
@@ -522,9 +847,9 @@ private struct AddressSuggestions: Decodable {
         background.layer?.borderWidth = 1
         background.layer?.borderColor = NSColor.separatorColor.cgColor
 
-        let icon = NSImageView(image: NSImage(systemSymbolName: "magnifyingglass", accessibilityDescription: nil) ?? NSImage())
-        icon.symbolConfiguration = .init(pointSize: 15, weight: .medium)
-        icon.contentTintColor = .secondaryLabelColor
+        let icon = NSImageView()
+        icon.imageScaling = .scaleProportionallyDown
+        icon.translatesAutoresizingMaskIntoConstraints = false
 
         let field = NSTextField()
         field.isBezeled = false
@@ -533,7 +858,7 @@ private struct AddressSuggestions: Decodable {
         field.focusRingType = .none
         field.font = .systemFont(ofSize: 17)
         field.textColor = .labelColor
-        field.placeholderString = "Search or enter address"
+        field.placeholderString = "Search or enter address · Tab for actions"
         field.usesSingleLineMode = true
         field.lineBreakMode = .byTruncatingTail
         field.cell?.isScrollable = true
@@ -554,6 +879,8 @@ private struct AddressSuggestions: Decodable {
         list.translatesAutoresizingMaskIntoConstraints = false
         background.addSubview(list)
         NSLayoutConstraint.activate([
+            icon.widthAnchor.constraint(equalToConstant: 16),
+            icon.heightAnchor.constraint(equalToConstant: 16),
             row.leadingAnchor.constraint(equalTo: background.leadingAnchor, constant: 18),
             row.trailingAnchor.constraint(equalTo: background.trailingAnchor, constant: -18),
             row.centerYAnchor.constraint(equalTo: background.topAnchor, constant: Self.fieldHeight / 2),
@@ -565,11 +892,42 @@ private struct AddressSuggestions: Decodable {
         panel.contentView = background
         self.panel = panel
         self.field = field
+        self.icon = icon
         suggestionsObserver = model.$suggestions.dropFirst().sink { [weak self] items in
             // @Published fires before the value is stored; lay out next turn.
             DispatchQueue.main.async { self?.resize(rows: items.count) }
         }
+        iconObserver = model.objectWillChange.sink { [weak self] in
+            // Read after @Published has stored the new text, selection, or favicon.
+            DispatchQueue.main.async { self?.updateIcon() }
+        }
+        updateIcon()
         return panel
+    }
+
+    private func updateIcon() {
+        guard let icon else { return }
+        let next = model.addressBarIcon
+        guard next != displayedIcon else { return }
+        displayedIcon = next
+        switch next {
+        case .favicon(let encoded):
+            icon.symbolConfiguration = nil
+            icon.contentTintColor = nil
+            icon.image = FaviconCache.image(encoded)
+            icon.setAccessibilityLabel("Website icon")
+        case .command(let symbol):
+            icon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: "Browser action")
+            icon.symbolConfiguration = .init(pointSize: 15, weight: .medium)
+            icon.contentTintColor = .secondaryLabelColor
+            icon.setAccessibilityLabel("Browser action")
+        case .globe, .search:
+            let label = next == .search ? "Search" : "Open address"
+            icon.image = NSImage(systemSymbolName: next == .search ? "magnifyingglass" : "globe", accessibilityDescription: label)
+            icon.symbolConfiguration = .init(pointSize: 15, weight: .medium)
+            icon.contentTintColor = .secondaryLabelColor
+            icon.setAccessibilityLabel(label)
+        }
     }
 
     private func listHeight(rows: Int) -> CGFloat {
@@ -581,9 +939,10 @@ private struct AddressSuggestions: Decodable {
         position(panel, rows: rows)
     }
 
-    private func open(_ suggestion: AddressSuggestion) {
+    func open(_ suggestion: AddressSuggestion) {
+        let disposition = model.addressDisposition
         close()
-        model.openSuggestion(suggestion)
+        model.openSuggestion(suggestion, in: disposition)
     }
 
     // Dims the browser window's content under the bar. The scrim is a plain
@@ -640,14 +999,14 @@ private struct AddressSuggestions: Decodable {
         position(panel)
     }
 
-    // Clicking anywhere else, including the page, dismisses the bar. Chromium
-    // can also re-activate the browser window on its own right after the bar
-    // opens (for example while finishing a new tab); keep the bar then.
+    // When Chromium asks to edit an existing tab's address, it can briefly
+    // reclaim key focus as that tab finishes opening.
     func windowDidResignKey(_ notification: Notification) {
         let type = NSApp.currentEvent?.type
         let clicked = type == .leftMouseDown || type == .rightMouseDown || type == .otherMouseDown
         let justOpened = openedAt.map { Date().timeIntervalSince($0) < 1.5 } ?? false
-        if !clicked && justOpened, let panel, panel.isVisible, NSApp.isActive {
+        if model.editingAddress, model.addressDisposition == .currentTab,
+           !clicked && justOpened, let panel, panel.isVisible, NSApp.isActive {
             DispatchQueue.main.async { [weak self] in
                 guard let self, let panel = self.panel, panel.isVisible else { return }
                 panel.makeKey()
@@ -666,6 +1025,13 @@ private struct AddressSuggestions: Decodable {
     }
 
     func control(_ control: NSControl, textView: NSTextView, doCommandBy command: Selector) -> Bool {
+        if command == #selector(NSResponder.insertTab(_:)), control.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            control.stringValue = "> "
+            model.address = control.stringValue
+            model.selectedSuggestion = nil
+            model.requestSuggestions(for: control.stringValue)
+            return true
+        }
         if command == #selector(NSResponder.moveDown(_:)) || command == #selector(NSResponder.moveUp(_:)) {
             guard !model.suggestions.isEmpty else { return false }
             model.moveSuggestionSelection(by: command == #selector(NSResponder.moveDown(_:)) ? 1 : -1)
@@ -677,8 +1043,11 @@ private struct AddressSuggestions: Decodable {
                 return true
             }
             let text = control.stringValue
+            // Action-only input never leaks into a web search when no command matches.
+            if CommandBarSelection.isActionQuery(text) { NSSound.beep(); return true }
+            let disposition = model.addressDisposition
             close()
-            model.send("navigate", text: text)
+            model.submitAddress(text, in: disposition)
             return true
         }
         if command == #selector(NSResponder.cancelOperation(_:)) {
@@ -713,8 +1082,9 @@ private struct AddressSuggestionList: View {
 private struct AddressSuggestionRow: View {
     let suggestion: AddressSuggestion
     let selected: Bool
-    private var icon: NSImage? { FaviconCache.image(suggestion.favicon) }
+    private var icon: NSImage? { suggestion.faviconValid == false ? nil : FaviconCache.image(suggestion.favicon) }
     private var subtitle: String {
+        if suggestion.isCommand { return suggestion.detail ?? "Browser action" }
         guard let url = URL(string: suggestion.url), let host = url.host else { return suggestion.url }
         let path = url.path == "/" ? "" : url.path
         return (host.hasPrefix("www.") ? String(host.dropFirst(4)) : host) + path
@@ -724,7 +1094,7 @@ private struct AddressSuggestionRow: View {
             Group {
                 if let icon { Image(nsImage: icon).resizable().scaledToFit() }
                 else {
-                    Image(systemName: suggestion.isTab ? "square.on.square" : suggestion.kind == "history" ? "clock" : "globe")
+                    Image(systemName: suggestion.isCommand ? (suggestion.symbol ?? "command") : suggestion.isTab ? "square.fill" : suggestion.kind == "history" ? "clock" : "globe")
                         .foregroundStyle(.secondary)
                 }
             }.frame(width: 16, height: 16)
@@ -734,10 +1104,10 @@ private struct AddressSuggestionRow: View {
                 Text(subtitle).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
             }
             Spacer(minLength: 8)
-            if suggestion.isTab {
-                Text(suggestion.space.map { "Switch to tab · \($0)" } ?? "Switch to tab")
-                    .font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary).lineLimit(1)
-            }
+            Text(suggestion.isCommand ? "Run action" : suggestion.isTab
+                 ? (suggestion.space.map { "Switch to tab · \($0)" } ?? "Switch to tab")
+                 : suggestion.kind == "history" ? "History" : suggestion.kind == "search" ? "Search" : "Open address")
+                .font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary).lineLimit(1)
         }
         .padding(.horizontal, 12)
         .frame(maxHeight: .infinity)
@@ -767,80 +1137,76 @@ private struct AddressSuggestionRow: View {
 }
 
 // A shared, understated hover treatment for navigation, tab actions and spaces.
-private struct SidebarButtonStyle: ButtonStyle {
-    @State private var hovered = false
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .background(Color.primary.opacity(configuration.isPressed ? 0.13 : hovered ? 0.065 : 0),
-                        in: RoundedRectangle(cornerRadius: 7, style: .continuous))
-            .contentShape(RoundedRectangle(cornerRadius: 7))
-            .onHover { hovered = $0 }
+private typealias SidebarButtonStyle = BarkControlStyle
+
+// A pale, gently raised surface marks selected tabs, Favorites and spaces.
+private struct SidebarSelectionBackground: View {
+    let tint: Color
+    var cornerRadius: CGFloat = 9
+    @Environment(\.colorScheme) private var scheme
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+            .fill(Color.white.opacity(scheme == .dark ? 0.14 : 0.70))
+            .overlay {
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .fill(tint.opacity(scheme == .dark ? 0.06 : 0.03))
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(scheme == .dark ? 0.06 : 0.04), lineWidth: 0.5)
+            }
+            .shadow(color: .black.opacity(scheme == .dark ? 0.12 : 0.05), radius: 1.5, y: 1)
     }
 }
 
 private struct ChromiumTabRow: View {
     @ObservedObject var model: ChromiumSidebarModel
     let tab: ChromiumTab
+    var indent: CGFloat = 0
     @Environment(\.colorScheme) private var scheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var hovered = false
+    @State private var faviconHovered = false
+    @State private var renaming = false
+    @State private var draftTitle = ""
+    @FocusState private var titleFocused: Bool
     private var favicon: NSImage? { tab.faviconImage }
-    private var title: String { tab.title.isEmpty || tab.isBlank ? "New tab" : tab.title }
-    private var muteLabel: String { tab.muted == true ? "Unmute tab" : "Mute tab" }
-    private var audioDescription: String { tab.muted == true ? "Muted. " : tab.audible == true ? "Playing audio. " : "" }
-    var body: some View {
-        HStack(spacing: 9) {
-            Group {
-                if tab.loading { ProgressView().controlSize(.mini) }
-                else if !tab.isBlank, let favicon { Image(nsImage: favicon).resizable().scaledToFit() }
-                else { Image(systemName: tab.isBlank ? "square" : "globe").foregroundStyle(.secondary) }
-            }.frame(width: 16, height: 16).accessibilityHidden(true)
-            Text(title).font(.system(size: 13, weight: tab.active ? .medium : .regular))
-                .lineLimit(1).frame(maxWidth: .infinity, alignment: .leading)
-            if tab.audible == true || tab.muted == true {
-                Button { model.send("mute", id: tab.id) } label: {
-                    Image(systemName: tab.muted == true ? "speaker.slash.fill" : "speaker.wave.2.fill")
-                        .font(.system(size: 10)).frame(width: 22, height: 24)
-                }.buttonStyle(SidebarButtonStyle()).foregroundStyle(.secondary)
-                    .help(muteLabel).accessibilityLabel(muteLabel)
-            }
-            if tab.split != nil && !hovered {
-                Image(systemName: "rectangle.split.2x1").font(.system(size: 10)).foregroundStyle(.secondary)
-                    .help("In a split view").accessibilityHidden(true)
-            }
-            if hovered {
-                HStack(spacing: 1) {
-                    Button { model.send("pin", id: tab.id) } label: {
-                        Image(systemName: tab.pinned ? "pin.slash" : "pin").font(.system(size: 10)).frame(width: 22, height: 24)
-                    }.help(tab.pinned ? "Unpin tab" : "Pin tab").accessibilityLabel(tab.pinned ? "Unpin tab" : "Pin tab")
-                    Button { model.send("close", id: tab.id) } label: {
-                        Image(systemName: "xmark").font(.system(size: 10, weight: .medium)).frame(width: 22, height: 24)
-                    }.help("Close tab").accessibilityLabel("Close tab")
-                }.buttonStyle(SidebarButtonStyle()).foregroundStyle(.secondary)
-            }
-        }.padding(.leading, 11).padding(.trailing, hovered ? 5 : 11).frame(height: 36)
-            .background {
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .fill(tab.active ? Color.white.opacity(scheme == .dark ? 0.12 : 0.60)
-                          // The other half of the split on screen.
-                          : tab.splitActive == true ? Color.white.opacity(scheme == .dark ? 0.06 : 0.30)
-                          : Color.primary.opacity(hovered ? 0.045 : 0))
-                    .shadow(color: .black.opacity(tab.active ? (scheme == .dark ? 0.12 : 0.045) : 0), radius: 2, y: 1)
-            }
-            .contentShape(RoundedRectangle(cornerRadius: 9)).onTapGesture { model.send("select", id: tab.id) }
-            .onHover { hovered = $0 }
-            .accessibilityElement(children: .combine).accessibilityLabel(title)
-            .accessibilityValue((tab.active ? "Selected. " : "") + (tab.split != nil ? "In a split view. " : "") + audioDescription + (tab.pinned ? "Pinned" : ""))
-            .accessibilityAction { model.send("select", id: tab.id) }
-            .accessibilityAction(named: "Close tab") { model.send("close", id: tab.id) }
-            .accessibilityAction(named: tab.pinned ? "Unpin tab" : "Pin tab") { model.send("pin", id: tab.id) }
-            .accessibilityAction(named: muteLabel) { model.send("mute", id: tab.id) }
-            .contextMenu {
+    private var title: String { tab.displayTitle }
+    private var pageTitle: String { tab.pageTitle }
+    private var drifted: Bool { tab.pinned && tab.drifted == true }
+
+    // Double-click a tab, or choose Rename, to give it a title of its own.
+    private func startRenaming() {
+        guard !model.isIncognito else { return }
+        draftTitle = title
+        renaming = true
+        DispatchQueue.main.async { titleFocused = true }
+    }
+    private func finishRenaming(save: Bool) {
+        guard renaming else { return }
+        renaming = false
+        guard save else { return }
+        let text = draftTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        // An empty title, or the page's own, goes back to following the page.
+        model.send("renameTab", id: tab.id, text: text == pageTitle ? "" : text)
+    }
+
+    @ViewBuilder private var menuItems: some View {
                 if !tab.isBlank {
-                    Button("Copy Link") {
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(tab.url, forType: .string)
-                    }
+                    Button("Copy Link") { model.copyLink(tab) }
                     Button("Duplicate") { model.send("duplicate", id: tab.id) }
+                }
+                if !model.isIncognito {
+                    Button("Rename…") { startRenaming() }
+                    if tab.customTitle != nil {
+                        Button("Use Page Title") { model.send("renameTab", id: tab.id, text: "") }
+                    }
+                }
+                if drifted {
+                    Divider()
+                    Button("Go Back to Pinned Page") { model.send("resetPin", id: tab.id) }
+                    Button("Pin This Page Instead") { model.send("setPinURL", id: tab.id) }
                 }
                 Button(muteLabel) { model.send("mute", id: tab.id) }
                 if tab.split != nil {
@@ -853,23 +1219,222 @@ private struct ChromiumTabRow: View {
                     Button("Add to Favorites") { model.send("moveTab", id: tab.id, metadata: ["zone": "favorites", "before": ""]) }
                 }
                 Button(tab.pinned ? "Unpin tab" : "Pin tab") { model.send("pin", id: tab.id) }
+                if !model.isIncognito {
+                    Menu("Move to Folder") {
+                        ForEach(model.folders) { folder in
+                            Button((tab.folder == folder.id ? "✓ " : "") + ChromiumFolderTree.path(folder, in: model.folders)) {
+                                model.send("moveToFolder", id: tab.id, metadata: ["folder": folder.id])
+                            }
+                        }
+                        if !model.folders.isEmpty { Divider() }
+                        Button("New Folder") { model.requestNewFolder(containing: tab.id) }
+                        if tab.folder != nil {
+                            Button("Remove from Folder") { model.send("moveToFolder", id: tab.id, metadata: ["folder": ""]) }
+                        }
+                    }
+                }
+                Button("Move to New Window") { model.send("detachTab", id: tab.id) }
                 if !model.moveTargets.isEmpty {
                     Menu("Move to Space") {
                         ForEach(model.moveTargets) { space in
-                            Button(model.emoji(for: space) + " " + space.displayName) {
+                            Button((model.emoji(for: space).isEmpty ? "" : model.emoji(for: space) + " ") + space.displayName) {
                                 model.send("moveTabToSpace", id: tab.id, text: space.id)
                             }
                         }
                     }
                 }
                 Divider()
-                Button("Close tab") { model.send("close", id: tab.id) }
+                Button(tab.closeLabel) { model.close(tab) }.disabled(tab.sessionClosed == true)
                 // Pinned tabs are kept, as in Chromium's own tab menu.
                 Button("Close Other Tabs") { model.send("closeOthers", id: tab.id) }
-                    .disabled(!model.snapshot.tabs.contains { !$0.pinned && $0.id != tab.id })
+                    .disabled(!model.snapshot.sidebarTabs.contains { !$0.pinned && $0.id != tab.id })
                 Button("Close Tabs Below") { model.send("closeBelow", id: tab.id) }
-                    .disabled(!(model.snapshot.tabs.drop { $0.id != tab.id }.dropFirst().contains { !$0.pinned }))
+                    .disabled(!(model.snapshot.sidebarTabs.drop { $0.id != tab.id }.dropFirst().contains { !$0.pinned }))
+    }
+
+    @ViewBuilder private var icon: some View {
+        Group {
+            if drifted && faviconHovered {
+                Image(systemName: "arrow.uturn.backward").font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
+            } else if tab.loading { ProgressView().controlSize(.mini) }
+            else if !tab.isBlank, let favicon { Image(nsImage: favicon).resizable().scaledToFit() }
+            else { Image(systemName: "square.fill").foregroundStyle(.secondary) }
+        }.frame(width: 16, height: 16)
+    }
+    private var muteLabel: String { tab.muted == true ? "Unmute tab" : "Mute tab" }
+    private var audioDescription: String { tab.muted == true ? "Muted. " : tab.audible == true ? "Playing audio. " : "" }
+    private var accessibilityDescription: String {
+        let parts: [String] = [tab.active ? "Selected. " : "", tab.split != nil ? "In a split view. " : "",
+                               audioDescription, tab.pinned ? "Pinned" : ""]
+        return parts.joined() + (tab.sessionClosed == true ? ". Session closed" : "")
+    }
+    private var rowFill: Color {
+        // The other half of the split on screen.
+        if tab.splitActive == true { return Color.white.opacity(scheme == .dark ? 0.06 : 0.30) }
+        return Color.primary.opacity(hovered ? 0.045 : 0)
+    }
+
+    @ViewBuilder private var leading: some View {
+        if drifted {
+            // A pinned tab away from its page: the icon takes it back.
+            Button { model.send("resetPin", id: tab.id) } label: { icon.contentShape(Rectangle()) }
+                .buttonStyle(.plain).onHover { faviconHovered = $0 }
+                .help("Go back to the pinned page").accessibilityLabel("Go back to the pinned page")
+            Text("/").font(.system(size: 13)).foregroundStyle(.tertiary).padding(.horizontal, -4).accessibilityHidden(true)
+        } else {
+            icon.accessibilityHidden(true)
+        }
+    }
+
+    @ViewBuilder private var titleView: some View {
+        if renaming {
+            TextField("Tab name", text: $draftTitle)
+                .textFieldStyle(.plain).font(.system(size: 13, weight: .medium))
+                .focused($titleFocused).onSubmit { finishRenaming(save: true) }
+                .onExitCommand { finishRenaming(save: false) }
+                .onChange(of: titleFocused) { focused in if !focused { finishRenaming(save: true) } }
+                .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            Text(title).font(.system(size: 13, weight: tab.active ? .medium : .regular))
+                .lineLimit(1).frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    @ViewBuilder private var trailing: some View {
+        if tab.audible == true || tab.muted == true {
+            Button { model.send("mute", id: tab.id) } label: {
+                Image(systemName: tab.muted == true ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                    .font(.system(size: 10)).frame(width: 22, height: 24)
+            }.buttonStyle(SidebarButtonStyle()).foregroundStyle(.secondary)
+                .help(muteLabel).accessibilityLabel(muteLabel)
+        }
+        // Keep one close-button slot so hovering never reflows the title.
+        // Split membership uses the same space until the close button fades in.
+        // Pinning remains available through the context menu and drag actions.
+        ZStack(alignment: .trailing) {
+            if tab.split != nil {
+                Image(systemName: "rectangle.split.2x1").font(.system(size: 10)).foregroundStyle(.secondary)
+                    .frame(width: 24, height: 24).opacity(hovered ? 0 : 1)
+                    .help("In a split view").accessibilityHidden(true)
             }
+            if tab.sessionClosed != true {
+                Button { model.close(tab) } label: {
+                    Image(systemName: "xmark").font(.system(size: 10, weight: .medium)).frame(width: 24, height: 24)
+                }.help(tab.closeLabel).accessibilityLabel(Text(tab.closeLabel))
+                    .buttonStyle(SidebarButtonStyle()).foregroundStyle(.secondary)
+                    .opacity(hovered ? 1 : 0)
+                    .disabled(!hovered).allowsHitTesting(hovered).accessibilityHidden(!hovered)
+            }
+        }.frame(width: 24, height: 24)
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: hovered)
+    }
+
+    private var row: some View {
+        HStack(spacing: 9) {
+            leading
+            titleView
+            trailing
+        }.padding(.leading, 11 + indent).padding(.trailing, 5).frame(height: 36)
+            .background {
+                if tab.active {
+                    SidebarSelectionBackground(tint: model.theme.accent)
+                } else {
+                    RoundedRectangle(cornerRadius: 9, style: .continuous).fill(rowFill)
+                }
+            }
+    }
+
+    var body: some View {
+        row
+            .contentShape(RoundedRectangle(cornerRadius: 9)).onTapGesture { if !renaming { model.send("select", id: tab.id) } }
+            .simultaneousGesture(TapGesture(count: 2).onEnded { if !renaming { startRenaming() } })
+            .onHover { hovered = $0 }
+            .accessibilityElement(children: .combine).accessibilityLabel(title)
+            .accessibilityValue(accessibilityDescription)
+            .accessibilityAction { model.send("select", id: tab.id) }
+            .accessibilityActions {
+                if tab.sessionClosed != true { Button(tab.closeLabel) { model.close(tab) } }
+            }
+            .accessibilityAction(named: "Move to New Window") { model.send("detachTab", id: tab.id) }
+            .accessibilityAction(named: tab.pinned ? "Unpin tab" : "Pin tab") { model.send("pin", id: tab.id) }
+            .accessibilityAction(named: muteLabel) { model.send("mute", id: tab.id) }
+            .accessibilityAction(named: "Rename tab") { startRenaming() }
+            .contextMenu { menuItems }
+    }
+
+}
+
+// A folder of pinned tabs. Click to open or close it; double-click to rename.
+private struct SidebarFolderHeader: View {
+    @ObservedObject var model: ChromiumSidebarModel
+    let folder: ChromiumFolder
+    let count: Int
+    @Binding var renameTarget: String?
+    @State private var hovered = false
+    @State private var draftName = ""
+    @FocusState private var nameFocused: Bool
+    private var collapsed: Bool { folder.collapsed == true }
+    private var renaming: Bool { renameTarget == folder.id }
+
+    private func startRenaming() {
+        draftName = folder.name
+        renameTarget = folder.id
+        DispatchQueue.main.async { nameFocused = true }
+    }
+    private func finish(save: Bool) {
+        guard renaming else { return }
+        renameTarget = nil
+        let name = draftName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if save, !name.isEmpty, name != folder.name {
+            model.send("renameFolder", text: String(name.prefix(64)), metadata: ["folder": folder.id])
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 9) {
+            Image(systemName: collapsed ? "folder" : "folder.fill").font(.system(size: 12)).foregroundStyle(.secondary)
+                .frame(width: 16, height: 16)
+            if renaming {
+                TextField("Folder name", text: $draftName).textFieldStyle(.plain).font(.system(size: 13, weight: .medium))
+                    .focused($nameFocused).onSubmit { finish(save: true) }.onExitCommand { finish(save: false) }
+                    .onChange(of: nameFocused) { focused in if !focused { finish(save: true) } }
+                    .onAppear { if draftName.isEmpty { draftName = folder.name }; DispatchQueue.main.async { nameFocused = true } }
+            } else {
+                Text(folder.name).font(.system(size: 13)).lineLimit(1)
+            }
+            Spacer(minLength: 0)
+            Image(systemName: "chevron.right").font(.system(size: 9, weight: .semibold)).foregroundStyle(.tertiary)
+                .rotationEffect(.degrees(collapsed ? 0 : 90)).opacity(hovered || collapsed ? 1 : 0)
+        }.padding(.horizontal, 11).frame(height: 34)
+            .background(Color.primary.opacity(hovered ? 0.045 : 0), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: 9))
+            .onTapGesture { if !renaming { model.send("toggleFolder", metadata: ["folder": folder.id]) } }
+            .simultaneousGesture(TapGesture(count: 2).onEnded { if !renaming { startRenaming() } })
+            .onHover { hovered = $0 }
+            .accessibilityElement(children: .combine).accessibilityLabel("Folder " + folder.name)
+            .accessibilityValue((collapsed ? "Closed" : "Open") + ", \(count) " + (count == 1 ? "tab" : "tabs"))
+            .accessibilityAddTraits(.isButton)
+            .accessibilityAction { model.send("toggleFolder", metadata: ["folder": folder.id]) }
+            .contextMenu {
+                Button(collapsed ? "Open Folder" : "Close Folder") { model.send("toggleFolder", metadata: ["folder": folder.id]) }
+                Button("Rename Folder…") { startRenaming() }
+                Button("New Folder Inside…") {
+                    model.renameNextFolder = true
+                    model.send("newFolder", metadata: ["parent": folder.id])
+                }
+                Menu("Move Folder To") {
+                    Button("Top Level") { model.send("moveFolder", metadata: ["folder": folder.id, "parent": ""]) }
+                        .disabled(folder.parent == nil || folder.parent == "")
+                    ForEach(model.folders.filter { !ChromiumFolderTree.descendants(of: folder.id, folders: model.folders).contains($0.id) }) { destination in
+                        Button(ChromiumFolderTree.path(destination, in: model.folders)) {
+                            model.send("moveFolder", metadata: ["folder": folder.id, "parent": destination.id])
+                        }.disabled(folder.parent == destination.id)
+                    }
+                }
+                Divider()
+                Button("Delete Folder") { model.send("deleteFolder", metadata: ["folder": folder.id]) }
+            }
+            .onChange(of: renameTarget) { target in if target == folder.id && draftName.isEmpty { draftName = folder.name } }
     }
 }
 
@@ -877,21 +1442,22 @@ private struct ChromiumTabRow: View {
 private struct FavoriteTile: View {
     @ObservedObject var model: ChromiumSidebarModel
     let tab: ChromiumTab
-    @Environment(\.colorScheme) private var scheme
     @State private var hovered = false
-    private var title: String { tab.title.isEmpty || tab.isBlank ? "New tab" : tab.title }
+    private var title: String { tab.displayTitle }
     var body: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(tab.active ? Color.white.opacity(scheme == .dark ? 0.16 : 0.70)
-                                 : Color.primary.opacity(hovered ? 0.09 : 0.055))
-                .shadow(color: .black.opacity(tab.active ? (scheme == .dark ? 0.12 : 0.05) : 0), radius: 2, y: 1)
+            if tab.active {
+                SidebarSelectionBackground(tint: model.theme.accent, cornerRadius: 10)
+            } else {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Color.primary.opacity(hovered ? 0.09 : 0.055))
+            }
             Group {
                 if tab.loading { ProgressView().controlSize(.small) }
                 else if !tab.isBlank, let icon = tab.faviconImage { Image(nsImage: icon).resizable().scaledToFit() }
-                else { Image(systemName: tab.isBlank ? "square" : "globe").foregroundStyle(.secondary) }
+                else { Image(systemName: "square.fill").foregroundStyle(.secondary) }
             }.frame(width: 18, height: 18)
-        }.frame(height: 42)
+        }.frame(height: 46)
             .contentShape(RoundedRectangle(cornerRadius: 10)).onTapGesture { model.send("select", id: tab.id) }
             .onHover { hovered = $0 }.help(title)
             .accessibilityElement().accessibilityLabel(title).accessibilityAddTraits(.isButton)
@@ -900,7 +1466,8 @@ private struct FavoriteTile: View {
             .contextMenu {
                 Button(tab.muted == true ? "Unmute tab" : "Mute tab") { model.send("mute", id: tab.id) }
                 Button("Remove from Favorites") { model.send("moveTab", id: tab.id, metadata: ["zone": "unpinned", "before": ""]) }
-                Button("Close tab") { model.send("close", id: tab.id) }
+                Button("Move to New Window") { model.send("detachTab", id: tab.id) }
+                Button(tab.closeLabel) { model.close(tab) }.disabled(tab.sessionClosed == true)
             }
     }
 }
@@ -927,6 +1494,87 @@ private struct MiddleClickCatcher: NSViewRepresentable {
     }
 }
 
+private struct ChromiumAddressBar: View {
+    @ObservedObject var model: ChromiumSidebarModel
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var hovered = false
+    @FocusState private var focusedControl: Control?
+    @AccessibilityFocusState private var accessibleControl: Control?
+    private enum Control: Hashable { case address, siteInfo, extensions }
+
+    private var showControls: Bool {
+        hovered || focusedControl != nil || accessibleControl != nil || model.editingAddress || model.siteControlsOpen
+    }
+    private var hasSecurityWarning: Bool {
+        ["warning", "dangerous"].contains(model.snapshot.securityLevel ?? "")
+    }
+
+    var body: some View {
+        // The full surface opens the composer; visible utility buttons intercept
+        // only their own clicks. Fixed insets keep the origin steady on hover.
+        Button { model.composeAddress() } label: {
+            Text(model.addressSummary.isEmpty ? "Search or enter address" : model.addressSummary)
+                .font(.system(size: 12.5))
+                .foregroundStyle(model.addressSummary.isEmpty ? .tertiary : .primary)
+                .lineLimit(1).truncationMode(.tail)
+                .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+                .padding(.leading, 11).padding(.trailing, 65).frame(height: 36)
+                .contentShape(RoundedRectangle(cornerRadius: 9))
+        }.buttonStyle(.plain)
+            .focused($focusedControl, equals: .address)
+            .accessibilityFocused($accessibleControl, equals: .address)
+            .help("Search or open a new tab (⌘T)").accessibilityLabel("Address")
+            .accessibilityValue(model.sidebarAddress)
+            .overlay(alignment: .trailing) {
+                HStack(spacing: 2) {
+                    Button {
+                        model.setSiteControlsOpen(false)
+                        model.send("extensionMenu")
+                    } label: {
+                        Image(systemName: "puzzlepiece.extension")
+                            .font(.system(size: 12)).frame(width: 24, height: 28)
+                            .opacity(showControls ? 1 : 0)
+                    }.buttonStyle(SidebarButtonStyle()).foregroundStyle(.secondary)
+                        .focused($focusedControl, equals: .extensions)
+                        .accessibilityFocused($accessibleControl, equals: .extensions)
+                        .help("Extensions").accessibilityLabel("Extensions")
+                        .allowsHitTesting(showControls)
+                    Button { model.setSiteControlsOpen(!model.siteControlsOpen) } label: {
+                        Image(systemName: hasSecurityWarning ? "exclamationmark.triangle" : "slider.horizontal.3")
+                            .font(.system(size: 12)).frame(width: 24, height: 28)
+                            .opacity(showControls || hasSecurityWarning ? 1 : 0)
+                    }.buttonStyle(SidebarButtonStyle())
+                        .background(Color.primary.opacity(model.siteControlsOpen ? 0.08 : 0), in: RoundedRectangle(cornerRadius: 7))
+                        .foregroundStyle(model.snapshot.securityLevel == "dangerous" ? Color.red : hasSecurityWarning ? Color.orange : Color.secondary)
+                        .focused($focusedControl, equals: .siteInfo)
+                        .accessibilityFocused($accessibleControl, equals: .siteInfo)
+                        .help("Site controls and permissions").accessibilityLabel("Site controls")
+                        .accessibilityValue(model.snapshot.securityDescription ?? "")
+                        .disabled(model.activeTab == nil)
+                        .allowsHitTesting(showControls || hasSecurityWarning)
+                        .popover(isPresented: Binding(get: { model.siteControlsOpen }, set: { model.setSiteControlsOpen($0) }),
+                                 arrowEdge: .bottom) {
+                            SiteControlsView(model: model)
+                        }
+                }.padding(.trailing, 7)
+            }
+            .background(Color.primary.opacity(showControls ? 0.065 : 0.025), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(model.editingAddress ? 0.13 : 0), lineWidth: 1)
+                    .allowsHitTesting(false)
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 9))
+            .onHover { hovered = $0 }
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.14), value: showControls)
+            .onChange(of: model.activeTab?.id) { _ in model.setSiteControlsOpen(false) }
+            .onChange(of: model.activeTab?.url) { _ in model.setSiteControlsOpen(false) }
+            .onChange(of: model.snapshot.windowVisible) { visible in if visible == false { model.setSiteControlsOpen(false) } }
+            .onDisappear { model.setSiteControlsOpen(false) }
+            .accessibilityElement(children: .contain)
+    }
+}
+
 // Kept in its own native host so the actual macOS traffic lights remain exposed.
 private struct ChromiumSidebarHeader: View {
     @ObservedObject var model: ChromiumSidebarModel
@@ -939,12 +1587,14 @@ private struct ChromiumSidebarHeader: View {
                 Image(systemName: "eyeglasses").font(.system(size: 12)).frame(width: 24, height: 28)
                     .help("Incognito window").accessibilityLabel("Incognito window")
             }
-            if model.snapshot.sidebarCollapsed != true {
-                Spacer(minLength: 0)
-                control("chevron.left", "Back") { model.send("back") }.disabled(!model.snapshot.canGoBack)
-                control("chevron.right", "Forward") { model.send("forward") }.disabled(!model.snapshot.canGoForward)
-                if model.activeTabLoading { control("xmark", "Stop loading") { model.send("stop") } }
-                else { control("arrow.clockwise", "Reload") { model.send("reload") } }
+            // The native host reveals the whole row together. Changing its
+            // contents on snapshot acknowledgement makes controls pop mid-slide.
+            Spacer(minLength: 0)
+            control("chevron.left", "Back") { model.send("back") }.disabled(!model.snapshot.canGoBack)
+            control("chevron.right", "Forward") { model.send("forward") }.disabled(!model.snapshot.canGoForward)
+            control(model.activeTabLoading ? "xmark" : "arrow.clockwise",
+                    model.activeTabLoading ? "Stop loading" : "Reload") {
+                model.send(model.activeTabLoading ? "stop" : "reload")
             }
         }.frame(maxWidth: .infinity, maxHeight: .infinity).foregroundStyle(.secondary)
     }
@@ -959,6 +1609,7 @@ private enum DropZone: String { case favorites, pinned, unpinned }
 private enum TabDropTarget: Equatable {
     case sidebar(zone: DropZone, before: Int?)
     case split(SplitDropController.Side)
+    case newWindow
 }
 
 /// A tab being dragged in the sidebar. Positions are in the sidebar's
@@ -974,6 +1625,7 @@ private struct TabDrag {
     var dropped = false
     /// Over the page: the half where releasing opens the tab in a split view.
     var splitSide: SplitDropController.Side?
+    var newWindow = false
     /// Last destination announced with haptics; reset for each new drag.
     var feedbackTarget: TabDropTarget?
 }
@@ -985,44 +1637,128 @@ private struct TabFramesKey: PreferenceKey {
     }
 }
 
+// Keep native scrolling and thumb dragging without a permanent scroller gutter.
+// This view lives inside the tab list, never around the fixed sidebar controls.
+private struct SidebarScrollbarSize: NSViewRepresentable {
+    let model: ChromiumSidebarModel
+    func makeNSView(context: Context) -> SizingView { SizingView() }
+    func updateNSView(_ view: SizingView, context: Context) { view.model = model; view.applySize() }
+
+    final class SizingView: NSView {
+        weak var model: ChromiumSidebarModel?
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            DispatchQueue.main.async { [weak self] in self?.applySize() }
+        }
+        func applySize() {
+            guard let scrollView = enclosingScrollView else { return }
+            model?.tabScrollView = scrollView
+            if scrollView.scrollerStyle != .overlay { scrollView.scrollerStyle = .overlay }
+            scrollView.autohidesScrollers = true
+            if let scroller = scrollView.verticalScroller, scroller.controlSize != .small {
+                scroller.controlSize = .small
+                scrollView.tile()
+            }
+        }
+    }
+}
+
+/// A separate native host places this target across the sidebar/page boundary.
+/// Its width never becomes padding inside the sidebar or covers its scrollbar.
+private struct SidebarResizeHandle: View {
+    @ObservedObject var model: ChromiumSidebarModel
+    @State private var startWidth: Double?
+    @State private var hovered = false
+    private var width: Double { model.hostView.map { Double($0.bounds.width) } ?? model.snapshot.sidebarWidth ?? 260 }
+
+    var body: some View {
+        Color.clear.contentShape(Rectangle())
+            .overlay(alignment: .leading) {
+                Color.primary.opacity(hovered || startWidth != nil ? 0.15 : 0)
+                    .frame(width: 2).allowsHitTesting(false)
+            }
+            .onHover {
+                hovered = $0
+                if $0 { NSCursor.resizeLeftRight.set() }
+                else if startWidth == nil { NSCursor.arrow.set() }
+            }
+            .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .global).onChanged { value in
+                if startWidth == nil { startWidth = width }
+                model.resizingSidebar = true
+                model.send("resize", width: min(400, max(200, (startWidth ?? width) + value.translation.width)))
+            }.onEnded { _ in
+                startWidth = nil
+                model.resizingSidebar = false
+                NSCursor.arrow.set()
+            })
+            .onDisappear { startWidth = nil; model.resizingSidebar = false }
+            .accessibilityLabel("Resize sidebar").help("Drag to resize sidebar")
+            .accessibilityAdjustableAction { model.send("resize", width: min(400, max(200, width + ($0 == .increment ? 20 : -20)))) }
+    }
+}
+
+@MainActor private final class SidebarResizeHostingView: NSHostingView<SidebarResizeHandle> {
+    init(model: ChromiumSidebarModel) {
+        super.init(rootView: SidebarResizeHandle(model: model))
+        sizingOptions = []
+        if #available(macOS 13.3, *) { safeAreaRegions = [] }
+    }
+    @available(*, unavailable) required init(rootView: SidebarResizeHandle) { fatalError() }
+    @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
+    override var isOpaque: Bool { false }
+}
+
 private struct ChromiumSidebar: View {
     @ObservedObject var model: ChromiumSidebarModel
-    @State private var resizeStart: Double?
-    @State private var resizing = false
-    @State private var resizeHovered = false
     @State private var draft: SpaceDraft?
     @State private var settingsSpace: SpaceSettingsTarget?
     @State private var settingsProfileID = ""
     @State private var draftProfileID = ""
     @State private var creatingProfile = false
-    @State private var importingArc = false
+    @State private var showingImport = false
     @State private var profileName = ""
     @State private var tabDrag: TabDrag?
+    @GestureState private var tabGestureActive = false
     @State private var tabFrames: [Int: CGRect] = [:]
     @State private var archiveNotice: ArchiveNotice?
+    @State private var folderToRename: String?
+    @State private var knownFolders: Set<String> = []
     private var floating: Bool { model.snapshot.sidebarCollapsed == true }
+    // Docked pages already contribute a 7 pt frame beside the sidebar. Count
+    // that toward the visible 8 pt margin instead of adding it a second time.
+    private var trailingInset: CGFloat { floating ? 8 : 1 }
 
     var body: some View {
         GeometryReader { geometry in
             VStack(alignment: .leading, spacing: 0) {
-                addressField.padding(.horizontal, 10).padding(.top, 5).padding(.bottom, 18)
+                ChromiumAddressBar(model: model).padding(.leading, 8).padding(.trailing, trailingInset).padding(.top, 5).padding(.bottom, 8)
+                    .fixedSize(horizontal: false, vertical: true)
                     .background(frameReporter(Self.addressKey))
-                    .overlay { if showFavoritesHint { favoritesHint.padding(.horizontal, 10).padding(.top, 5).padding(.bottom, 18) } }
+                    .overlay { if showFavoritesHint { favoritesHint.padding(.leading, 8).padding(.trailing, trailingInset).padding(.top, 5).padding(.bottom, 8) } }
                 if !favorites.isEmpty {
-                    favoritesGrid.padding(.horizontal, 12).padding(.bottom, 14)
+                    favoritesGrid.padding(.leading, 8).padding(.trailing, trailingInset).padding(.bottom, 14)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 ZStack(alignment: .top) {
-                    activePage.offset(x: model.spaceSwipeOffset)
+                    activePage
+                        .allowsHitTesting(!model.spaceInMotion)
                     if let neighbor = model.swipeNeighbor {
                         previewPage(neighbor)
-                            .offset(x: model.spaceSwipeOffset + (model.spaceSwipeOffset < 0 ? geometry.size.width : -geometry.size.width))
+                            .offset(x: -model.swipeDirection * geometry.size.width)
+                            .transition(.identity)
                             .allowsHitTesting(false).accessibilityHidden(true)
                     }
                 }
+                .offset(x: model.spaceSwipeOffset)
                 // minHeight 0: a long preview list must be clipped here, not
                 // make the sidebar taller than its window (which shifts and
                 // squeezes the whole sidebar while swiping).
                 .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity, alignment: .top).clipped()
+                BrowserNoticeSummary(model: model).padding(.horizontal, 10).padding(.top, model.activeNotices.isEmpty ? 0 : 6)
+                if let media = model.snapshot.media {
+                    SidebarMediaPlayer(model: model, media: media).padding(.horizontal, 10).padding(.top, 6)
+                        .transition(.opacity)
+                }
                 if !model.isIncognito {
                     if let notice = archiveNotice {
                         archiveBanner(notice).padding(.horizontal, 10).padding(.top, 6).transition(.opacity)
@@ -1034,53 +1770,56 @@ private struct ChromiumSidebar: View {
                 .onPreferenceChange(TabFramesKey.self) { tabFrames = $0 }
                 .onChange(of: model.archiveRequests) { _ in archiveTabs() }
                 .overlay(alignment: .topLeading) { dragOverlay }
-                .background {
-                    ZStack {
-                        SidebarBackground(theme: model.theme)
-                        if let neighbor = model.swipeNeighbor, geometry.size.width > 0 {
-                            SidebarBackground(theme: SpaceTheme(rawValue: neighbor.theme ?? "gray") ?? .gray)
-                                .opacity(min(1, abs(model.spaceSwipeOffset) / geometry.size.width))
-                        }
-                    }
-                }
+                // The native backdrop spans this content and the caption row.
                 .clipShape(RoundedRectangle(cornerRadius: floating ? 12 : 0, style: .continuous))
-                .overlay(alignment: .trailing) {
-                    Color.primary.opacity(resizing || resizeHovered ? 0.15 : 0).frame(width: 4).contentShape(Rectangle())
-                        .onHover { resizeHovered = $0; if $0 { NSCursor.resizeLeftRight.set() } else if !resizing { NSCursor.arrow.set() } }
-                        .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .global).onChanged { value in
-                            if resizeStart == nil { resizeStart = geometry.size.width }
-                            resizing = true
-                            model.send("resize", width: min(400, max(200, (resizeStart ?? 260) + value.translation.width)))
-                        }.onEnded { _ in resizeStart = nil; resizing = false; NSCursor.arrow.set() })
-                        .accessibilityLabel("Resize sidebar")
-                        .accessibilityAdjustableAction { model.send("resize", width: geometry.size.width + ($0 == .increment ? 20 : -20)) }
-                }
         }.accessibilityHidden(model.snapshot.sidebarCollapsed == true && model.snapshot.sidebarRevealed != true)
-            .onChange(of: draft?.id) { _ in model.presentingSidebarUI = importingArc || creatingProfile || settingsSpace != nil || draft != nil }
-            .onChange(of: settingsSpace?.id) { _ in model.presentingSidebarUI = importingArc || creatingProfile || settingsSpace != nil || draft != nil }
-            .onChange(of: model.snapshot.activeSpaceId) { _ in archiveNotice = nil }
-            .onChange(of: model.arcImportRequests) { _ in if !model.isIncognito { importingArc = true } }
-            .onChange(of: importingArc) { _ in model.presentingSidebarUI = importingArc || creatingProfile || settingsSpace != nil || draft != nil }
-            .onChange(of: creatingProfile) { _ in model.presentingSidebarUI = importingArc || creatingProfile || settingsSpace != nil || draft != nil }
+            .onChange(of: tabGestureActive) { dragging in
+                if !dragging {
+                    model.draggingTab = false
+                    model.splitDrop.end()
+                    if tabDrag?.dropped == false { tabDrag = nil }
+                }
+            }
+            .onDisappear { model.draggingTab = false; model.resizingSidebar = false; model.splitDrop.end() }
+            .onChange(of: draft?.id) { _ in model.presentingSidebarUI = showingImport || creatingProfile || settingsSpace != nil || draft != nil }
+            .onChange(of: settingsSpace?.id) { _ in model.presentingSidebarUI = showingImport || creatingProfile || settingsSpace != nil || draft != nil }
+            .onChange(of: model.snapshot.activeSpaceId) { _ in archiveNotice = nil; knownFolders = Set(model.folders.map(\.id)) }
+            .onChange(of: model.folders) { folders in
+                // Offer to name a folder the person just made.
+                let ids = Set(folders.map(\.id))
+                if model.renameNextFolder, let added = folders.last(where: { !knownFolders.contains($0.id) }) {
+                    model.renameNextFolder = false
+                    folderToRename = added.id
+                }
+                knownFolders = ids
+            }
+            .onAppear { knownFolders = Set(model.folders.map(\.id)) }
+            .onChange(of: model.browserImportRequests) { _ in if !model.isIncognito { showingImport = true } }
+            .onChange(of: showingImport) { _ in model.presentingSidebarUI = showingImport || creatingProfile || settingsSpace != nil || draft != nil }
+            .onChange(of: creatingProfile) { _ in model.presentingSidebarUI = showingImport || creatingProfile || settingsSpace != nil || draft != nil }
             .onChange(of: model.snapshot.sidebarRevealed) { revealed in
             if floating && revealed != true && !model.editingAddress { model.cancelAddressEditing() }
         }
             .sheet(item: $settingsSpace) { target in
                 SpaceEditor(draft: SpaceDraft(Space(id: target.space.id, name: target.space.displayName,
-                                                    color: target.space.theme ?? "gray", icon: model.emoji(for: target.space))),
+                                                    color: target.space.theme ?? "gray", icon: model.emoji(for: target.space)),
+                                              style: target.space.style),
                             profiles: (model.snapshot.profiles ?? []).map { SpaceProfileChoice(id: $0.id, name: $0.name) },
-                            profileID: $settingsProfileID, originalProfileID: target.space.profile) { name, theme, emoji in
-                    model.saveSpaceSettings(target.space, name: name, theme: theme, emoji: emoji, profile: settingsProfileID)
+                            profileID: $settingsProfileID, originalProfileID: target.space.profile) { name, theme, emoji, style in
+                    model.saveSpaceSettings(target.space, name: name, theme: theme, emoji: emoji, style: style, profile: settingsProfileID)
                     settingsSpace = nil
                 }
             }
             .sheet(item: $draft) { draft in
-                SpaceEditor(draft: draft, profiles: (model.snapshot.profiles ?? []).map { SpaceProfileChoice(id: $0.id, name: $0.name) }, profileID: $draftProfileID) { name, theme, emoji in
-                    model.send("createSpace", text: name, metadata: ["theme": theme.rawValue, "emoji": emoji, "profile": draftProfileID])
+                SpaceEditor(draft: draft, profiles: (model.snapshot.profiles ?? []).map { SpaceProfileChoice(id: $0.id, name: $0.name) }, profileID: $draftProfileID) { name, theme, emoji, style in
+                    model.send("createSpace", text: name, metadata: ["theme": theme.rawValue, "emoji": emoji, "profile": draftProfileID]
+                        .merging(style.metadata) { $1 })
                     self.draft = nil
                 }
             }
-            .sheet(isPresented: $importingArc) { ChromiumArcImportView(model: model) }
+            .sheet(isPresented: $model.archivePresented) { ArchiveBrowserView(model: model) }
+            .onChange(of: model.archivePresented) { _ in model.presentingSidebarUI = model.archivePresented || showingImport || creatingProfile || settingsSpace != nil || draft != nil }
+            .sheet(isPresented: $showingImport) { ChromiumBarkImportView(model: model) }
             .sheet(isPresented: $creatingProfile) {
                 VStack(alignment: .leading, spacing: 16) {
                     Text("New profile").font(.headline)
@@ -1104,34 +1843,35 @@ private struct ChromiumSidebar: View {
     // swiping between spaces; the address field and dock stay in place.
     private var activePage: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 8) {
-                if model.isIncognito {
-                    Image(systemName: "eyeglasses").font(.system(size: 15))
-                } else {
-                    Text(model.emoji).font(.system(size: 12))
-                }
-                Text(model.activeSpaceName).font(.system(size: 12, weight: .semibold)).lineLimit(1)
-                Spacer(minLength: 0)
-                if !model.isIncognito { spacesMenu {
-                    Text("Profile: " + model.activeProfileName)
-                    if let active = model.activeSpace { Button("Space settings…") { showSettings(for: active) } }
-                    if let active = model.activeSpace { colorMenu(for: active) }
-                    Divider()
-                    ForEach(model.snapshot.spaces) { space in
-                        Button((space.active ? "✓ " : "") + space.displayName) { model.send("space", text: space.id) }
+            if let space = model.outgoingSpace, !model.isIncognito {
+                spaceHeading(space, emoji: model.outgoingEmoji, tint: model.outgoingTheme.accent)
+                    .contextMenu {
+                        Button("New Folder") { model.requestNewFolder() }
+                        Button("New space…", action: newSpace)
+                        Menu("Switch Space") {
+                            ForEach(model.snapshot.spaces) { other in
+                                Button((other.active ? "✓ " : "") + other.displayName) { model.requestSpaceSelection(other) }
+                            }
+                        }.disabled(model.switchingSpaceProfile)
+                        Divider()
+                        spaceMenu(for: space)
                     }
-                    Divider()
-                    Button("New space…", action: newSpace)
-                    Button("Manage spaces…") { model.send("manageSpaces") }
-                    if let active = model.activeSpace {
-                        Button("Delete space…") { confirmDelete(active) }.disabled(!model.canDelete(active))
-                    }
-                } }
-            }.foregroundStyle(.secondary).padding(.horizontal, 20).padding(.bottom, 13)
-                .contextMenu { if let active = model.activeSpace, !model.isIncognito { spaceMenu(for: active) } }
-            ScrollView {
-                tabList(model.snapshot.tabs, interactive: true)
-            }.scrollIndicators(.hidden)
+            } else {
+                HStack(spacing: 8) {
+                    if model.isIncognito { Image(systemName: "eyeglasses") }
+                    else { SpaceIcon(emoji: model.outgoingEmoji, tint: model.outgoingTheme.accent) }
+                    Text(model.activeSpaceName).font(.system(size: 13, weight: .semibold)).lineLimit(1)
+                }.foregroundStyle(.secondary).padding(.leading, 18)
+                    .frame(height: 36).padding(.bottom, 4)
+            }
+            ScrollView(.vertical) {
+                tabList(model.outgoingTabs, space: model.outgoingSpace, interactive: true)
+                    .background(SidebarScrollbarSize(model: model).allowsHitTesting(false))
+            }.scrollIndicators(.automatic)
+                // The scrollbar overlays only the tabs; the resize target is
+                // hosted on the outer boundary, without reserving row width.
+                .frame(minHeight: 0, maxHeight: .infinity)
+                .id(model.outgoingSpace?.id)
                 .onChange(of: tabOrder) { _ in settleTabDrag() }
         }
     }
@@ -1139,69 +1879,81 @@ private struct ChromiumSidebar: View {
     // A non-interactive copy of an adjacent space, revealed during a swipe.
     private func previewPage(_ space: ChromiumSpace) -> some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 8) {
-                Text(model.emoji(for: space)).font(.system(size: 12))
-                Text(space.displayName).font(.system(size: 12, weight: .semibold)).lineLimit(1)
-                Spacer(minLength: 0)
-                // The same control as the active page (not an image of it):
-                // a borderless menu sizes differently, and any difference
-                // makes the page jump when the swipe lands.
-                spacesMenu { EmptyView() }
-            }.foregroundStyle(.secondary).padding(.horizontal, 20).padding(.bottom, 13)
-            tabList(model.snapshot.spacePreviews?[space.id] ?? [], interactive: false)
-            Spacer(minLength: 0)
+            spaceHeading(space, emoji: model.emoji(for: space), tint: space.themeValue.accent)
+            ScrollView(.vertical) {
+                tabList(model.previewTabs(for: space), space: space, interactive: false)
+            }.scrollIndicators(.hidden)
+                .frame(minHeight: 0, maxHeight: .infinity)
         }
     }
 
-    // The "…" menu in a space's heading.
-    private func spacesMenu<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
-        Menu(content: content) { Image(systemName: "ellipsis").frame(width: 22, height: 24) }
-            .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().accessibilityLabel("Spaces")
+    private func spaceHeading(_ space: ChromiumSpace, emoji: String, tint: Color) -> some View {
+        SpaceHeaderRow(name: space.displayName, emoji: emoji, tint: tint, pinsCollapsed: space.pinsCollapsed == true) {
+            guard !model.spaceInMotion, model.activeSpace?.id == space.id else { return }
+            model.send("togglePinnedSection", metadata: ["space": space.id])
+        } openSettings: {
+            guard !model.spaceInMotion, model.activeSpace?.id == space.id else { return }
+            showSettings(for: space)
+        }
+        .padding(.leading, 8).padding(.trailing, trailingInset).padding(.bottom, 4)
+        .fixedSize(horizontal: false, vertical: true)
     }
 
-    private func tabList(_ tabs: [ChromiumTab], interactive: Bool) -> some View {
+    private func tabList(_ tabs: [ChromiumTab], space: ChromiumSpace?, interactive: Bool) -> some View {
         let pinned = tabs.filter(\.pinned)
-        // With nothing pinned, a dragged tab is pinned by dropping it on the
-        // "New tab" row, which shows that while dragging. (A separate drop
-        // area would push every row down under the pointer.)
+        let folders = space?.folders ?? []
+        let entries = ChromiumFolderTree.entries(folders: folders, tabs: pinned)
+        let pinsCollapsed = space?.pinsCollapsed == true
+        let hasUnpinned = tabs.contains { !$0.pinned }
+        // Reuse the divider as the pin target so rows stay under the pointer.
         let pinZone = interactive && tabDrag?.dropped == false && pinned.isEmpty
         return LazyVStack(spacing: 3) {
-            ForEach(pinned) { tabRow($0, interactive: interactive) }
-            if !pinned.isEmpty {
-                Rectangle().fill(Color.primary.opacity(0.08)).frame(height: 1).padding(.horizontal, 9).padding(.vertical, 12)
-            }
-            HStack(spacing: 2) {
-                Button { if interactive { model.send("new") } } label: {
-                    HStack(spacing: 10) {
-                        Image(systemName: "plus").font(.system(size: 13)).frame(width: 16)
-                        Text("New tab").font(.system(size: 13))
-                        Spacer()
-                    }.padding(.horizontal, 11).frame(height: 34).foregroundStyle(.secondary)
-                }.buttonStyle(SidebarButtonStyle()).help("New tab")
-                // Closes this space's unpinned tabs into its archive.
-                if tabs.contains(where: { !$0.pinned }) {
-                    Button { if interactive { archiveTabs() } } label: {
-                        Image(systemName: "archivebox").font(.system(size: 11)).frame(width: 30, height: 34)
-                    }.buttonStyle(SidebarButtonStyle()).foregroundStyle(.secondary)
-                        .help("Archive unpinned tabs").accessibilityLabel("Archive unpinned tabs")
+            if !pinsCollapsed || tabDrag != nil {
+                ForEach(entries) { entry in
+                    if let folder = entry.folder {
+                        SidebarFolderHeader(model: model, folder: folder, count: entry.count, renameTarget: $folderToRename)
+                            .padding(.leading, CGFloat(entry.depth) * 14)
+                    } else if let tab = entry.tab {
+                        tabRow(tab, interactive: interactive, indent: CGFloat(entry.depth) * 14)
+                    }
                 }
+            } else {
+                // Keep the selected or just-closed pin within reach.
+                ForEach(pinned.filter(\.visibleWhenCollapsed)) { tabRow($0, interactive: interactive) }
             }
-            .opacity(pinZone ? 0 : 1)
-            .overlay { if pinZone { dropHint("pin", "Drop here to pin", targeted: dropZone == .pinned) } }
-            .background { if interactive { frameReporter(Self.newTabKey) } }
+            // The divider below the pins hosts the Clear button for unpinned tabs.
+            if !pinned.isEmpty || !folders.isEmpty || hasUnpinned || pinZone {
+                HStack(spacing: 8) {
+                    Rectangle().fill(Color.primary.opacity(0.08)).frame(height: 1)
+                    if hasUnpinned {
+                        Button { if interactive { archiveTabs() } } label: {
+                            HStack(spacing: 3) {
+                                Image(systemName: "arrow.down").font(.system(size: 9, weight: .semibold))
+                                Text("Clear").font(.system(size: 11, weight: .medium))
+                            }.padding(.horizontal, 6).frame(height: 20).contentShape(Rectangle())
+                        }.buttonStyle(SidebarButtonStyle()).foregroundStyle(.secondary)
+                            .help("Archive unpinned tabs (⇧⌘K)").accessibilityLabel("Archive unpinned tabs")
+                    }
+                }.padding(.leading, 9).padding(.trailing, 2).padding(.vertical, hasUnpinned ? 6 : 12)
+                    .frame(minHeight: pinZone ? 32 : nil)
+                    .opacity(pinZone ? 0 : 1)
+                    .overlay { if pinZone { dropHint("pin", "Drop here to pin", targeted: dropZone == .pinned) } }
+                    .background { if interactive { frameReporter(Self.pinBoundaryKey) } }
+            }
             ForEach(tabs.filter { !$0.pinned }) { tabRow($0, interactive: interactive) }
-        }.padding(.horizontal, 9).padding(.bottom, 12)
+        }.padding(.leading, 8).padding(.trailing, trailingInset).padding(.bottom, 12)
     }
 
     // MARK: Favorites and tab dragging
-    // Drag a tab to reorder it; across the "New tab" row to pin or unpin it;
-    // into the Favorites grid at the top to show it in every space.
+    // Drag across the divider to pin or unpin, or into Favorites to show a tab in every space.
 
     private var favorites: [ChromiumTab] { model.isIncognito ? [] : model.snapshot.favorites ?? [] }
 
     private var favoritesGrid: some View {
-        let columns = Array(repeating: GridItem(.flexible(), spacing: 6), count: min(max(favorites.count, 1), 4))
-        return LazyVGrid(columns: columns, spacing: 6) {
+        // Keep one to three favorites tile-sized instead of stretching them
+        // across the sidebar. Four columns also align subsequent rows.
+        let columns = Array(repeating: GridItem(.flexible(), spacing: 8), count: 4)
+        return LazyVGrid(columns: columns, alignment: .leading, spacing: 8) {
             ForEach(favorites) { tab in
                 FavoriteTile(model: model, tab: tab)
                     .opacity(tabDrag?.id == tab.id ? 0 : 1)
@@ -1233,7 +1985,7 @@ private struct ChromiumSidebar: View {
     }
 
     private static let dragSpace = "BarkSidebar"
-    private static let newTabKey = -1
+    private static let pinBoundaryKey = -1
     private static let addressKey = -2
     private static let gridKey = -3
 
@@ -1243,20 +1995,20 @@ private struct ChromiumSidebar: View {
         }
     }
 
-    @ViewBuilder private func tabRow(_ tab: ChromiumTab, interactive: Bool) -> some View {
+    @ViewBuilder private func tabRow(_ tab: ChromiumTab, interactive: Bool, indent: CGFloat = 0) -> some View {
         if interactive {
-            ChromiumTabRow(model: model, tab: tab)
-                .overlay { MiddleClickCatcher { model.send("close", id: tab.id) }.accessibilityHidden(true) }
+            ChromiumTabRow(model: model, tab: tab, indent: indent)
+                .overlay { MiddleClickCatcher { model.close(tab) }.accessibilityHidden(true) }
                 .opacity(tabDrag?.id == tab.id ? 0 : 1)
                 .background(frameReporter(tab.id))
                 .simultaneousGesture(tabDragGesture(tab.id, fromFavorites: false))
         } else {
-            ChromiumTabRow(model: model, tab: tab)
+            ChromiumTabRow(model: model, tab: tab, indent: indent)
         }
     }
 
     private func draggedTab(_ id: Int) -> ChromiumTab? {
-        favorites.first { $0.id == id } ?? model.snapshot.tabs.first { $0.id == id }
+        favorites.first { $0.id == id } ?? model.snapshot.sidebarTabs.first { $0.id == id }
     }
 
     /// The dragged tab follows the pointer above everything else, so it stays
@@ -1275,25 +2027,25 @@ private struct ChromiumSidebar: View {
             .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(.regularMaterial))
             .shadow(color: .black.opacity(0.2), radius: 8, y: 3)
             .scaleEffect(1.02)
-            .opacity(drag.dropped ? 0 : 1)
+            .opacity(drag.dropped || drag.newWindow ? 0 : 1)
             .offset(x: drag.pointer.x - drag.grab.width, y: drag.pointer.y - drag.grab.height)
             .allowsHitTesting(false).accessibilityHidden(true)
         }
     }
 
-    private var dropZone: DropZone? { tabDrag.flatMap { $0.splitSide == nil ? dropTarget(for: $0).zone : nil } }
+    private var dropZone: DropZone? { tabDrag.flatMap { $0.splitSide == nil && !$0.newWindow ? dropTarget(for: $0).zone : nil } }
 
-    /// Dragging a tab out of the sidebar onto the page opens it beside the
+    /// Dragging a tab out of the sidebar onto the page opens it alongside the
     /// active tab, on the half it is dropped on. Favorites and the tabs
     /// already on screen cannot be split.
     private func splitSide(for drag: TabDrag) -> SplitDropController.Side? {
         guard !drag.fromFavorites, let tab = draggedTab(drag.id), !tab.active, tab.splitActive != true,
-              model.snapshot.tabs.contains(where: { $0.active }) else {
+              model.snapshot.sidebarTabs.contains(where: { $0.active }) else {
             model.splitDrop.end()
             return nil
         }
         return model.splitDrop.update(from: model.hostView, floating: floating,
-                                      title: tab.title.isEmpty || tab.isBlank ? "New tab" : tab.title)
+                                      title: tab.displayTitle)
     }
 
     /// Where the dragged tab would land, and before which tab (nil for the
@@ -1312,13 +2064,11 @@ private struct ChromiumSidebar: View {
         }
         // In the list, a row lands by its center; a tile by the pointer.
         let y = drag.fromFavorites ? pointer.y : pointer.y - drag.grab.height + drag.size.height / 2
-        // Above the "New tab" row is the pinned list; with nothing else
-        // pinned, the upper half of that row is the place to pin.
-        let newTab = tabFrames[Self.newTabKey]
-        let othersPinned = model.snapshot.tabs.contains { $0.pinned && $0.id != drag.id }
-        let boundary = (othersPinned ? newTab?.minY : newTab?.midY) ?? -.infinity
+        let divider = tabFrames[Self.pinBoundaryKey]
+        let hasPins = model.snapshot.sidebarTabs.contains(where: \.pinned)
+        let boundary = (hasPins ? divider?.midY : divider?.maxY) ?? -.infinity
         let pinned = y < boundary
-        for tab in model.snapshot.tabs where tab.pinned == pinned && tab.id != drag.id {
+        for tab in model.snapshot.sidebarTabs where tab.pinned == pinned && tab.id != drag.id {
             if let frame = tabFrames[tab.id], y < frame.midY { return (pinned ? .pinned : .unpinned, tab.id) }
         }
         return (pinned ? .pinned : .unpinned, nil)
@@ -1326,7 +2076,7 @@ private struct ChromiumSidebar: View {
 
     /// The accent line showing where the dragged tab will land.
     private var dropIndicator: CGRect? {
-        guard let drag = tabDrag, !drag.dropped, drag.splitSide == nil else { return nil }
+        guard let drag = tabDrag, !drag.dropped, !drag.newWindow, drag.splitSide == nil else { return nil }
         let target = dropTarget(for: drag)
         if target.zone == .favorites {
             if let before = target.before, let frame = tabFrames[before] {
@@ -1338,16 +2088,18 @@ private struct ChromiumSidebar: View {
         let pinned = target.zone == .pinned
         func line(_ y: CGFloat, _ frame: CGRect) -> CGRect { CGRect(x: frame.minX + 4, y: y - 1, width: frame.width - 8, height: 2) }
         if let before = target.before, let frame = tabFrames[before] { return line(frame.minY - 1.5, frame) }
-        if let last = model.snapshot.tabs.last(where: { $0.pinned == pinned && $0.id != drag.id }), let frame = tabFrames[last.id] {
+        if let last = model.snapshot.sidebarTabs.last(where: { $0.pinned == pinned && $0.id != drag.id }), let frame = tabFrames[last.id] {
             return line(frame.maxY + 1.5, frame)
         }
-        if pinned { return nil }  // The "New tab" row highlights instead.
-        return tabFrames[Self.newTabKey].map { line($0.maxY + 1.5, $0) }
+        if pinned { return nil }  // The divider shows the pin target.
+        return tabFrames[Self.pinBoundaryKey].map { line($0.maxY + 1.5, $0) }
     }
 
     private func tabDragGesture(_ id: Int, fromFavorites: Bool) -> some Gesture {
         DragGesture(minimumDistance: 4, coordinateSpace: .named(Self.dragSpace))
+            .updating($tabGestureActive) { _, active, _ in active = true }
             .onChanged { value in
+                model.draggingTab = true
                 if tabDrag?.id == id, tabDrag?.dropped == false {
                     tabDrag?.pointer = value.location
                 } else {
@@ -1357,9 +2109,13 @@ private struct ChromiumSidebar: View {
                                       size: frame.size, pointer: value.location)
                 }
                 if var drag = tabDrag {
-                    drag.splitSide = splitSide(for: drag)
+                    drag.newWindow = model.splitDrop.updateNewWindow(from: model.hostView,
+                        title: draggedTab(id)?.displayTitle ?? "Tab")
+                    drag.splitSide = drag.newWindow ? nil : splitSide(for: drag)
                     let target: TabDropTarget
-                    if let side = drag.splitSide {
+                    if drag.newWindow {
+                        target = .newWindow
+                    } else if let side = drag.splitSide {
                         target = .split(side)
                     } else {
                         let destination = dropTarget(for: drag)
@@ -1375,13 +2131,20 @@ private struct ChromiumSidebar: View {
                 }
             }
             .onEnded { value in
+                model.draggingTab = false
                 guard var drag = tabDrag, drag.id == id, !drag.dropped else { model.splitDrop.end(); return }
                 drag.pointer = value.location
-                let side = splitSide(for: drag)
+                let newWindowPoint = SplitDropController.newWindowPoint(from: model.hostView)
+                let side = newWindowPoint == nil ? splitSide(for: drag) : nil
                 model.splitDrop.end()
                 drag.splitSide = nil
                 drag.dropped = true
                 NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .now)
+                if let point = newWindowPoint {
+                    tabDrag = nil
+                    model.send("detachTab", id: id, metadata: ["screenX": String(Double(point.x)), "screenY": String(Double(point.y))])
+                    return
+                }
                 if let side {
                     withAnimation(.easeOut(duration: 0.12)) { tabDrag = drag }
                     model.send("splitTab", id: id, text: side.rawValue)
@@ -1399,7 +2162,7 @@ private struct ChromiumSidebar: View {
     }
 
     private var tabOrder: String {
-        (favorites.map { "f\($0.id)" } + model.snapshot.tabs.map { "\($0.id)\($0.pinned ? "p" : "")" }).joined(separator: ",")
+        (favorites.map { "f\($0.id)" } + model.snapshot.sidebarTabs.map { "\($0.id)\($0.pinned ? "p" : "")" }).joined(separator: ",")
     }
 
     private func settleTabDrag(_ id: Int? = nil) {
@@ -1417,7 +2180,7 @@ private struct ChromiumSidebar: View {
     // Archiving is one click, so it offers an immediate way back.
     private func archiveTabs() {
         // Blank tabs are closed but not kept, so they cannot be restored.
-        let count = model.snapshot.tabs.filter { !$0.pinned && !$0.isBlank }.count
+        let count = model.snapshot.sidebarTabs.filter { !$0.pinned && !$0.isBlank }.count
         model.send("archiveTabs")
         guard !model.isIncognito, count > 0 else { return }
         let notice = ArchiveNotice(count: count)
@@ -1451,37 +2214,8 @@ private struct ChromiumSidebar: View {
         alert.addButton(withTitle: button)
         alert.addButton(withTitle: "Cancel")
         model.presentingSidebarUI = true
-        defer { model.presentingSidebarUI = importingArc || creatingProfile || settingsSpace != nil || draft != nil }
+        defer { model.presentingSidebarUI = showingImport || creatingProfile || settingsSpace != nil || draft != nil }
         return alert.runModal() == .alertFirstButtonReturn
-    }
-
-    private var addressField: some View {
-        HStack(spacing: 8) {
-            Button { model.send("siteInfo") } label: {
-                Image(systemName: ["warning", "dangerous"].contains(model.snapshot.securityLevel ?? "") ? "exclamationmark.triangle" : "slider.horizontal.3")
-                    .font(.system(size: 11, weight: .medium)).frame(width: 24, height: 28)
-            }.buttonStyle(SidebarButtonStyle())
-                .foregroundStyle(model.snapshot.securityLevel == "dangerous" ? Color.red : model.snapshot.securityLevel == "warning" ? Color.orange : Color.secondary)
-                .help("Site information and permissions").accessibilityLabel("Site information")
-                .accessibilityValue(model.snapshot.securityDescription ?? "")
-                .disabled(!model.snapshot.tabs.contains(where: { $0.active }))
-            Button { model.focusAddress() } label: {
-                Text(model.addressSummary.isEmpty ? "Search or enter address" : model.addressSummary)
-                    .font(.system(size: 12.5))
-                    .foregroundStyle(model.addressSummary.isEmpty ? .tertiary : .primary)
-                    .lineLimit(1).truncationMode(.tail)
-                    .frame(maxWidth: .infinity, minHeight: 28, alignment: .leading)
-                    .contentShape(Rectangle())
-            }.buttonStyle(.plain).frame(minWidth: 0, maxWidth: .infinity)
-                .help("Edit address (⌘L)").accessibilityLabel("Address")
-                .accessibilityValue(model.address)
-            Button { model.send("extensionMenu") } label: {
-                Image(systemName: "puzzlepiece.extension").font(.system(size: 12)).frame(width: 24, height: 28)
-            }.buttonStyle(SidebarButtonStyle()).foregroundStyle(.secondary)
-                .help("Extensions").accessibilityLabel("Extensions")
-        }.padding(.horizontal, 7).frame(height: 36)
-            .background(Color.primary.opacity(model.editingAddress ? 0.075 : 0.045), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-            .overlay { RoundedRectangle(cornerRadius: 9).strokeBorder(Color.primary.opacity(model.editingAddress ? 0.13 : 0), lineWidth: 1) }
     }
 
     // Shown while downloading (with progress) and briefly after a download
@@ -1512,33 +2246,37 @@ private struct ChromiumSidebar: View {
     private var spaceDock: some View {
         HStack(spacing: 6) {
             Menu {
-                Button("Import from Arc…") { importingArc = true }
+                Button("Import into Bark…") { showingImport = true }
                 Divider()
                 Button("Bookmarks") { model.send("bookmarks") }
                 Button("History") { model.send("history") }
                 Button("Downloads") { model.send("downloads") }
                 if !model.isIncognito {
-                    Menu("Archived Tabs") {
-                        let archived = model.snapshot.archivedTabs ?? []
-                        if archived.isEmpty {
-                            Text("No archived tabs in this space")
-                        } else {
-                            ForEach(Array(archived.enumerated()), id: \.offset) { index, tab in
-                                Button(tab.displayTitle) { model.send("restoreArchived", id: index) }
-                            }
-                            Divider()
-                            Button("Restore All") { archiveNotice = nil; model.send("restoreAllArchived") }
-                            Button("Clear Archive…") {
-                                if confirm("Clear this space's archive?",
-                                           archived.count == 1 ? "1 archived tab will be removed. This cannot be undone."
-                                                               : "\(archived.count) archived tabs will be removed. This cannot be undone.",
-                                           button: "Clear") {
-                                    archiveNotice = nil
-                                    model.send("clearArchive")
-                                }
-                            }
-                        }
+                    Button("Archived Tabs…") { model.showArchive() }
+                    if let label = model.snapshot.organizationUndoLabel {
+                        Button("Undo " + label) { model.send("undoOrganization") }
+                            .keyboardShortcut("z", modifiers: [.command, .option])
                     }
+                }
+                if !model.isIncognito, let features = model.snapshot.features {
+                    Menu("Archive Tabs After") {
+                        Picker("Archive tabs after", selection: Binding(
+                            get: { features.archiveAfterHours },
+                            set: { model.send("setArchiveAfter", text: String($0)) })) {
+                            Text("12 Hours").tag(12)
+                            Text("24 Hours").tag(24)
+                            Text("7 Days").tag(168)
+                            Text("30 Days").tag(720)
+                            Text("Never").tag(0)
+                        }.pickerStyle(.inline).labelsHidden()
+                    }
+                    Toggle("Open Pinned Tab Links in Peek", isOn: Binding(
+                        get: { features.peek }, set: { model.send("setPeek", text: $0 ? "on" : "off") }))
+                    Toggle("Open Links from Other Apps in a Little Window", isOn: Binding(
+                        get: { features.littleWindow }, set: { model.send("setLittleWindow", text: $0 ? "on" : "off") }))
+                    Toggle("Picture in Picture When Switching Tabs", isOn: Binding(
+                        get: { features.autoPictureInPicture }, set: { model.send("setAutoPictureInPicture", text: $0 ? "on" : "off") }))
+                    Divider()
                 }
                 Button("Extensions") { model.send("extensions") }
                 Button("Settings") { model.send("settings") }
@@ -1565,14 +2303,19 @@ private struct ChromiumSidebar: View {
             ScrollView(.horizontal) {
                 HStack(spacing: 4) {
                     ForEach(model.snapshot.spaces) { space in
-                        Button { model.send("space", text: space.id) } label: {
-                            Text(model.emoji(for: space)).font(.system(size: 11)).frame(width: 28, height: 28)
-                                .opacity(space.active ? 1 : 0.50)
-                                .background(Color.primary.opacity(space.active ? 0.065 : 0), in: RoundedRectangle(cornerRadius: 6))
+                        Button { model.requestSpaceSelection(space) } label: {
+                            SpaceIcon(emoji: model.emoji(for: space), tint: model.tint(for: space))
+                                .font(.system(size: 15)).frame(width: 34, height: 34)
+                                .opacity(space.active ? 1 : 0.75)
+                                .background {
+                                    if space.active {
+                                        SidebarSelectionBackground(tint: model.tint(for: space))
+                                    }
+                                }
                         }.buttonStyle(SidebarButtonStyle()).help(space.displayName).accessibilityLabel("Space " + space.displayName)
                             .accessibilityValue(space.active ? "Selected" : "")
                             .contextMenu { spaceMenu(for: space) }
-                            .disabled(model.snapshot.switchingSpace == true)
+                            .disabled(model.switchingSpaceProfile)
                     }
                 }
             }.scrollIndicators(.hidden).fixedSize(horizontal: false, vertical: true)
@@ -1584,19 +2327,21 @@ private struct ChromiumSidebar: View {
 
     @ViewBuilder private func spaceMenu(for space: ChromiumSpace) -> some View {
         Button("Space settings…") { showSettings(for: space) }
-        colorMenu(for: space)
         profileMenu(for: space)
         Divider()
         Button("Manage spaces…") { model.send("manageSpaces") }
-        // Every profile keeps at least one space.
         Button("Delete space…") { confirmDelete(space) }.disabled(!model.canDelete(space))
     }
 
     private func confirmDelete(_ space: ChromiumSpace) {
         let profile = model.snapshot.profiles?.first { $0.id == space.profile }?.name
+        let lastInProfile = model.snapshot.spaces.filter { $0.profile == space.profile }.count == 1
+        let details = lastInProfile
+            ? "The space is removed from the sidebar. Its profile, tabs, sign-ins, and saved data are kept. To use them again, create a space in this profile."
+            : "The space is removed from the sidebar. Its open tabs move to another space"
+                + (profile.map { " in the “\($0)” profile." } ?? " of its profile.")
         if confirm("Delete “\(space.displayName)”?",
-                   "The space is removed from the sidebar. Its open tabs move to another space"
-                       + (profile.map { " in the “\($0)” profile." } ?? " of its profile."),
+                   details,
                    button: "Delete") {
             model.send("deleteSpace", text: space.id)
         }
@@ -1632,14 +2377,6 @@ private struct ChromiumSidebar: View {
         }
     }
 
-    private func colorMenu(for space: ChromiumSpace) -> some View {
-        let current = space.active ? model.theme : SpaceTheme(rawValue: space.theme ?? "gray") ?? .gray
-        return Menu("Color") {
-            ForEach(SpaceTheme.allCases, id: \.self) { theme in
-                Button((theme == current ? "✓ " : "") + theme.label) { model.customize(space, theme: theme) }
-            }
-        }
-    }
     private func newSpace() {
         draftProfileID = model.snapshot.profileId ?? model.snapshot.profiles?.first?.id ?? ""
         draft = SpaceDraft()
@@ -1651,7 +2388,12 @@ private struct ChromiumSidebar: View {
 @MainActor private final class ChromiumHeaderHostingView: NSHostingView<ChromiumSidebarHeader> {
     let model: ChromiumSidebarModel
     private var monitor: Any?
+    private var showWork: DispatchWorkItem?
     private var hideWork: DispatchWorkItem?
+    private var lastPointer: NSPoint?
+    private var presentationSubscription: AnyCancellable?
+    private var wasCollapsed = false
+    private var wasRevealed = false
     private var requestedReveal = false
     private var trackingMenus = 0
     private weak var trackedContent: NSView?
@@ -1662,11 +2404,26 @@ private struct ChromiumSidebar: View {
         self.model = model
         super.init(rootView: ChromiumSidebarHeader(model: model))
         if #available(macOS 13.3, *) { safeAreaRegions = [] }
+        presentationSubscription = model.$snapshot.sink { [weak self] snapshot in self?.presentationChanged(snapshot) }
+    }
+    private func presentationChanged(_ snapshot: ChromiumSnapshot) {
+        let collapsed = snapshot.sidebarCollapsed == true
+        let revealed = snapshot.sidebarRevealed == true
+        guard collapsed != wasCollapsed || revealed != wasRevealed else { return }
+        let changedMode = collapsed != wasCollapsed
+        wasCollapsed = collapsed
+        wasRevealed = revealed
+        cancelPendingReveal()
+        // An acknowledgement of the reveal may arrive after the pointer has
+        // already left. Keep its pending dismissal in that case.
+        if changedMode || !revealed { hideWork?.cancel(); hideWork = nil }
+        requestedReveal = collapsed && revealed
     }
     // Chromium already places this host inside its caption row. Applying the
     // window titlebar inset again would move the Swift controls out of line.
     override var safeAreaInsets: NSEdgeInsets { NSEdgeInsetsZero }
     override var safeAreaRect: NSRect { bounds }
+    override var isOpaque: Bool { false }
     override func hitTest(_ point: NSPoint) -> NSView? {
         if let superview, isWindowDragPoint(superview.convert(point, to: nil)) {
             return self
@@ -1718,10 +2475,17 @@ private struct ChromiumSidebar: View {
                                                name: NSWindow.didMoveNotification, object: window)
         NotificationCenter.default.addObserver(self, selector: #selector(windowBecameKey(_:)),
                                                name: NSWindow.didBecomeKeyNotification, object: window)
-        monitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged, .leftMouseDown]) { [weak self] event in
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged, .leftMouseDown, .leftMouseUp]) { [weak self] event in
             guard let self, let window = self.window, event.window === window else { return event }
             if event.type == .leftMouseDown { self.reportHeaderHit(event.locationInWindow) }
-            self.trackPointer(event.locationInWindow)
+            if event.type == .leftMouseUp {
+                // Let SwiftUI finish the resize and update its bounds before
+                // deciding whether the pointer has left the floating panel.
+                let point = event.locationInWindow
+                DispatchQueue.main.async { [weak self] in self?.trackPointer(point) }
+            } else {
+                self.trackPointer(event.locationInWindow)
+            }
             return event
         }
     }
@@ -1730,7 +2494,12 @@ private struct ChromiumSidebar: View {
         reportWindowGeometry()
     }
     @objc private func windowGeometryChanged(_ notification: Notification) { reportWindowGeometry() }
-    @objc private func windowBecameKey(_ notification: Notification) { model.send("hostActivated") }
+    @objc private func windowBecameKey(_ notification: Notification) {
+        // Tracking areas can queue an exit while Settings or another Bark
+        // window takes focus. That old exit must not dismiss a restored panel.
+        hideWork?.cancel(); hideWork = nil
+        model.send("hostActivated")
+    }
     private func reportHeaderHit(_ point: NSPoint) {
         guard ProcessInfo.processInfo.arguments.contains("--bark-ui-layout-report"), let window else { return }
         let local = convert(point, from: nil)
@@ -1777,6 +2546,7 @@ private struct ChromiumSidebar: View {
     }
     @objc private func menuBeganTracking(_ notification: Notification) {
         trackingMenus += 1
+        cancelPendingReveal()
         hideWork?.cancel(); hideWork = nil
     }
     @objc private func menuEndedTracking(_ notification: Notification) {
@@ -1785,6 +2555,7 @@ private struct ChromiumSidebar: View {
     }
     func stopObserving() {
         windowDragStart = nil
+        cancelPendingReveal()
         hideWork?.cancel(); hideWork = nil
         if let monitor { NSEvent.removeMonitor(monitor); self.monitor = nil }
         if let trackingArea { trackedContent?.removeTrackingArea(trackingArea); self.trackingArea = nil }
@@ -1792,40 +2563,129 @@ private struct ChromiumSidebar: View {
         NotificationCenter.default.removeObserver(self)
         trackingMenus = 0
     }
+    private func containsPointer(_ point: NSPoint, in window: NSWindow, revealed: Bool) -> Bool {
+        // Include the inset, the spring's overshoot, and a small exit grace
+        // region so the panel's rightmost controls stay inside its hover area.
+        let panelRight = model.hostView.map { $0.convert($0.bounds, to: nil).maxX } ?? 0
+        return point.y >= 0 && point.y < window.frame.height &&
+            point.x >= 0 && point.x <= (revealed ? max(panelRight, (model.snapshot.sidebarWidth ?? 260) + 8) + 12 : 16)
+    }
     private func trackPointer(_ point: NSPoint) {
-        guard model.snapshot.sidebarCollapsed == true, window?.isKeyWindow == true else {
-            hideWork?.cancel(); requestedReveal = false; return
+        lastPointer = point
+        defer { reportHover("pointer", point: point) }
+        guard model.snapshot.sidebarCollapsed == true, let window, window.isKeyWindow,
+              !window.styleMask.contains(.fullScreen) else {
+            cancelPendingReveal()
+            hideWork?.cancel(); hideWork = nil; requestedReveal = false; return
         }
-        if trackingMenus > 0 || model.presentingSidebarUI { hideWork?.cancel(); hideWork = nil; return }
+        if trackingMenus > 0 || model.presentingSidebarUI || model.siteControlsOpen || model.noticesOpen || model.draggingTab || model.resizingSidebar {
+            cancelPendingReveal()
+            hideWork?.cancel(); hideWork = nil; return
+        }
         let revealed = requestedReveal || model.snapshot.sidebarRevealed == true
-        let within = point.x >= 0 && point.x <= (revealed ? (model.snapshot.sidebarWidth ?? 260) + 10 : 7)
-        if within {
+        if containsPointer(point, in: window, revealed: revealed) {
             hideWork?.cancel(); hideWork = nil
-            if !revealed { requestedReveal = true; model.send("revealSidebar", text: "true") }
-        } else if revealed && hideWork == nil && !model.editingAddress {
-            scheduleDismissal()
+            if !revealed && showWork == nil {
+                let work = DispatchWorkItem { [weak self] in
+                    guard let self, self.window?.isKeyWindow == true,
+                          self.model.snapshot.sidebarCollapsed == true else { return }
+                    self.showWork = nil
+                    self.requestedReveal = true
+                    self.model.send("revealSidebar", text: "true")
+                }
+                showWork = work
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.04, execute: work)
+            }
+        } else {
+            cancelPendingReveal()
+            if revealed && hideWork == nil && !model.editingAddress { scheduleDismissal() }
         }
     }
+    private func cancelPendingReveal() { showWork?.cancel(); showWork = nil }
     override func mouseExited(with event: NSEvent) {
-        if model.snapshot.sidebarCollapsed == true && !model.editingAddress && !model.presentingSidebarUI && trackingMenus == 0 { scheduleDismissal() }
+        // SwiftUI tracks the buttons inside this host independently of our
+        // window-wide tracking area. Let it clear the button under the pointer.
+        super.mouseExited(with: event)
+        guard let trackingArea, event.trackingArea === trackingArea else { return }
+        lastPointer = nil
+        cancelPendingReveal()
+        if model.snapshot.sidebarCollapsed == true && !model.editingAddress && !model.presentingSidebarUI && !model.siteControlsOpen && !model.noticesOpen && !model.draggingTab && !model.resizingSidebar && trackingMenus == 0 { scheduleDismissal() }
     }
     private func scheduleDismissal() {
         hideWork?.cancel()
-        let work = DispatchWorkItem { [weak self] in self?.dismissReveal() }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.hideWork = nil
+            guard !self.model.draggingTab, !self.model.resizingSidebar, !self.model.siteControlsOpen, !self.model.noticesOpen,
+                  !self.model.presentingSidebarUI, !self.model.editingAddress,
+                  self.trackingMenus == 0, self.window?.isKeyWindow == true else { return }
+            // Chromium applies resize commands asynchronously. A mouse-up can
+            // arrive before the new width; recheck after layout has caught up.
+            if let point = self.lastPointer, let window = self.window,
+               self.containsPointer(point, in: window, revealed: true) { return }
+            self.dismissReveal()
+        }
         hideWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: work)
     }
     private func dismissReveal() {
+        defer { reportHover("dismiss") }
+        cancelPendingReveal()
         hideWork?.cancel(); hideWork = nil
         let wasRevealed = requestedReveal || model.snapshot.sidebarRevealed == true
         requestedReveal = false
         if wasRevealed { model.send("revealSidebar", text: "false") }
     }
+    private func reportHover(_ phase: String, point: NSPoint? = nil) {
+        guard ProcessInfo.processInfo.arguments.contains("--bark-ui-layout-report") else { return }
+        var state: [String: Any] = ["phase": phase, "time": ProcessInfo.processInfo.systemUptime,
+            "collapsed": model.snapshot.sidebarCollapsed == true, "revealed": model.snapshot.sidebarRevealed == true,
+            "requested": requestedReveal, "editing": model.editingAddress, "presenting": model.presentingSidebarUI,
+            "menus": trackingMenus, "key": window?.isKeyWindow == true,
+            "showPending": showWork != nil, "hidePending": hideWork != nil]
+        if let point { state["x"] = point.x; state["y"] = point.y }
+        if let data = try? JSONSerialization.data(withJSONObject: state, options: .sortedKeys),
+           let json = String(data: data, encoding: .utf8) {
+            FileHandle.standardError.write(Data(("BARK_UI_HOVER " + json + "\n").utf8))
+        }
+    }
     deinit {
+        showWork?.cancel()
         hideWork?.cancel()
         if let monitor { NSEvent.removeMonitor(monitor) }
         // The main-thread ABI detaches tracking before releasing this view.
         NotificationCenter.default.removeObserver(self)
+    }
+}
+
+/// Trackpad events have different cadences. Estimate points per second over
+/// recent movement, including the time spent holding still before lifting.
+struct SpaceSwipeVelocity {
+    private var samples: [(time: TimeInterval, position: CGFloat)] = []
+    private var position: CGFloat = 0
+    private let interval: TimeInterval = 0.08
+
+    mutating func begin(at time: TimeInterval) {
+        position = 0
+        samples = [(time, 0)]
+    }
+
+    mutating func add(_ delta: CGFloat, at time: TimeInterval) {
+        position += delta
+        if samples.last?.time == time {
+            samples[samples.count - 1].position = position
+        } else {
+            samples.append((time, position))
+        }
+        while samples.count > 2 && samples[1].time <= time - interval {
+            samples.removeFirst()
+        }
+    }
+
+    func velocity(at time: TimeInterval) -> CGFloat {
+        guard let first = samples.first, let last = samples.last, last.time > first.time,
+              time - last.time < interval else { return 0 }
+        return (last.position - first.position) / max(time - first.time, 1.0 / 240)
     }
 }
 
@@ -1834,9 +2694,9 @@ private struct ChromiumSidebar: View {
     private enum SwipeState { case idle, undecided(CGSize), horizontal, passthrough }
     private var swipe: SwipeState = .idle
     private var swallowMomentum = false
-    private var lastFingerDelta: CGFloat = 0
+    private var swipeVelocity = SpaceSwipeVelocity()
     private var scrollMonitor: Any?
-    private let addressBar: AddressBarController
+    fileprivate let addressBar: AddressBarController
     init(context: UnsafeMutableRawPointer?, callback: ChromiumCommand?) {
         let model = ChromiumSidebarModel(context: context, callback: callback)
         self.model = model
@@ -1847,7 +2707,7 @@ private struct ChromiumSidebar: View {
         model.hostView = self
         ShortcutMonitor.shared.install()
         ShortcutGuide.shared.installHelpMenuItem()
-        ArcImportMenu.shared.register(model)
+        BarkImportMenu.shared.register(model)
         model.presentAddressBar = { [weak self] in
             guard let self else { return }
             self.addressBar.show(over: self.window)
@@ -1861,9 +2721,30 @@ private struct ChromiumSidebar: View {
     }
     @available(*, unavailable) required init(rootView: ChromiumSidebar) { fatalError() }
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
+    override var isOpaque: Bool { false }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        // Full-width tab backgrounds extend underneath the overlay scrollbar.
+        // Route its narrow strip to AppKit before SwiftUI's tab-drag gestures
+        // can claim it, including when the thumb is currently faded out.
+        if !isHiddenOrHasHiddenAncestor, let scrollView = model.tabScrollView,
+           let scroller = scrollView.verticalScroller,
+           !scrollView.isHiddenOrHasHiddenAncestor,
+           (scrollView.documentView?.bounds.height ?? 0) > scrollView.contentView.bounds.height + 1,
+           scroller.bounds.contains(scroller.convert(point, from: superview)) {
+            if NSApp.currentEvent?.type == .leftMouseDown { scrollView.flashScrollers() }
+            return scroller
+        }
+        return super.hitTest(point)
+    }
 
     func focusAddress() {
         model.focusAddress()
+    }
+
+    func openAddressSuggestion(_ json: String) {
+        guard let suggestion = try? JSONDecoder().decode(AddressSuggestion.self, from: Data(json.utf8)) else { return }
+        addressBar.open(suggestion)
     }
 
     /// The sidebar model of a browser window, if it has a sidebar.
@@ -1907,28 +2788,34 @@ private struct ChromiumSidebar: View {
             swallowMomentum = false
             let inside = !isHiddenOrHasHiddenAncestor && bounds.contains(convert(locationInWindow, from: nil))
             swipe = inside && model.canSwipeSpaces ? .undecided(.zero) : .passthrough
+            swipeVelocity.begin(at: event.timestamp)
             if event.phase.contains(.mayBegin) { return false }
         }
         if event.phase.contains(.ended) || event.phase.contains(.cancelled) {
             defer { swipe = .idle }
             guard case .horizontal = swipe else { return false }
-            model.endSpaceSwipe(velocity: lastFingerDelta, width: bounds.width, cancelled: event.phase.contains(.cancelled))
+            if fingerX != 0 {
+                swipeVelocity.add(fingerX, at: event.timestamp)
+                model.updateSpaceSwipe(by: fingerX, width: bounds.width)
+            }
+            model.endSpaceSwipe(velocity: swipeVelocity.velocity(at: event.timestamp), width: bounds.width,
+                                cancelled: event.phase.contains(.cancelled))
             swallowMomentum = true
             return true
         }
         switch swipe {
         case .undecided(var total):
+            swipeVelocity.add(fingerX, at: event.timestamp)
             total.width += fingerX; total.height += fingerY
             guard hypot(total.width, total.height) >= 6 else { swipe = .undecided(total); return false }
             // Decide once per gesture; a mostly vertical start keeps scrolling tabs.
             guard abs(total.width) > abs(total.height) * 1.3 else { swipe = .passthrough; return false }
             swipe = .horizontal
             model.beginSpaceSwipe()
-            lastFingerDelta = total.width
             model.updateSpaceSwipe(by: total.width, width: bounds.width)
             return true
         case .horizontal:
-            if fingerX != 0 { lastFingerDelta = fingerX }
+            swipeVelocity.add(fingerX, at: event.timestamp)
             model.updateSpaceSwipe(by: fingerX, width: bounds.width)
             return true
         case .idle, .passthrough:
@@ -1939,14 +2826,45 @@ private struct ChromiumSidebar: View {
 
 // MARK: Split view drop target
 
-/// Highlights the half of the page where a dragged sidebar tab would open in
-/// a split view. The sidebar's own view is clipped to its bounds, so the
-/// highlight is a transparent child window over the page.
+/// Previews split drops over the page and a new window outside its bounds.
+/// A child panel remains visible beyond the clipped sidebar and browser.
 @MainActor final class SplitDropController {
-    enum Side: String { case left, right }
+    enum Side: String { case left, right, top, bottom }
     private var panel: NSPanel?
     private var label: NSTextField?
     private weak var parent: NSWindow?
+
+    static func isOutsideWindow(_ point: NSPoint, window: NSRect) -> Bool {
+        !window.contains(point)
+    }
+
+    static func pointerLocation(in window: NSWindow) -> NSPoint {
+        // The captured drag event still belongs to its source window after
+        // the pointer leaves it. This also handles displays with other origins.
+        if let event = NSApp.currentEvent, event.window === window,
+           event.type == .leftMouseDragged || event.type == .leftMouseUp {
+            return window.convertPoint(toScreen: event.locationInWindow)
+        }
+        return NSEvent.mouseLocation
+    }
+
+    static func newWindowPoint(from view: NSView?) -> NSPoint? {
+        guard let window = view?.window else { return nil }
+        let point = pointerLocation(in: window)
+        return isOutsideWindow(point, window: window.frame) ? point : nil
+    }
+
+    func updateNewWindow(from view: NSView?, title: String) -> Bool {
+        guard let window = view?.window, let point = Self.newWindowPoint(from: view) else { return false }
+        var frame = NSRect(x: point.x + 16, y: point.y - 80, width: 260, height: 64)
+        if let screen = NSScreen.screens.first(where: { $0.frame.contains(point) }) {
+            let visible = screen.visibleFrame
+            frame.origin.x = min(max(frame.minX, visible.minX), visible.maxX - frame.width)
+            frame.origin.y = min(max(frame.minY, visible.minY), visible.maxY - frame.height)
+        }
+        show(frame, over: window, title: "New window\n" + title)
+        return true
+    }
 
     /// The page area of `window` in screen coordinates: everything beside the
     /// sidebar, below the titlebar strip. A collapsed sidebar floats over the
@@ -1958,8 +2876,27 @@ private struct ChromiumSidebar: View {
     }
 
     static func side(at point: NSPoint, page: NSRect, sidebar: NSRect) -> Side? {
-        guard page.width >= 200, page.contains(point), !sidebar.contains(point) else { return nil }
-        return point.x < page.midX ? .left : .right
+        guard page.width >= 200, page.height > 0, page.contains(point), !sidebar.contains(point) else { return nil }
+        // Choose the nearest edge in normalized page coordinates so all four
+        // directions remain reachable in both wide and tall windows.
+        let x = (point.x - page.midX) / page.width
+        let y = (point.y - page.midY) / page.height
+        if abs(y) > abs(x) { return y > 0 ? .top : .bottom }
+        return x < 0 ? .left : .right
+    }
+
+    static func halfRect(for side: Side, page: NSRect) -> NSRect {
+        var half = page
+        switch side {
+        case .left, .right:
+            half.size.width = page.width / 2
+            if side == .right { half.origin.x = page.midX }
+        case .top, .bottom:
+            half.size.height = page.height / 2
+            // AppKit screen coordinates increase upward.
+            if side == .top { half.origin.y = page.midY }
+        }
+        return half
     }
 
     /// Call while dragging. Returns the half under the pointer, or nil when
@@ -1967,12 +2904,11 @@ private struct ChromiumSidebar: View {
     func update(from view: NSView?, floating: Bool, title: String) -> Side? {
         guard let view, let window = view.window else { end(); return nil }
         let sidebar = window.convertToScreen(view.convert(view.bounds, to: nil))
-        let page = Self.pageRect(window: window.frame, sidebar: sidebar, floating: floating)
-        guard let side = Self.side(at: NSEvent.mouseLocation, page: page, sidebar: sidebar) else { end(); return nil }
-        var half = page
-        half.size.width = page.width / 2
-        if side == .right { half.origin.x = page.midX }
-        show(half.insetBy(dx: 6, dy: 6), over: window, title: title)
+        let page = PageFrameHostingView.pageRect(in: window)
+            ?? Self.pageRect(window: window.frame, sidebar: sidebar, floating: floating)
+        guard let side = Self.side(at: Self.pointerLocation(in: window), page: page, sidebar: sidebar) else { end(); return nil }
+        let half = Self.halfRect(for: side, page: page)
+        show(half.insetBy(dx: 6, dy: 6), over: window, title: "Split with " + title)
         return side
     }
 
@@ -1986,7 +2922,7 @@ private struct ChromiumSidebar: View {
     private func show(_ frame: NSRect, over window: NSWindow, title: String) {
         let panel = self.panel ?? makePanel()
         self.panel = panel
-        label?.stringValue = "Split with " + title
+        label?.stringValue = title
         panel.setFrame(frame, display: true)
         if parent !== window {
             parent?.removeChildWindow(panel)
@@ -2013,6 +2949,7 @@ private struct ChromiumSidebar: View {
         label.font = .systemFont(ofSize: 15, weight: .medium)
         label.textColor = .labelColor
         label.lineBreakMode = .byTruncatingTail
+        label.maximumNumberOfLines = 2
         label.alignment = .center
         label.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(label)
@@ -2029,14 +2966,14 @@ private struct ChromiumSidebar: View {
 
 // MARK: Keyboard shortcuts
 
-/// Arc's default shortcuts that differ from Chromium's. One table drives both
-/// the key handling and the guide in the Help menu.
+/// Bark's keyboard shortcuts drive both key handling and the guide in the Help menu.
 struct BarkShortcut {
     enum Action: Equatable {
-        case toggleSidebar, togglePin, copyURL, copyMarkdown, archiveTabs
+        case toggleSidebar, togglePin, copyURL, copyMarkdown, archiveTabs, undoOrganization
         case nextTab, previousTab, nextSpace, previousSpace
         case tab(Int), space(Int)
         case addSplit, closeSplit
+        case recentTab, recentTabReverse
     }
     /// Either a character (as typed without modifiers) or a layout-independent key code.
     enum Key: Equatable {
@@ -2061,10 +2998,13 @@ struct BarkShortcut {
             BarkShortcut(action: .togglePin, key: .character("d"), modifiers: .command, keys: "⌘ D", title: "Pin or unpin the current tab", section: "Sidebar and tabs"),
             BarkShortcut(action: .copyURL, key: .character("c"), modifiers: [.command, .shift], keys: "⇧ ⌘ C", title: "Copy the page's link", section: "Sidebar and tabs"),
             BarkShortcut(action: .copyMarkdown, key: .character("c"), modifiers: [.command, .shift, .option], keys: "⌥ ⇧ ⌘ C", title: "Copy the page's link as Markdown", section: "Sidebar and tabs"),
+            BarkShortcut(action: .undoOrganization, key: .character("z"), modifiers: [.command, .option], keys: "⌥ ⌘ Z", title: "Undo the last sidebar organization change", section: "Sidebar and tabs"),
             BarkShortcut(action: .archiveTabs, key: .character("k"), modifiers: [.command, .shift], keys: "⇧ ⌘ K", title: "Archive this space's unpinned tabs", section: "Sidebar and tabs"),
             BarkShortcut(action: .nextTab, key: .code(125), modifiers: [.command, .option], keys: "⌥ ⌘ ↓", title: "Next tab in the sidebar", section: "Sidebar and tabs", repeats: true),
             BarkShortcut(action: .previousTab, key: .code(126), modifiers: [.command, .option], keys: "⌥ ⌘ ↑", title: "Previous tab in the sidebar", section: "Sidebar and tabs", repeats: true),
             BarkShortcut(action: .tab(1), key: .character("1"), modifiers: .command, keys: "⌘ 1 – 9", title: "Go to that tab, counting from the top of the sidebar", section: "Sidebar and tabs"),
+            BarkShortcut(action: .recentTab, key: .code(48), modifiers: .control, keys: "⌃ Tab", title: "Switch to a recent tab (hold ⌃ and press Tab again to go further back)", section: "Sidebar and tabs", repeats: true),
+            BarkShortcut(action: .recentTabReverse, key: .code(48), modifiers: [.control, .shift], keys: "⌃ ⇧ Tab", title: "Move back through recent tabs", section: "Sidebar and tabs", repeats: true),
             BarkShortcut(action: .nextSpace, key: .code(124), modifiers: [.command, .option], keys: "⌥ ⌘ →", title: "Next space", section: "Spaces"),
             BarkShortcut(action: .previousSpace, key: .code(123), modifiers: [.command, .option], keys: "⌥ ⌘ ←", title: "Previous space", section: "Spaces"),
             BarkShortcut(action: .space(1), key: .character("1"), modifiers: .control, keys: "⌃ 1 – 9", title: "Go to that space", section: "Spaces"),
@@ -2078,10 +3018,10 @@ struct BarkShortcut {
         return list
     }()
 
-    /// Chromium shortcuts that already match Arc's, listed in the guide.
+    /// Shortcuts handled by Chromium and listed in Bark's guide.
     static let builtIn: [(keys: String, title: String)] = [
         ("⌘ T", "New tab"), ("⌘ L", "Edit the address"), ("⌘ W", "Close the tab"),
-        ("⇧ ⌘ T", "Reopen the last closed tab"), ("⌃ Tab", "Next tab"), ("⌃ ⇧ Tab", "Previous tab"),
+        ("⇧ ⌘ T", "Reopen the last closed tab"),
         ("⌘ N", "New window"), ("⇧ ⌘ N", "New Incognito window"), ("⌘ R", "Reload"),
         ("⌘ [  and  ⌘ ]", "Back and forward"), ("⌘ F", "Find on the page"), ("⌘ Y", "History"),
     ]
@@ -2100,7 +3040,7 @@ struct BarkShortcut {
 }
 
 /// Handles Bark's shortcuts for the key browser window before Chromium's menu
-/// and the page see them, as Arc does.
+/// and the page receive them.
 @MainActor final class ShortcutMonitor {
     static let shared = ShortcutMonitor()
     private var monitor: Any?
@@ -2115,10 +3055,26 @@ struct BarkShortcut {
     private func handle(_ event: NSEvent) -> Bool {
         // Only browser windows with a sidebar; sheets, panels, and windows
         // using Chromium's own toolbar keep Chromium's shortcuts.
-        guard let window = event.window, window.isKeyWindow, window.attachedSheet == nil,
-              let model = ChromiumHostingView.model(in: window),
-              let shortcut = BarkShortcut.match(characters: event.charactersIgnoringModifiers, keyCode: event.keyCode,
+        if RecentTabSwitcher.shared.handleKey(event) { return true }
+        guard let window = event.window ?? NSApp.keyWindow, window.isKeyWindow, window.attachedSheet == nil,
+              let model = ChromiumHostingView.model(in: window) else { return false }
+        // Ordinary Cmd+Z belongs to the webpage and text fields. Only consume
+        // it when focus is inside the sidebar itself; Option-Cmd-Z is explicit.
+        if event.charactersIgnoringModifiers?.lowercased() == "z",
+           event.modifierFlags.intersection(BarkShortcut.relevantModifiers) == .command,
+           !(window.firstResponder is NSTextView),
+           let focused = window.firstResponder as? NSView, let sidebar = model.hostView,
+           focused === sidebar || focused.isDescendant(of: sidebar),
+           model.snapshot.organizationUndoLabel != nil {
+            model.send("undoOrganization")
+            return true
+        }
+        guard let shortcut = BarkShortcut.match(characters: event.charactersIgnoringModifiers, keyCode: event.keyCode,
                                                 modifiers: event.modifierFlags) else { return false }
+        if shortcut.action == .recentTab || shortcut.action == .recentTabReverse {
+            RecentTabSwitcher.shared.press(model: model, window: window, reverse: shortcut.action == .recentTabReverse)
+            return true
+        }
         if !event.isARepeat || shortcut.repeats { model.perform(shortcut.action) }
         return true
     }
@@ -2160,7 +3116,7 @@ private struct ShortcutGuideView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                Text("Bark uses Arc's shortcuts. Press the keys shown while a browser window is in front.")
+                Text("Use these shortcuts while a Bark window is in front.")
                     .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 ForEach(Self.sections, id: \.self) { section in
                     group(section, BarkShortcut.all.filter { $0.section == section }.map { ($0.keys, $0.title) })
@@ -2170,7 +3126,7 @@ private struct ShortcutGuideView: View {
                     Text("Drag a tab from the sidebar onto the left or right half of the page to open it beside the current tab. Drag the divider to resize the halves. To go back to two separate tabs, right-click either tab and choose Separate Split View.")
                         .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
-                group("Also the same as Arc", BarkShortcut.builtIn.map { ($0.keys, $0.title) })
+                group("Browser shortcuts", BarkShortcut.builtIn.map { ($0.keys, $0.title) })
                 Text("These shortcuts replace Chromium's for the same keys: Save Page (⌘ S), Bookmark (⌘ D), and Inspect Element (⇧ ⌘ C) remain available from the menus and the page's context menu.")
                     .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }.padding(20).frame(maxWidth: .infinity, alignment: .leading)
@@ -2214,9 +3170,34 @@ private struct ShortcutGuideView: View {
     Unmanaged<ChromiumHostingView>.fromOpaque(handle).takeUnretainedValue().model.updateSuggestions(String(cString: json))
 }
 
+@_cdecl("BarkSwiftSidebarSwitcher")
+@MainActor func barkSwiftSidebarSwitcher(_ handle: UnsafeMutableRawPointer, _ json: UnsafePointer<CChar>) {
+    Unmanaged<ChromiumHostingView>.fromOpaque(handle).takeUnretainedValue().model.updateSwitcher(String(cString: json))
+}
+
 @_cdecl("BarkSwiftSidebarFocusAddress")
 @MainActor func barkSwiftSidebarFocusAddress(_ handle: UnsafeMutableRawPointer) {
     Unmanaged<ChromiumHostingView>.fromOpaque(handle).takeUnretainedValue().focusAddress()
+}
+
+@_cdecl("BarkSwiftSidebarComposeAddress")
+@MainActor func barkSwiftSidebarComposeAddress(_ handle: UnsafeMutableRawPointer) {
+    Unmanaged<ChromiumHostingView>.fromOpaque(handle).takeUnretainedValue().model.composeAddress()
+}
+
+@_cdecl("BarkSwiftSidebarDismissAddress")
+@MainActor func barkSwiftSidebarDismissAddress(_ handle: UnsafeMutableRawPointer) {
+    Unmanaged<ChromiumHostingView>.fromOpaque(handle).takeUnretainedValue().addressBar.close(returnFocus: false)
+}
+
+@_cdecl("BarkSwiftSidebarAddressVisible")
+@MainActor func barkSwiftSidebarAddressVisible(_ handle: UnsafeMutableRawPointer) -> Bool {
+    Unmanaged<ChromiumHostingView>.fromOpaque(handle).takeUnretainedValue().addressBar.isVisible
+}
+
+@_cdecl("BarkSwiftSidebarOpenSuggestion")
+@MainActor func barkSwiftSidebarOpenSuggestion(_ handle: UnsafeMutableRawPointer, _ json: UnsafePointer<CChar>) {
+    Unmanaged<ChromiumHostingView>.fromOpaque(handle).takeUnretainedValue().openAddressSuggestion(String(cString: json))
 }
 
 @_cdecl("BarkSwiftSidebarHeaderCreate")
@@ -2229,4 +3210,33 @@ private struct ShortcutGuideView: View {
 @MainActor func barkSwiftSidebarHeaderDestroy(_ handle: UnsafeMutableRawPointer) {
     let view = Unmanaged<ChromiumHeaderHostingView>.fromOpaque(handle).takeRetainedValue()
     view.stopObserving()
+}
+
+@_cdecl("BarkSwiftSidebarResizeCreate")
+@MainActor func barkSwiftSidebarResizeCreate(_ handle: UnsafeMutableRawPointer) -> UnsafeMutableRawPointer {
+    let model = Unmanaged<ChromiumHostingView>.fromOpaque(handle).takeUnretainedValue().model
+    return Unmanaged.passRetained(SidebarResizeHostingView(model: model)).toOpaque()
+}
+
+@_cdecl("BarkSwiftSidebarResizeDestroy")
+@MainActor func barkSwiftSidebarResizeDestroy(_ handle: UnsafeMutableRawPointer) {
+    let view = Unmanaged<SidebarResizeHostingView>.fromOpaque(handle).takeRetainedValue()
+    view.rootView.model.resizingSidebar = false
+}
+
+@_cdecl("BarkSwiftPageFrameCreate")
+@MainActor func barkSwiftPageFrameCreate(_ handle: UnsafeMutableRawPointer) -> UnsafeMutableRawPointer {
+    let model = Unmanaged<ChromiumHostingView>.fromOpaque(handle).takeUnretainedValue().model
+    return Unmanaged.passRetained(PageFrameHostingView(model: model)).toOpaque()
+}
+
+@_cdecl("BarkSwiftSidebarBackdropCreate")
+@MainActor func barkSwiftSidebarBackdropCreate(_ handle: UnsafeMutableRawPointer) -> UnsafeMutableRawPointer {
+    let model = Unmanaged<ChromiumHostingView>.fromOpaque(handle).takeUnretainedValue().model
+    return Unmanaged.passRetained(SidebarBackdropHostingView(model: model)).toOpaque()
+}
+
+@_cdecl("BarkSwiftSidebarShowPreferences")
+@MainActor func barkSwiftSidebarShowPreferences(_ handle: UnsafeMutableRawPointer) {
+    Unmanaged<ChromiumHostingView>.fromOpaque(handle).takeUnretainedValue().model.showPreferences()
 }

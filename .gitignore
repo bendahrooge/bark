@@ -17,3 +17,4 @@ run.sh
 *.p8
 *.key
 *.certSigningRequest
+/apps/macos/resources/icon-proposals

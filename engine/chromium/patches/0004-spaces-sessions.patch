@@ -1,7 +1,7 @@
 diff --git a/chrome/browser/prefs/browser_prefs.cc b/chrome/browser/prefs/browser_prefs.cc
 --- a/chrome/browser/prefs/browser_prefs.cc
 +++ b/chrome/browser/prefs/browser_prefs.cc
-@@ -1656,6 +1656,10 @@
+@@ -1715,6 +1715,10 @@ std::string GetCountry() {
  }
  
  void RegisterLocalState(PrefRegistrySimple* registry) {
@@ -12,6 +12,104 @@ diff --git a/chrome/browser/prefs/browser_prefs.cc b/chrome/browser/prefs/browse
    // Call outs to individual subsystems that register Local State (browser-wide)
    // prefs en masse. See RegisterProfilePrefs for per-profile prefs. Please
    // keep this list alphabetized.
+diff --git a/chrome/browser/prefs/session_startup_pref.cc b/chrome/browser/prefs/session_startup_pref.cc
+--- a/chrome/browser/prefs/session_startup_pref.cc
++++ b/chrome/browser/prefs/session_startup_pref.cc
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include "chrome/browser/prefs/session_startup_pref.h"
++#include "base/command_line.h"
+ 
+ #include <stddef.h>
+ 
+@@ -66,6 +67,10 @@ void SessionStartupPref::RegisterProfilePrefs(
+ 
+ // static
+ SessionStartupPref::Type SessionStartupPref::GetDefaultStartupType() {
++#if BUILDFLAG(IS_MAC)
++  if (base::CommandLine::ForCurrentProcess()->HasSwitch("bark-swift-ui"))
++    return SessionStartupPref::LAST;
++#endif
+ #if BUILDFLAG(IS_CHROMEOS)
+   return SessionStartupPref::LAST;
+ #else
+diff --git a/chrome/browser/sessions/BUILD.gn b/chrome/browser/sessions/BUILD.gn
+--- a/chrome/browser/sessions/BUILD.gn
++++ b/chrome/browser/sessions/BUILD.gn
+@@ -193,6 +193,9 @@ source_set("impl") {
+       sources += [ "profile_diff_after_restart_recorder.cc" ]
+     }
+   }
++  if (is_mac) {
++    deps += [ "//bark:space_tab_data" ]
++  }
+ }
+ 
+ if (!is_android) {
+diff --git a/chrome/browser/sessions/session_service_base.cc b/chrome/browser/sessions/session_service_base.cc
+--- a/chrome/browser/sessions/session_service_base.cc
++++ b/chrome/browser/sessions/session_service_base.cc
+@@ -19,6 +19,10 @@
+ #include "base/strings/to_string.h"
+ #include "base/task/sequenced_task_runner.h"
+ #include "build/build_config.h"
++
++#if BUILDFLAG(IS_MAC)
++#include "bark/space_tab_data.h"
++#endif
+ #include "chrome/browser/apps/app_service/web_contents_app_id_utils.h"
+ #include "chrome/browser/browser_process.h"
+ #include "chrome/browser/profiles/profile.h"
+@@ -675,6 +679,23 @@ void SessionServiceBase::BuildCommandsForTab(
+         sessions::CreatePinnedStateCommand(session_id, true));
+   }
+ 
++#if BUILDFLAG(IS_MAC)
++  const std::string bark_space = bark::GetTabSpace(tab);
++  if (!bark_space.empty()) {
++    command_storage_manager()->AppendRebuildCommand(
++        sessions::CreateAddTabExtraDataCommand(session_id, bark::kTabSpaceKey, bark_space));
++  }
++  const std::string bark_group = bark::GetTabWindowGroup(tab);
++  if (!bark_group.empty()) {
++    command_storage_manager()->AppendRebuildCommand(
++        sessions::CreateAddTabExtraDataCommand(session_id, bark::kTabWindowGroupKey, bark_group));
++  }
++  const std::string bark_meta = bark::GetTabMeta(tab);
++  if (!bark_meta.empty()) {
++    command_storage_manager()->AppendRebuildCommand(
++        sessions::CreateAddTabExtraDataCommand(session_id, bark::kTabMetaKey, bark_meta));
++  }
++#endif
+   // Record the association between the sessionStorage namespace and the tab.
+   content::SessionStorageNamespaceHandle* session_storage_namespace =
+       tab->GetController().GetDefaultSessionStorageNamespace();
+diff --git a/chrome/browser/ui/BUILD.gn b/chrome/browser/ui/BUILD.gn
+--- a/chrome/browser/ui/BUILD.gn
++++ b/chrome/browser/ui/BUILD.gn
+@@ -521,7 +521,10 @@ if (!is_android) {
+       "//ui/gfx/geometry",
+       "//ui/gfx/range",
+     ]
++    if (is_mac) {
++    deps += [ "//bark:space_tab_data" ]
+   }
++}
+ 
+   source_set("scoped_tabbed_browser_displayer") {
+     public = [ "scoped_tabbed_browser_displayer.h" ]
+@@ -586,7 +589,10 @@ if (!is_android) {
+       "//ui/base",
+       "//ui/base/mojom:ui_base_types",
+     ]
++    if (is_mac) {
++    deps += [ "//bark:space_tab_data" ]
+   }
++}
+ 
+   source_set("browser_tab_restorer") {
+     sources = [ "browser_tab_restorer.cc" ]
 diff --git a/chrome/browser/ui/browser_live_tab_context.cc b/chrome/browser/ui/browser_live_tab_context.cc
 --- a/chrome/browser/ui/browser_live_tab_context.cc
 +++ b/chrome/browser/ui/browser_live_tab_context.cc
@@ -27,7 +125,7 @@ diff --git a/chrome/browser/ui/browser_live_tab_context.cc b/chrome/browser/ui/b
  
  #include <algorithm>
  #include <memory>
-@@ -208,6 +213,12 @@
+@@ -208,6 +213,14 @@ std::map<std::string, std::string> BrowserLiveTabContext::GetExtraDataForTab(
      extra_data.merge(contextual_tasks_controller->GetTabRestoreData(tab));
    }
  
@@ -36,6 +134,8 @@ diff --git a/chrome/browser/ui/browser_live_tab_context.cc b/chrome/browser/ui/b
 +  if (!space.empty()) extra_data[bark::kTabSpaceKey] = space;
 +  const std::string group = bark::GetTabWindowGroup(tab_strip_model_->GetWebContentsAt(index));
 +  if (!group.empty()) extra_data[bark::kTabWindowGroupKey] = group;
++  const std::string meta = bark::GetTabMeta(tab_strip_model_->GetWebContentsAt(index));
++  if (!meta.empty()) extra_data[bark::kTabMetaKey] = meta;
 +#endif
    return extra_data;
  }
@@ -43,7 +143,7 @@ diff --git a/chrome/browser/ui/browser_live_tab_context.cc b/chrome/browser/ui/b
 diff --git a/chrome/browser/ui/browser_tabrestore.cc b/chrome/browser/ui/browser_tabrestore.cc
 --- a/chrome/browser/ui/browser_tabrestore.cc
 +++ b/chrome/browser/ui/browser_tabrestore.cc
-@@ -10,7 +10,11 @@
+@@ -10,6 +10,10 @@
  
  #include "base/containers/span.h"
  #include "build/build_config.h"
@@ -54,8 +154,7 @@ diff --git a/chrome/browser/ui/browser_tabrestore.cc b/chrome/browser/ui/browser
  #include "chrome/browser/apps/app_service/web_contents_app_id_utils.h"
  #include "chrome/browser/contextual_tasks/contextual_tasks_tab_restore_data.h"
  #include "chrome/browser/glic/glic_tab_restore_helper.h"
- #include "chrome/browser/profiles/profile.h"
-@@ -82,6 +86,12 @@
+@@ -83,6 +87,14 @@ std::unique_ptr<WebContents> CreateRestoredTab(
    apps::SetAppIdForWebContents(browser->GetProfile(), web_contents.get(),
                                 extension_app_id);
  
@@ -64,102 +163,9 @@ diff --git a/chrome/browser/ui/browser_tabrestore.cc b/chrome/browser/ui/browser
 +    bark::SetTabSpace(web_contents.get(), it->second);
 +  if (auto it = extra_data.find(bark::kTabWindowGroupKey); it != extra_data.end())
 +    bark::SetTabWindowGroup(web_contents.get(), it->second, from_session_restore);
++  if (auto it = extra_data.find(bark::kTabMetaKey); it != extra_data.end())
++    bark::SetTabMeta(web_contents.get(), it->second);
 +#endif
    glic::RestoreGlicStateFromExtraData(web_contents.get(), extra_data);
    contextual_tasks::ContextualTasksTabRestoreData::RestoreFromExtraData(
        web_contents.get(), extra_data);
-diff --git a/chrome/browser/sessions/session_service_base.cc b/chrome/browser/sessions/session_service_base.cc
---- a/chrome/browser/sessions/session_service_base.cc
-+++ b/chrome/browser/sessions/session_service_base.cc
-@@ -19,6 +19,10 @@
- #include "base/strings/to_string.h"
- #include "base/task/sequenced_task_runner.h"
- #include "build/build_config.h"
-+
-+#if BUILDFLAG(IS_MAC)
-+#include "bark/space_tab_data.h"
-+#endif
- #include "chrome/browser/apps/app_service/web_contents_app_id_utils.h"
- #include "chrome/browser/browser_process.h"
- #include "chrome/browser/profiles/profile.h"
-@@ -675,6 +679,18 @@
-         sessions::CreatePinnedStateCommand(session_id, true));
-   }
- 
-+#if BUILDFLAG(IS_MAC)
-+  const std::string bark_space = bark::GetTabSpace(tab);
-+  if (!bark_space.empty()) {
-+    command_storage_manager()->AppendRebuildCommand(
-+        sessions::CreateAddTabExtraDataCommand(session_id, bark::kTabSpaceKey, bark_space));
-+  }
-+  const std::string bark_group = bark::GetTabWindowGroup(tab);
-+  if (!bark_group.empty()) {
-+    command_storage_manager()->AppendRebuildCommand(
-+        sessions::CreateAddTabExtraDataCommand(session_id, bark::kTabWindowGroupKey, bark_group));
-+  }
-+#endif
-   // Record the association between the sessionStorage namespace and the tab.
-   content::SessionStorageNamespaceHandle* session_storage_namespace =
-       tab->GetController().GetDefaultSessionStorageNamespace();
-diff --git a/chrome/browser/prefs/session_startup_pref.cc b/chrome/browser/prefs/session_startup_pref.cc
---- a/chrome/browser/prefs/session_startup_pref.cc
-+++ b/chrome/browser/prefs/session_startup_pref.cc
-@@ -3,6 +3,7 @@
- // found in the LICENSE file.
- 
- #include "chrome/browser/prefs/session_startup_pref.h"
-+#include "base/command_line.h"
- 
- #include <stddef.h>
- 
-@@ -66,6 +67,10 @@
- 
- // static
- SessionStartupPref::Type SessionStartupPref::GetDefaultStartupType() {
-+#if BUILDFLAG(IS_MAC)
-+  if (base::CommandLine::ForCurrentProcess()->HasSwitch("bark-swift-ui"))
-+    return SessionStartupPref::LAST;
-+#endif
- #if BUILDFLAG(IS_CHROMEOS)
-   return SessionStartupPref::LAST;
- #else
-diff --git a/chrome/browser/ui/BUILD.gn b/chrome/browser/ui/BUILD.gn
---- a/chrome/browser/ui/BUILD.gn
-+++ b/chrome/browser/ui/BUILD.gn
-@@ -519,7 +519,10 @@
-       "//ui/gfx/geometry",
-       "//ui/gfx/range",
-     ]
--  }
-+    if (is_mac) {
-+    deps += [ "//bark:space_tab_data" ]
-+  }
-+}
- 
-   source_set("scoped_tabbed_browser_displayer") {
-     public = [ "scoped_tabbed_browser_displayer.h" ]
-@@ -583,7 +586,10 @@
-       "//ui/base",
-       "//ui/base/mojom:ui_base_types",
-     ]
--  }
-+    if (is_mac) {
-+    deps += [ "//bark:space_tab_data" ]
-+  }
-+}
- 
-   source_set("browser_tab_restorer") {
-     sources = [ "browser_tab_restorer.cc" ]
-diff --git a/chrome/browser/sessions/BUILD.gn b/chrome/browser/sessions/BUILD.gn
---- a/chrome/browser/sessions/BUILD.gn
-+++ b/chrome/browser/sessions/BUILD.gn
-@@ -192,6 +192,9 @@
-     } else {
-       sources += [ "profile_diff_after_restart_recorder.cc" ]
-     }
-+  }
-+  if (is_mac) {
-+    deps += [ "//bark:space_tab_data" ]
-   }
- }
- 

@@ -15,7 +15,10 @@ class SpaceCatalog {
   explicit SpaceCatalog(PrefService* prefs) : prefs_(prefs) {}
   const base::ListValue& List() const;
   const base::DictValue* Find(const std::string& id) const;
+  bool IsHidden(const std::string& id) const;
   std::string FirstForProfile(const std::string& profile) const;
+  // One-time migration of the unchanged stock Personal icon; custom icons stay.
+  void MigratePersonalIcon();
   std::string Create(const std::string& name, const std::string& profile,
                      const std::string& theme, const std::string& emoji);
   bool Update(const std::string& id, const std::string& name,
@@ -32,9 +35,9 @@ class SpaceCatalog {
   void SetPreviewTabs(const std::string& id, base::ListValue tabs);
   // Saved preview of a space: tabs waiting to reopen, else its last tabs.
   base::ListValue SavedPreview(const std::string& id) const;
-  // Removes a space. Fails for a profile's last space, because the sidebar
-  // gives every profile one. Its open tabs move to a remaining space.
-  bool Remove(const std::string& id);
+  // Removes a sidebar space, keeping at least one available replacement.
+  // A profile's last space is retained privately to preserve its tabs/data.
+  bool Remove(const std::string& id, const std::string& replacement);
   // Swaps the positions of two spaces in the sidebar order.
   bool Swap(const std::string& first, const std::string& second);
   // Moves a space to another profile. With an open sidebar its tabs reopen
@@ -48,6 +51,11 @@ class SpaceCatalog {
   // Returns and removes one archived tab; an empty dict if there is none.
   base::DictValue TakeArchived(const std::string& id, size_t index);
   void ClearArchive(const std::string& id);
+  // Sets or (with a none value) removes one of a space's appearance or
+  // layout fields: "folders" (a list of {id, name, collapsed, parent}), "pinsCollapsed", "gradient" (a
+  // second theme name), "grain" (0-1), or "gradientCanvas" (two RGB colors
+  // and two normalized points). Other keys are refused.
+  bool SetField(const std::string& id, const std::string& key, base::Value value);
  private:
   // Applies `edit` to space `id`'s entry and saves the list if it returns true.
   bool EditSpace(const std::string& id, base::FunctionRef<bool(base::DictValue&)> edit);

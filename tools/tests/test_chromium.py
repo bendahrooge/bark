@@ -216,6 +216,80 @@ class ChromiumBuildTests(unittest.TestCase):
                 chromium.prepare(work, lock)
                 self.assertEqual('upstream one\n', (work / 'src/one.cc').read_text())
 
+    def test_refresh_removes_only_unchanged_obsolete_overlays(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, engine, work, lock = self.make_prepared_fixture(directory)
+            with patch.object(chromium, 'ROOT', root), patch.object(chromium, 'ENGINE', engine):
+                old_source = engine / 'overlay/old.swift'
+                old_source.write_text('obsolete generated source')
+                chromium.prepare(work, lock)
+                old_output = work / 'src/bark/old.swift'
+                unowned = work / 'src/bark/developer.swift'
+                unowned.write_text('developer work')
+                output = work / 'src/out'; output.mkdir()
+                (output / 'cached.o').write_text('cached object')
+                unchanged_mtime = (work / 'src/bark/BRANDING').stat().st_mtime_ns
+                old_source.unlink()
+                (engine / 'overlay/new.swift').write_text('replacement generated source')
+                chromium.prepare(work, lock)
+                chromium.prepare(work, lock)  # The updated manifest is reusable.
+                self.assertFalse(old_output.exists())
+                self.assertEqual('replacement generated source', (work / 'src/bark/new.swift').read_text())
+                self.assertEqual('developer work', unowned.read_text())
+                self.assertEqual('cached object', (output / 'cached.o').read_text())
+                self.assertEqual(unchanged_mtime, (work / 'src/bark/BRANDING').stat().st_mtime_ns)
+                stamp = json.loads((work / 'bark-prepared.json').read_text())
+                self.assertNotIn('overlay/old.swift', stamp['inputs'])
+                self.assertNotIn('bark/old.swift', stamp['outputs'])
+                self.assertIn('bark/new.swift', stamp['outputs'])
+
+    def test_refresh_preserves_edited_or_symlinked_obsolete_overlay(self):
+        for symlink in (False, True):
+            with self.subTest(symlink=symlink), tempfile.TemporaryDirectory() as directory:
+                root, engine, work, lock = self.make_prepared_fixture(directory)
+                with patch.object(chromium, 'ROOT', root), patch.object(chromium, 'ENGINE', engine):
+                    chromium.prepare(work, lock)
+                    (engine / 'overlay/BRANDING').unlink()
+                    target = work / 'src/bark/BRANDING'
+                    if symlink:
+                        outside = root / 'developer.txt'
+                        outside.write_text('Bark')
+                        target.unlink()
+                        target.symlink_to(outside)
+                    else:
+                        target.write_text('keep my edits')
+                    before = (work / 'bark-prepared.json').read_bytes()
+                    with self.assertRaisesRegex(RuntimeError, 'Prepared source changed: bark/BRANDING'):
+                        chromium.prepare(work, lock)
+                    self.assertEqual('Bark' if symlink else 'keep my edits', target.read_text())
+                    self.assertEqual(symlink, target.is_symlink())
+                    self.assertEqual(before, (work / 'bark-prepared.json').read_bytes())
+
+    def test_refresh_restores_removed_overlay_when_manifest_update_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, engine, work, lock = self.make_prepared_fixture(directory)
+            with patch.object(chromium, 'ROOT', root), patch.object(chromium, 'ENGINE', engine):
+                chromium.prepare(work, lock)
+                old_output = work / 'src/bark/BRANDING'
+                old_output.chmod(0o755)
+                old_metadata = old_output.stat()
+                (engine / 'overlay/BRANDING').unlink()
+                (engine / 'overlay/new.swift').write_text('new generated source')
+                lock['patches'].append({'file': '0002.patch'})
+                before = (work / 'bark-prepared.json').read_bytes()
+                with patch.object(Path, 'replace', side_effect=OSError('cannot replace manifest')):
+                    with self.assertRaisesRegex(OSError, 'cannot replace manifest'):
+                        chromium.prepare(work, lock)
+                self.assertEqual('Bark', (work / 'src/bark/BRANDING').read_text())
+                self.assertEqual(old_metadata.st_mode, old_output.stat().st_mode)
+                self.assertEqual(old_metadata.st_mtime_ns, old_output.stat().st_mtime_ns)
+                self.assertFalse((work / 'src/bark/new.swift').exists())
+                self.assertEqual('upstream two\n', (work / 'src/two.cc').read_text())
+                self.assertEqual(before, (work / 'bark-prepared.json').read_bytes())
+                chromium.prepare(work, lock)  # A failed update can be retried.
+                self.assertFalse((work / 'src/bark/BRANDING').exists())
+                self.assertEqual('Bark two\n', (work / 'src/two.cc').read_text())
+
     def test_overlay_sources_cannot_escape_repository_or_collide(self):
         with tempfile.TemporaryDirectory() as directory:
             root, engine, work, lock = self.make_prepared_fixture(directory)

@@ -1,0 +1,13 @@
+diff --git a/chrome/browser/search/BUILD.gn b/chrome/browser/search/BUILD.gn
+--- a/chrome/browser/search/BUILD.gn
++++ b/chrome/browser/search/BUILD.gn
+@@ -33,6 +33,9 @@
+     "//ui/webui:buildflags",
+     "//url",
+   ]
++  if (is_mac) {
++    deps += [ "//bark:browser_hooks" ]
++  }
+   if (is_android) {
+     sources += [
+       "contextual_search_policy_handler_android.cc",

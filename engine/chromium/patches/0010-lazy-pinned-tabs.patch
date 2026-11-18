@@ -1,0 +1,115 @@
+diff --git a/chrome/browser/performance_manager/policies/background_tab_loading_policy.cc b/chrome/browser/performance_manager/policies/background_tab_loading_policy.cc
+--- a/chrome/browser/performance_manager/policies/background_tab_loading_policy.cc
++++ b/chrome/browser/performance_manager/policies/background_tab_loading_policy.cc
+@@ -10,6 +10,7 @@
+ #include <vector>
+ 
+ #include "base/check.h"
++#include "base/command_line.h"
+ #include "base/functional/callback.h"
+ #include "base/memory_coordinator/utils.h"
+ #include "base/metrics/field_trial_params.h"
+@@ -25,6 +26,7 @@
+ #include "chrome/browser/performance_manager/public/background_tab_loading_policy.h"
+ #include "components/favicon/content/content_favicon_driver.h"
+ #include "components/performance_manager/graph/page_node_impl.h"
++#include "components/performance_manager/public/decorators/page_live_state_decorator.h"
+ #include "components/performance_manager/public/decorators/site_data_recorder.h"
+ #include "components/performance_manager/public/features.h"
+ #include "components/performance_manager/public/graph/graph.h"
+@@ -119,6 +121,15 @@
+                                    /*is_same_document=*/false);
+     }
+ 
++#if BUILDFLAG(IS_MAC)
++    // Bark keeps background pins (including Favorites) dormant until shown.
++    // Their saved title, URL and favicon remain available in the sidebar.
++    if (base::CommandLine::ForCurrentProcess()->HasSwitch("bark-swift-ui") &&
++        PageLiveStateDecorator::IsPinnedTab(content)) {
++      continue;
++    }
++#endif
++
+     content::PermissionController* permission_controller =
+         content->GetBrowserContext()->GetPermissionController();
+ 
+diff --git a/chrome/browser/ui/startup/startup_browser_creator_impl.cc b/chrome/browser/ui/startup/startup_browser_creator_impl.cc
+--- a/chrome/browser/ui/startup/startup_browser_creator_impl.cc
++++ b/chrome/browser/ui/startup/startup_browser_creator_impl.cc
+@@ -18,6 +18,9 @@
+ #include "base/supports_user_data.h"
+ #include "base/version.h"
+ #include "build/build_config.h"
++#if BUILDFLAG(IS_MAC)
++#include "bark/lazy_tab.h"
++#endif
+ #include "chrome/browser/apps/platform_apps/install_chrome_app.h"
+ #include "chrome/browser/browser_process.h"
+ #include "chrome/browser/custom_handlers/protocol_handler_registry_factory.h"
+@@ -453,6 +456,13 @@
+                              ? WindowOpenDisposition::kNewForegroundTab
+                              : WindowOpenDisposition::kNewBackgroundTab;
+     params.tabstrip_add_types = add_types;
++#if BUILDFLAG(IS_MAC)
++    // The new-tab/custom-startup path restores pins without a session restore.
++    if (tab.type == StartupTab::Type::kPinned &&
++        base::CommandLine::ForCurrentProcess()->HasSwitch("bark-swift-ui")) {
++      params.contents_to_insert = bark::CreateLazyTab(profile_, tab.url);
++    }
++#endif
+ 
+ #if BUILDFLAG(ENABLE_RLZ)
+     if (process_startup == chrome::startup::IsProcessStartup::kYes &&
+diff --git a/chrome/browser/ui/startup/BUILD.gn b/chrome/browser/ui/startup/BUILD.gn
+--- a/chrome/browser/ui/startup/BUILD.gn
++++ b/chrome/browser/ui/startup/BUILD.gn
+@@ -293,6 +293,7 @@
+ 
+     if (is_mac) {
+       deps += [
++        "//bark:lazy_tab",
+         "//chrome/browser:app_controller_mac",
+         "//chrome/browser/mac",
+       ]
+diff --git a/chrome/browser/sessions/session_restore.cc b/chrome/browser/sessions/session_restore.cc
+--- a/chrome/browser/sessions/session_restore.cc
++++ b/chrome/browser/sessions/session_restore.cc
+@@ -1078,6 +1078,20 @@
+     const int selected_tab_index = std::clamp(
+         window.selected_tab_index, 0, static_cast<int>(window.tabs.size() - 1));
+ 
++#if BUILDFLAG(IS_MAC)
++    // An empty tab strip implicitly selects its first insertion. Keep a blank
++    // tab selected until the real selection is restored so the first pin does
++    // not start a navigation merely because it is inserted before that tab.
++    base::WeakPtr<WebContents> bark_restore_placeholder;
++    if (base::CommandLine::ForCurrentProcess()->HasSwitch("bark-swift-ui") &&
++        initial_tab_count == 0 && selected_tab_index != 0 &&
++        window.tabs.front()->pinned) {
++      chrome::AddTabAt(browser, GURL("about:blank"), -1, true);
++      bark_restore_placeholder =
++          browser->GetTabStripModel()->GetActiveWebContents()->GetWeakPtr();
++    }
++#endif
++
+ #if defined(USE_AURA)
+     // Each restored tab's WebContents window is parented to the browser's
+     // root window as the tab is inserted (BrowserView::OnTabStripModelChanged),
+@@ -1119,6 +1133,17 @@
+                  last_active_time_ticks, tab.last_active_time,
+                  did_show_browser);
+     }
++
++#if BUILDFLAG(IS_MAC)
++    if (bark_restore_placeholder) {
++      auto* tab_strip = browser->GetTabStripModel();
++      const int index =
++          tab_strip->GetIndexOfWebContents(bark_restore_placeholder.get());
++      if (index != TabStripModel::kNoTab && tab_strip->count() > 1) {
++        tab_strip->CloseWebContentsAt(index, CLOSE_NONE);
++      }
++    }
++#endif
+ 
+     for (const auto& pair : tabs_by_split_id) {
+       const split_tabs::SplitTabId split_id = pair.first;

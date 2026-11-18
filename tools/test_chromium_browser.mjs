@@ -26,17 +26,23 @@ if (headless && !all) throw new Error('--headless requires --all; the default ex
 if (all && (headed || swiftUI)) throw new Error('--all selects native macOS checks automatically; use --headless to skip them');
 if (swiftUI && (!headed || process.platform !== 'darwin')) throw new Error('--swift-ui requires --headed on macOS');
 const binary = path.resolve(arguments_.find(arg => !arg.startsWith('--')) || path.join(output,
-  process.platform === 'darwin' ? 'Bark.app/Contents/MacOS/Bark' : 'chrome'));
+  process.platform === 'darwin' ? 'Bark-dev.app/Contents/MacOS/Bark' : 'chrome'));
 const fixture = path.join(root, 'tools/fixtures/extension');
 const lock = JSON.parse(fs.readFileSync(path.join(root, 'engine/chromium/chromium.lock.json')));
 const resultsRoot = path.join(root, 'test-results/chromium-browser');
 
+export function bundleEnablesSwiftUI() {
+  const info = execFileSync('plutil', ['-convert', 'json', '-o', '-',
+    path.resolve(path.dirname(binary), '../Info.plist')], {encoding: 'utf8'});
+  return JSON.parse(info).BarkEnableSwiftUI === true;
+}
+
 export class Browser {
-  constructor(profile, logPath, {nativeWindow = false, nativeUI = swiftUI, loadFixture = true, profileDirectory = 'Default', testDirectory, extraFlags = []} = {}) {
+  constructor(profile, logPath, {nativeWindow = false, nativeUI = swiftUI, loadFixture = true, profileDirectory = 'Default', testDirectory, extraFlags = [], initialURL = 'about:blank'} = {}) {
     const flags = ['--remote-debugging-pipe', '--no-first-run',
       '--no-default-browser-check', '--disable-background-networking',
       '--disable-component-update', '--disable-sync',
-      `--user-data-dir=${profile}`, 'about:blank'];
+      `--user-data-dir=${profile}`, initialURL];
     if (!nativeWindow) flags.push('--headless');
     if (profileDirectory) flags.push(`--profile-directory=${profileDirectory}`);
     if (loadFixture) flags.push(`--load-extension=${fixture}`);
@@ -438,9 +444,23 @@ async function runAll() {
   const save = () => fs.writeFileSync(path.join(directory, 'report.json'), JSON.stringify(report, null, 2) + '\n');
   // The headed browser run already includes every headless extension check.
   const suites = [['browser', 'test_chromium_browser.mjs', native ? ['--headed', '--swift-ui'] : []]];
+  if (process.platform === 'darwin') suites.push(['new-tab-default', 'test_chromium_new_tab_default.mjs', []]);
   if (native) suites.push(
     ['spaces-and-settings', 'test_chromium_spaces.mjs', []],
-    ['arc-import', 'test_chromium_arc_import.mjs', []],
+    ['space-canvas', 'test_chromium_space_canvas.mjs', []],
+    ['new-tab', 'test_chromium_new_tab.mjs', []],
+    ['notification-banners', 'test_chromium_notification_banners.mjs', []],
+    ['pinned-tabs', 'test_chromium_pinned.mjs', []],
+    ['bark-features', 'test_chromium_bark_features.mjs', []],
+    ['organization', 'test_chromium_organization.mjs', []],
+    ['preferences', 'test_chromium_preferences.mjs', []],
+    ['command-bar', 'test_chromium_command_bar.mjs', []],
+    ['space-removal', 'test_chromium_space_removal.mjs', []],
+    ['extensions-menu', 'test_chromium_extensions_menu.mjs', []],
+    ['split-view', 'test_chromium_splits.mjs', []],
+    ['tab-detach', 'test_chromium_tab_detach.mjs', []],
+    ['sidebar-hover', 'test_chromium_sidebar_hover.mjs', []],
+    ['bark-import', 'test_chromium_bark_import.mjs', []],
     ['about-updates', 'test_chromium_updates.mjs', []],
   );
   try {

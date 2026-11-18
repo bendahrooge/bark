@@ -1,7 +1,7 @@
 import XCTest
 @testable import BarkCore
 
-final class ArcImportTests: XCTestCase {
+final class BarkImportTests: XCTestCase {
     func fixture() throws -> Data {
         func node(_ id: String, _ title: String?, _ payload: [String: Any], _ children: [String] = []) -> [String: Any] {
             ["id": id, "title": title as Any? ?? NSNull(), "data": payload, "childrenIds": children]
@@ -22,7 +22,7 @@ final class ArcImportTests: XCTestCase {
         return try JSONSerialization.data(withJSONObject: ["sidebar": ["containers": [["global": [:]], global, ["standalone": [:]], global]]])
     }
     func testNestedFoldersFavoritesAndUnsafeURLs() throws {
-        let plan = try ArcImport.sidebar(fixture())
+        let plan = try BarkImport.sidebar(fixture())
         XCTAssertEqual(plan.spaces.count, 1, "Standalone windows must not duplicate global spaces")
         let space = try XCTUnwrap(plan.spaces.first)
         XCTAssertEqual(space.space.emoji, "🔬")
@@ -33,22 +33,22 @@ final class ArcImportTests: XCTestCase {
         XCTAssertEqual(space.folders[1].parentID, space.folders[0].id)
         XCTAssertEqual(space.tabs[1].folderID, space.folders[0].id)
         XCTAssertFalse(plan.warnings.isEmpty)
-        XCTAssertEqual(try ArcImport.sidebar(fixture()).spaces[0].tabs.map(\.id), space.tabs.map(\.id))
+        XCTAssertEqual(try BarkImport.sidebar(fixture()).spaces[0].tabs.map(\.id), space.tabs.map(\.id))
     }
     func testImportIsAdditiveIdempotentAndKeepsFolders() throws {
-        var plan = try ArcImport.sidebar(fixture())
+        var plan = try BarkImport.sidebar(fixture())
         plan.history["Default"] = [.init(title: "Example", url: "https://example.com", visitedAt: 1_000)]
         plan.extensions["Default"] = [.init(id: String(repeating: "a", count: 32), name: "Example extension", version: "1", enabled: true)]
         var state = BrowserState()
         _ = state.newTab("keep.example")
-        let options = ArcImportOptions(selectedSpaces: [plan.spaces[0].id])
-        let result = try state.importArc(plan, options: options)
+        let options = BarkImportOptions(selectedSpaces: [plan.spaces[0].id])
+        let result = try state.importBrowserData(plan, options: options)
         XCTAssertEqual(result.spaces, 1); XCTAssertEqual(result.tabs, 2)
         XCTAssertEqual(result.folders, 2); XCTAssertEqual(result.extensions, 1)
         XCTAssertEqual(state.tabs.count, 3)
         XCTAssertTrue(state.tabs.contains { $0.url == "https://keep.example" })
         XCTAssertNil(state.activeTab, "Import must not eagerly open all imported sites")
-        let second = try state.importArc(plan, options: options)
+        let second = try state.importBrowserData(plan, options: options)
         XCTAssertEqual(second.spaces + second.tabs + second.folders + second.history + second.extensions, 0)
         XCTAssertEqual(state.sidebarItems.count, 4)
         state.toggleFolder(plan.spaces[0].folders[0].id)
@@ -60,23 +60,24 @@ final class ArcImportTests: XCTestCase {
         XCTAssertNil(validated.activeTab, "Restart must not activate an imported tab that was never selected")
     }
     func testCategoriesAndRejectedImportDoNotPartiallyMutate() throws {
-        let plan = try ArcImport.sidebar(fixture())
+        let plan = try BarkImport.sidebar(fixture())
         var state = BrowserState()
-        var options = ArcImportOptions(selectedSpaces: [plan.spaces[0].id])
+        var options = BarkImportOptions(selectedSpaces: [plan.spaces[0].id])
         options.folders = false; options.openTabs = true
-        try state.importArc(plan, options: options)
+        try state.importBrowserData(plan, options: options)
         XCTAssertTrue(state.folders.isEmpty)
         XCTAssertEqual(state.tabs.count, 3)
         XCTAssertTrue(state.tabs.allSatisfy { $0.folderID == nil })
         var full = BrowserState()
         full.spaces = (0..<100).map { Space(id: "s-\($0)", name: "Space") }
         let before = full
-        XCTAssertThrowsError(try full.importArc(plan, options: options))
+        XCTAssertThrowsError(try full.importBrowserData(plan, options: options))
         XCTAssertEqual(full, before)
     }
     func testLegacyStateAndCorruptFolderGraph() throws {
         var state = BrowserState()
         state.spaces[0].color = "sage"
+        state.spaces[0].icon = "🍃" // The legacy stock icon, independent of today's default.
         var object = try JSONSerialization.jsonObject(with: JSONEncoder().encode(state)) as! [String: Any]
         for key in ["folders", "importedExtensions", "sidebarWidth", "setupCompleted"] { object.removeValue(forKey: key) }
         var restored = try JSONDecoder().decode(BrowserState.self, from: JSONSerialization.data(withJSONObject: object))
@@ -88,22 +89,22 @@ final class ArcImportTests: XCTestCase {
         XCTAssertEqual(restored.sidebarWidth, 400)
         XCTAssertTrue(restored.folders.allSatisfy { $0.parentID == nil })
         XCTAssertEqual(restored.sidebarItems.count, 2)
-        XCTAssertFalse(ArcImport.validProfileDirectory("../Chrome/Default"))
-        XCTAssertFalse(ArcImport.validProfileDirectory("/tmp/Profile 1"))
+        XCTAssertFalse(BarkImport.validProfileDirectory("../Chrome/Default"))
+        XCTAssertFalse(BarkImport.validProfileDirectory("/tmp/Profile 1"))
     }
     func testUnsupportedSidebarIsNotAnEmptySuccessfulImport() {
-        XCTAssertThrowsError(try ArcImport.sidebar(Data("{}".utf8)))
+        XCTAssertThrowsError(try BarkImport.sidebar(Data("{}".utf8)))
     }
     func testLockedSelectedCategoryBlocksPartialImport() throws {
-        var plan = try ArcImport.sidebar(fixture())
+        var plan = try BarkImport.sidebar(fixture())
         plan.unavailableHistoryProfiles = ["Default"]
         var state = BrowserState()
         let before = state
-        var options = ArcImportOptions(selectedSpaces: Set(plan.spaces.map(\.id)))
-        XCTAssertThrowsError(try state.importArc(plan, options: options))
+        var options = BarkImportOptions(selectedSpaces: Set(plan.spaces.map(\.id)))
+        XCTAssertThrowsError(try state.importBrowserData(plan, options: options))
         XCTAssertEqual(state, before)
         options.history = false
-        XCTAssertNoThrow(try state.importArc(plan, options: options))
+        XCTAssertNoThrow(try state.importBrowserData(plan, options: options))
         XCTAssertEqual(state.tabs.count, 2)
     }
 }

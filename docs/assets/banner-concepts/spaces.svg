@@ -1,0 +1,126 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1280" height="420" viewBox="0 0 1280 420" role="img" aria-labelledby="title desc">
+  <title id="title">Bark — A better place to browse</title>
+  <desc id="desc">Three overlapping Bark browser windows rise in steps across a dark violet background. Lilac Studio, apricot Library, and sage Garden each have their own sidebar and tabs. A botanical print of a pear is open in Garden.</desc>
+  <defs>
+    <clipPath id="frame"><rect width="1280" height="420" rx="20"/></clipPath>
+    <clipPath id="plate"><rect x="1128" y="61" width="263" height="436" rx="8"/></clipPath>
+    <pattern id="paper-grid" width="23" height="23" patternUnits="userSpaceOnUse">
+      <path d="M23 0H0V23" fill="none" stroke="#68745e" stroke-opacity=".2" stroke-width="1"/>
+    </pattern>
+    <linearGradient id="studio-theme" x2=".85" y2="1">
+      <stop stop-color="#cdbdea"/><stop offset="1" stop-color="#a79acb"/>
+    </linearGradient>
+    <linearGradient id="library-theme" x2=".85" y2="1">
+      <stop stop-color="#f2c6a8"/><stop offset="1" stop-color="#e5ab98"/>
+    </linearGradient>
+    <linearGradient id="garden-theme" x2=".85" y2="1">
+      <stop stop-color="#c2d8bd"/><stop offset="1" stop-color="#a2c5ad"/>
+    </linearGradient>
+    <g id="window-buttons">
+      <circle cx="18" cy="19" r="5.5"/><circle cx="36" cy="19" r="5.5"/><circle cx="54" cy="19" r="5.5"/>
+    </g>
+    <g id="sidebar-chrome">
+      <g fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="74" y="13.5" width="14" height="11" rx="2.5"/><path d="M79 14v10"/>
+        <path d="m145 14-5 5 5 5"/><path d="m164 14 5 5-5 5" opacity=".42"/>
+        <path d="M194 17a5.3 5.3 0 1 0 .3 4m-.1-8v4h-4"/>
+      </g>
+      <rect x="8" y="38" width="201" height="36" rx="9" fill="#211d24" opacity=".045"/>
+      <use xlink:href="#folio" transform="translate(20 133) scale(.85)"/>
+      <path d="m191 136 2.8 2.8-2.8 2.8" fill="none" stroke="currentColor" stroke-width="1.4" opacity=".55"/>
+      <rect x="8" y="159" width="201" height="36" rx="9" fill="#fff" fill-opacity=".68" stroke="#262437" stroke-opacity=".055"/>
+      <path d="M17 213h136" stroke="currentColor" stroke-opacity=".22"/>
+      <g fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M166 209v7m-3-3 3 3 3-3"/>
+      </g>
+      <text x="174" y="217" fill="currentColor" font-size="11" font-weight="500">Clear</text>
+    </g>
+    <g id="folio" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round">
+      <path d="M1 4h6l2 2h8v9H1z"/>
+    </g>
+    <g id="book" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round">
+      <path d="M0 2q4-1 8 2 4-3 8-2v12q-4-1-8 2-4-3-8-2zM8 4v12"/>
+    </g>
+    <g id="leaf" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M2 13C0 6 5 1 16 1c0 10-5 15-12 13M1 17l10-10"/>
+    </g>
+    <g id="page" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round">
+      <path d="M2 1h8l4 4v11H2zM9 1v5h5M5 9h6M5 12h5"/>
+    </g>
+    <g id="flower" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round">
+      <path d="M8 6C0-1 4-4 8 1c3-5 7-2 2 5 8-3 9 2 2 3 6 5 3 8-2 3-1 8-6 7-4 0-7 4-9-1-2-4C-2 4 1 1 8 6z"/>
+    </g>
+  </defs>
+  <g clip-path="url(#frame)" font-family="Arial, Helvetica, sans-serif">
+    <rect width="1280" height="420" fill="#262437"/>
+    <text x="46" y="238" fill="#faf3dd" font-family="'Arial Black', 'Helvetica Neue', Arial, sans-serif" font-size="162" font-weight="900" letter-spacing="-12">Bark</text>
+    <text x="56" y="297" fill="#eee8df" font-size="27" letter-spacing="-.65">A better place to browse</text>
+    <!-- Each window reveals the sidebar of a different Space. -->
+    <g transform="translate(467 202)" fill="#282439" color="#565062" font-size="13">
+      <rect width="489" height="398" rx="15" fill="url(#studio-theme)" stroke="#262437" stroke-width="2"/>
+      <rect x="217" y="7" width="265" height="384" rx="10" fill="#f3edf6"/>
+      <use xlink:href="#window-buttons" fill="#857a94" opacity=".54"/>
+      <use xlink:href="#sidebar-chrome"/>
+      <text x="19" y="60.5" font-size="12.5">figma.com</text>
+      <circle cx="26" cy="100" r="4" fill="#8063a8"/>
+      <text x="42" y="104.5" fill="currentColor" font-weight="600">Studio</text>
+      <text x="44" y="143.5">Sketchbook</text>
+      <g transform="translate(21 169) scale(.87)">
+        <path d="M4 0h4v6H4a3 3 0 0 1 0-6Z" fill="#e46852"/><path d="M8 0h3a3 3 0 0 1 0 6H8Z" fill="#f4948c"/>
+        <path d="M4 6h4v6H4a3 3 0 0 1 0-6Z" fill="#aa73dd"/><circle cx="11" cy="9" r="3" fill="#519bcb"/>
+        <path d="M4 12h4v3a3.5 3.5 0 1 1-4-3Z" fill="#5fae8e"/>
+      </g>
+      <text x="44" y="181.5" font-weight="500">Design file</text>
+      <use xlink:href="#page" x="20" y="239"/>
+      <text x="44" y="252">Type specimens</text>
+    </g>
+    <g transform="translate(689 128)" fill="#3c2c2a" color="#6a5045" font-size="13">
+      <rect width="487" height="411" rx="15" fill="url(#library-theme)" stroke="#262437" stroke-width="2"/>
+      <rect x="217" y="7" width="263" height="397" rx="10" fill="#f6eee3"/>
+      <use xlink:href="#window-buttons" fill="#a27867" opacity=".57"/>
+      <use xlink:href="#sidebar-chrome"/>
+      <text x="19" y="60.5" font-size="12.5">archive.org</text>
+      <circle cx="26" cy="100" r="4" fill="#b06b42"/>
+      <text x="42" y="104.5" fill="currentColor" font-weight="600">Library</text>
+      <text x="44" y="143.5">Reading list</text>
+      <use xlink:href="#book" transform="translate(20 171) scale(.82)"/>
+      <text x="44" y="181.5" font-weight="500">Open archive</text>
+      <use xlink:href="#page" transform="translate(20 239) scale(.86)"/>
+      <text x="44" y="252">Essay notes</text>
+    </g>
+    <g transform="translate(911 54)" fill="#293e35" color="#4e6355" font-size="13">
+      <rect width="585" height="438" rx="15" fill="url(#garden-theme)" stroke="#262437" stroke-width="2"/>
+      <g stroke-width=".7">
+        <circle cx="18" cy="19" r="5.5" fill="#fc625d" stroke="#dd5652"/>
+        <circle cx="36" cy="19" r="5.5" fill="#fdbc40" stroke="#dca43a"/>
+        <circle cx="54" cy="19" r="5.5" fill="#34c748" stroke="#2db03e"/>
+      </g>
+      <use xlink:href="#sidebar-chrome"/>
+      <text x="19" y="60.5" font-size="12.5">biodiversitylibrary.org</text>
+      <circle cx="26" cy="100" r="4" fill="#55805b"/>
+      <text x="42" y="104.5" fill="currentColor" font-weight="600">Garden</text>
+      <text x="44" y="143.5">Field notes</text>
+      <use xlink:href="#leaf" transform="translate(20 170) scale(.84)"/>
+      <text x="44" y="181.5" font-weight="500">Pear study</text>
+      <use xlink:href="#flower" transform="translate(21 240) scale(.85)"/>
+      <text x="44" y="252">Seed catalog</text>
+    </g>
+    <!-- The active page is a two-ink botanical plate. -->
+    <g clip-path="url(#plate)">
+      <rect x="1128" y="61" width="263" height="436" fill="#f3efd9"/>
+      <rect x="1128" y="61" width="263" height="436" fill="url(#paper-grid)"/>
+      <g transform="translate(1145 167) rotate(8 108 106)">
+        <path d="M87 45Q86 22 97 3" fill="none" stroke="#39463a" stroke-width="5" stroke-linecap="round"/>
+        <path d="M89 32C79 4 57 2 38 7c9 22 29 33 51 25Z" fill="#436a51"/>
+        <path d="M45 10q25 7 40 19" fill="none" stroke="#afc39a" stroke-width="1.4"/>
+        <path d="M88 38c27-2 31 27 40 50 9 23 37 45 34 77-2 34-24 56-68 56-43 0-76-23-75-60 1-30 26-55 38-77 13-24 11-43 31-46Z" fill="#d3cb68" stroke="#435940" stroke-width="2"/>
+        <path d="M96 40c18 8 18 35 34 60 14 23 36 44 29 74-7 30-26 44-60 45 13-11 24-32 24-53 0-25-11-46-17-69-7-30-5-44-10-57Z" fill="#a2ae69"/>
+        <g fill="#697c4f">
+          <circle cx="52" cy="140" r="1.9"/><circle cx="66" cy="154" r="2.1"/><circle cx="60" cy="132" r="1.5"/>
+          <circle cx="42" cy="162" r="1.6"/><circle cx="79" cy="167" r="1.7"/><circle cx="54" cy="174" r="1.8"/>
+          <circle cx="68" cy="185" r="1.5"/><circle cx="92" cy="183" r="1.6"/><circle cx="91" cy="155" r="1.6"/>
+        </g>
+      </g>
+    </g>
+  </g>
+</svg>

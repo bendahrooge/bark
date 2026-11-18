@@ -1,0 +1,149 @@
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -1798,6 +1798,7 @@ source_set("core") {
+   }
+ 
+   if (is_mac) {
++    deps += [ "//bark:browser_hooks" ]
+     sources += [
+       "app_controller_mac.mm",
+       "browser_process_platform_part_mac.mm",
+diff --git a/chrome/browser/app_controller_mac.mm b/chrome/browser/app_controller_mac.mm
+--- a/chrome/browser/app_controller_mac.mm
++++ b/chrome/browser/app_controller_mac.mm
+@@ -3,6 +3,8 @@
+ // found in the LICENSE file.
+ 
+ #import "chrome/browser/app_controller_mac.h"
++
++#include "bark/browser_hooks.h"
+ 
+ #include <AppKit/AppKit.h>
+ #include <dispatch/dispatch.h>
+@@ -1232,6 +1234,17 @@
+     return;
+   }
+ 
++  // Bark shows links from other apps in a Little window when it can.
++  std::vector<GURL> barkLinks;
++  for (const auto& tab : tabs) {
++    barkLinks.push_back(tab.url);
++  }
++  // Keep the opaque initiator required for untrusted external launches.
++  if (std::ranges::none_of(tabs, &StartupTab::is_untrusted_launch) &&
++      bark::OpenExternalLinks(barkLinks)) {
++    return;
++  }
++
+   OpenStartupTabsInBrowser(std::move(tabs));
+ }
+ 
+@@ -1715,9 +1726,11 @@
+       // possible.
+       if (BrowserWindowInterface* browser = ActivateBrowser(profile)) {
+         chrome::ExecuteCommand(browser, IDC_NEW_TAB);
+-        break;
++      } else {
++        // The new window already has a blank tab for this explicit New Tab command.
++        bark::ShowNewTabComposer(CreateBrowser(profile->GetOriginalProfile()));
+       }
+-      [[fallthrough]];  // To create new window.
++      break;
+     case IDC_NEW_WINDOW:
+       CreateBrowser(profile->GetOriginalProfile());
+       break;
+@@ -2635,6 +2648,10 @@
+     browser->GetWindow()->Show();
+   }
+ 
++  if (auto before_open = bark::ExternalTabDestination()) {
++    before_open(browser);
++  }
++
+   // Various methods to open URLs that we get in a native fashion. We use
+   // StartupBrowserCreator here because on the other platforms, URLs to open
+   // come through the ProcessSingleton, and it calls StartupBrowserCreator. It's
+diff --git a/chrome/browser/chrome_browser_field_trials.cc b/chrome/browser/chrome_browser_field_trials.cc
+--- a/chrome/browser/chrome_browser_field_trials.cc
++++ b/chrome/browser/chrome_browser_field_trials.cc
+@@ -384,6 +384,13 @@ void ChromeBrowserFieldTrials::RegisterFeatureOverrides(
+   // Desktop-first features which are past incubation should either end up here,
+   // or to a finch trial that enables it for all form factors.
+ #endif  // BUILDFLAG(IS_ANDROID)
++
++#if BUILDFLAG(IS_MAC)
++  // Bark: a playing video moves into picture-in-picture when you switch away
++  // from its tab. Sites need not register for it themselves.
++  feature_overrides.EnableFeature(
++      blink::features::kBrowserInitiatedAutomaticPictureInPicture);
++#endif
+ }
+ 
+ void ChromeBrowserFieldTrials::EnableRuntimeMutableFeatures(
+diff --git a/chrome/browser/chrome_content_browser_client.cc b/chrome/browser/chrome_content_browser_client.cc
+--- a/chrome/browser/chrome_content_browser_client.cc
++++ b/chrome/browser/chrome_content_browser_client.cc
+@@ -4,6 +4,11 @@
+ 
+ #include "chrome/browser/chrome_content_browser_client.h"
+ 
++#include "build/build_config.h"
++#if BUILDFLAG(IS_MAC)
++#include "bark/browser_hooks.h"
++#endif
++
+ #include <algorithm>
+ #include <iterator>
+ #include <map>
+@@ -5783,6 +5788,9 @@ void ChromeContentBrowserClient::RemovePresentationObserver(
+ void ChromeContentBrowserClient::CreateThrottlesForNavigation(
+     content::NavigationThrottleRegistry& registry) {
+   CreateAndAddChromeThrottlesForNavigation(registry);
++#if BUILDFLAG(IS_MAC)
++  bark::AddNavigationThrottles(registry);
++#endif
+ }
+ 
+ void ChromeContentBrowserClient::CreateThrottlesForCommitWithoutUrlLoader(
+diff --git a/chrome/browser/ui/browser_tabstrip.cc b/chrome/browser/ui/browser_tabstrip.cc
+--- a/chrome/browser/ui/browser_tabstrip.cc
++++ b/chrome/browser/ui/browser_tabstrip.cc
+@@ -5,6 +5,11 @@
+ #include "chrome/browser/ui/browser_tabstrip.h"
+ 
+ #include <optional>
++
++#include "build/build_config.h"
++#if BUILDFLAG(IS_MAC)
++#include "bark/browser_hooks.h"
++#endif
+ 
+ #include "base/command_line.h"
+ #include "base/feature_list.h"
+@@ -123,6 +128,12 @@
+   params.user_gesture = true;
+   params.original_user_gesture = user_gesture;
+ 
++#if BUILDFLAG(IS_MAC)
++  if (bark::ShowNewContentsInPeek(params)) {
++    return params.navigated_or_inserted_contents;
++  }
++#endif
++
+   ConfigureTabGroupForNavigation(&params);
+ 
+   Navigate(&params);
+diff --git a/chrome/browser/ui/BUILD.gn b/chrome/browser/ui/BUILD.gn
+--- a/chrome/browser/ui/BUILD.gn
++++ b/chrome/browser/ui/BUILD.gn
+@@ -121,6 +121,9 @@
+       "//ui/base",
+       "//url",
+     ]
++    if (is_mac) {
++      deps += [ "//bark:browser_hooks" ]
++    }
+   }
+ 
+   source_set("chrome_web_modal_dialog_manager_delegate") {

@@ -1,0 +1,86 @@
+diff --git a/chrome/browser/ui/views/frame/layout/browser_view_layout_delegate_impl.cc b/chrome/browser/ui/views/frame/layout/browser_view_layout_delegate_impl.cc
+--- a/chrome/browser/ui/views/frame/layout/browser_view_layout_delegate_impl.cc
++++ b/chrome/browser/ui/views/frame/layout/browser_view_layout_delegate_impl.cc
+@@ -153,6 +153,13 @@
+ }
+ 
+ bool BrowserViewLayoutDelegateImpl::IsInfobarVisible() const {
++#if BUILDFLAG(IS_MAC)
++  // Bark's page layout has no Chromium notification-banner strip, including
++  // banners added after startup or after a tab/space switch.
++  if (browser_view_->bark_sidebar_) {
++    return false;
++  }
++#endif
+   auto* const container = browser_view_->infobar_container();
+   if (!container || container->IsEmpty()) {
+     return false;
+diff --git a/chrome/browser/ui/startup/default_browser_prompt/default_browser_prompt_manager.cc b/chrome/browser/ui/startup/default_browser_prompt/default_browser_prompt_manager.cc
+--- a/chrome/browser/ui/startup/default_browser_prompt/default_browser_prompt_manager.cc
++++ b/chrome/browser/ui/startup/default_browser_prompt/default_browser_prompt_manager.cc
+@@ -6,6 +6,7 @@
+ 
+ #include <memory>
+ 
++#include "base/command_line.h"
+ #include "base/functional/bind.h"
+ #include "base/memory/singleton.h"
+ #include "base/time/time.h"
+@@ -144,6 +145,12 @@
+ }
+ 
+ bool DefaultBrowserPromptManager::MaybeShowPrompt() {
++#if BUILDFLAG(IS_MAC)
++  // Default-browser selection remains available in Settings without a promo.
++  if (base::CommandLine::ForCurrentProcess()->HasSwitch("bark-swift-ui")) {
++    return false;
++  }
++#endif
+   SetAppMenuItemVisibility(true);
+ 
+   if (!ShouldShowPrompts()) {
+diff --git a/chrome/browser/ui/startup/default_browser_prompt/pin_infobar/pin_infobar_controller.cc b/chrome/browser/ui/startup/default_browser_prompt/pin_infobar/pin_infobar_controller.cc
+--- a/chrome/browser/ui/startup/default_browser_prompt/pin_infobar/pin_infobar_controller.cc
++++ b/chrome/browser/ui/startup/default_browser_prompt/pin_infobar/pin_infobar_controller.cc
+@@ -6,6 +6,7 @@
+ 
+ #include <utility>
+ 
++#include "base/command_line.h"
+ #include "base/feature_list.h"
+ #include "base/functional/callback.h"
+ #include "base/memory/weak_ptr.h"
+@@ -244,6 +245,12 @@
+ 
+ void PinInfoBarController::MaybeShowInfoBar(
+     base::OnceCallback<void(bool)> done_callback) {
++#if BUILDFLAG(IS_MAC)
++  if (base::CommandLine::ForCurrentProcess()->HasSwitch("bark-swift-ui")) {
++    std::move(done_callback).Run(false);
++    return;
++  }
++#endif
+   // Check if Chrome is the default browser.
+   scoped_refptr<shell_integration::DefaultBrowserWorker>(
+       new shell_integration::DefaultBrowserWorker())
+diff --git a/chrome/browser/ui/pdf/infobar/pdf_infobar_controller.cc b/chrome/browser/ui/pdf/infobar/pdf_infobar_controller.cc
+--- a/chrome/browser/ui/pdf/infobar/pdf_infobar_controller.cc
++++ b/chrome/browser/ui/pdf/infobar/pdf_infobar_controller.cc
+@@ -7,6 +7,7 @@
+ #include <optional>
+ #include <utility>
+ 
++#include "base/command_line.h"
+ #include "base/feature_list.h"
+ #include "base/functional/callback.h"
+ #include "base/memory/weak_ptr.h"
+@@ -266,6 +267,9 @@
+ 
+ void PdfInfoBarController::MaybeShowInfoBar() {
+ #if BUILDFLAG(IS_MAC)
++  if (base::CommandLine::ForCurrentProcess()->HasSwitch("bark-swift-ui")) {
++    return;
++  }
+   auto is_default_pdf_viewer_callback = base::BindOnce(
+       &shell_integration::IsDefaultHandlerForUTType, "com.adobe.pdf");
+ #elif BUILDFLAG(IS_WIN)

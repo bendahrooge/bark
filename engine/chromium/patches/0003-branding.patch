@@ -17,24 +17,25 @@ diff --git a/chrome/browser/ui/views/frame/browser_native_widget_mac.mm b/chrome
 diff --git a/chrome/browser/search/search.cc b/chrome/browser/search/search.cc
 --- a/chrome/browser/search/search.cc
 +++ b/chrome/browser/search/search.cc
-@@ -9,7 +9,8 @@
- #include <string>
- #include <string_view>
+@@ -36,6 +36,10 @@
+ #include "ui/webui/buildflags.h"
+ #include "url/gurl.h"
  
- #include "base/check_deref.h"
-+#include "base/command_line.h"
- #include "base/feature_list.h"
- #include "base/metrics/histogram_macros.h"
- #include "build/build_config.h"
-@@ -419,6 +420,15 @@
++#if BUILDFLAG(IS_MAC)
++#include "bark/native_ui_mac.h"
++#endif
++
+ #if BUILDFLAG(IS_ANDROID)
+ #include "base/android/device_info.h"
+ #include "chrome/browser/flags/android/chrome_feature_list.h"
+@@ -418,6 +422,14 @@
    }
  
    Profile* profile = Profile::FromBrowserContext(browser_context);
 +#if BUILDFLAG(IS_MAC)
 +  // Policy and extension new-tab overrides are registered before this handler.
 +  // Keep Bark's default new-tab surface blank, including native Cmd+T/startup.
-+  if (!profile->IsOffTheRecord() &&
-+      base::CommandLine::ForCurrentProcess()->HasSwitch("bark-swift-ui")) {
++  if (!profile->IsOffTheRecord() && bark::IsSwiftUIEnabled()) {
 +    *url = GURL("about:blank");
 +    return true;
 +  }

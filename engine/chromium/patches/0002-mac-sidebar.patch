@@ -186,20 +186,27 @@ index d441b8a76b..81489b1980 100644
    // Return false if this window does not normally display a tabstrip or if the
    // tabstrip is currently hidden, e.g. because we're in fullscreen.
    if (!WindowFeatureController::From(browser_)->SupportsWindowFeature(
-@@ -2347,6 +2357,12 @@ PinnedToolbarActions* BrowserView::GetPinnedToolbarActions() {
+@@ -2347,6 +2357,19 @@ PinnedToolbarActions* BrowserView::GetPinnedToolbarActions() {
  }
  
  void BrowserView::SetFocusToLocationBar(bool is_user_initiated) {
 +#if BUILDFLAG(IS_MAC)
 +  if (bark_sidebar_ && !IsFullscreen()) {
-+    bark_sidebar_->FocusAddress();
++    // Chromium also requests location focus when restoring a tab or showing
++    // its initial blank page. Only an explicit command opens Bark's editor.
++    if (is_user_initiated) {
++      bark_sidebar_->FocusAddress();
++    } else if (IsActive()) {
++      if (auto* contents = GetActiveWebContents())
++        contents->Focus();
++    }
 +    return;
 +  }
 +#endif
    // On Windows, changing focus to the location bar causes the browser window to
    // become active. This can steal focus if the user has another window open
    // already. On Chrome OS, changing focus makes a view believe it has a focus
-@@ -3062,6 +3078,8 @@ void BrowserView::DisableTabStripEditingForTesting() {
+@@ -3062,6 +3085,8 @@ void BrowserView::DisableTabStripEditingForTesting() {
  
  bool BrowserView::IsToolbarVisible() const {
  #if BUILDFLAG(IS_MAC)
@@ -208,7 +215,7 @@ index d441b8a76b..81489b1980 100644
    // Immersive full screen makes it possible to display the toolbar when
    // kShowFullscreenToolbar is not set.
    if (!WindowFeatureController::From(browser())
-@@ -3088,6 +3106,10 @@ bool BrowserView::IsToolbarShowing() const {
+@@ -3088,6 +3113,10 @@ bool BrowserView::IsToolbarShowing() const {
  }
  
  bool BrowserView::IsLocationBarVisible() const {
@@ -219,7 +226,7 @@ index d441b8a76b..81489b1980 100644
    return WindowFeatureController::From(browser_)->SupportsWindowFeature(
               WindowFeatureController::WindowFeature::kFeatureLocationBar) &&
           GetLocationBar()->IsVisible();
-@@ -4824,7 +4846,14 @@ int BrowserView::NonClientHitTest(const gfx::Point& point) {
+@@ -4824,7 +4853,14 @@ int BrowserView::NonClientHitTest(const gfx::Point& point) {
  
  gfx::Size BrowserView::GetMinimumSize() const {
    auto* const layout = GetBrowserViewLayout();
@@ -235,7 +242,7 @@ index d441b8a76b..81489b1980 100644
  }
  
  ///////////////////////////////////////////////////////////////////////////////
-@@ -4883,6 +4912,9 @@ void BrowserView::Layout(PassKey) {
+@@ -4883,6 +4919,9 @@ void BrowserView::Layout(PassKey) {
    }
  
    LayoutSuperclass<views::View>(this);
@@ -245,7 +252,7 @@ index d441b8a76b..81489b1980 100644
  
    // TODO(jamescook): Why was this in the middle of layout code?
    toolbar_->location_bar()->UpdateFocusBehavior(IsToolbarVisible());
-@@ -5172,8 +5204,23 @@ void BrowserView::AddedToWidget() {
+@@ -5172,8 +5211,23 @@ void BrowserView::AddedToWidget() {
        kFallbackPopupAnchorElementId, *this);
  
    initialized_ = true;

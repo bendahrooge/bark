@@ -1,0 +1,36 @@
+diff --git a/chrome/browser/ui/chrome_pages.cc b/chrome/browser/ui/chrome_pages.cc
+--- a/chrome/browser/ui/chrome_pages.cc
++++ b/chrome/browser/ui/chrome_pages.cc
+@@ -20,6 +20,9 @@
+ #include "base/strings/string_util.h"
+ #include "base/strings/stringprintf.h"
+ #include "build/build_config.h"
++#if BUILDFLAG(IS_MAC)
++#include "bark/browser_hooks.h"
++#endif
+ #include "chrome/browser/apps/app_service/app_service_proxy.h"
+ #include "chrome/browser/apps/app_service/app_service_proxy_factory.h"
+ #include "chrome/browser/bookmarks/bookmark_model_factory.h"
+@@ -461,6 +464,9 @@
+ }
+ 
+ void ShowSettings(BrowserWindowInterface* browser) {
++#if BUILDFLAG(IS_MAC)
++  if (bark::ShowPreferences(browser)) return;
++#endif
+   ShowSettingsSubPage(browser, std::string());
+ }
+ 
+diff --git a/chrome/browser/ui/BUILD.gn b/chrome/browser/ui/BUILD.gn
+--- a/chrome/browser/ui/BUILD.gn
++++ b/chrome/browser/ui/BUILD.gn
+@@ -1775,6 +1775,9 @@
+     } else {
+       deps += [ "//chrome/browser/download/bubble" ]
+     }
++    if (is_mac) {
++      deps += [ "//bark:browser_hooks" ]
++    }
+   }
+ 
+   source_set("browser_tests") {

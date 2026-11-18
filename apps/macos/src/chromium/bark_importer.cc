@@ -1,4 +1,4 @@
-#include "bark/mac/arc_importer.h"
+#include "bark/mac/bark_importer.h"
 
 #include <algorithm>
 #include <cmath>
@@ -92,24 +92,24 @@ class ImportHistoryTask : public history::HistoryDBTask {
   bool failed_ = false;
 };
 
-class ArcImporter : public base::RefCounted<ArcImporter> {
+class BarkImporter : public base::RefCounted<BarkImporter> {
  public:
-  explicit ArcImporter(base::OnceCallback<void(base::DictValue)> done) : done_(std::move(done)) {
+  explicit BarkImporter(base::OnceCallback<void(base::DictValue)> done) : done_(std::move(done)) {
     result_.Set("request", ""); result_.Set("success", false);
     for (const char* field : {"profiles", "spaces", "tabs", "history", "bookmarks", "extensions", "expiredHistory"}) result_.Set(field, 0);
   }
   void Start(const std::string& json) {
     auto parsed = json.size() <= 64 * 1024 * 1024 ? base::JSONReader::ReadDict(json, base::JSON_PARSE_RFC) : std::nullopt;
     if (parsed && Text(*parsed, "request", 128)) result_.Set("request", *parsed->FindString("request"));
-    if (importing) { Finish("Another Arc import is running. Try again when it finishes."); return; }
+    if (importing) { Finish("Another import into Bark is running. Try again when it finishes."); return; }
     if (!parsed || !Validate(*parsed)) { Finish("This import is invalid or exceeds Bark’s limit of 100 spaces or 5,000 tabs. Select fewer items and try again."); return; }
     importing = true; owns_import_ = true;
     profiles_ = std::move(*parsed->FindList("profiles"));
     NextProfile();
   }
  private:
-  friend class base::RefCounted<ArcImporter>;
-  ~ArcImporter() { if (owns_import_) importing = false; }
+  friend class base::RefCounted<BarkImporter>;
+  ~BarkImporter() { if (owns_import_) importing = false; }
   bool Validate(const base::DictValue& request) {
     const auto* profiles = request.FindList("profiles");
     if (!Text(request, "request", 128) || !profiles || profiles->empty() || profiles->size() > 100) return false;
@@ -126,7 +126,7 @@ class ArcImporter : public base::RefCounted<ArcImporter> {
       if (!items || items->empty() || !bookmarks || bookmarks->size() > 20000 || !history || history->size() > 100000) return false;
       for (const auto& item : *items) {
         const auto* space = item.GetIfDict();
-        if (!space || !Text(*space, "id", 128) || !Text(*space, "name", 128) || !Text(*space, "theme", 32) || !Text(*space, "emoji", 256) ||
+        if (!space || !Text(*space, "id", 128) || !Text(*space, "name", 128) || !Text(*space, "theme", 32) || !Text(*space, "emoji", 256, true) ||
             !spaces.insert(*space->FindString("id")).second) return false;
         const auto* existing = catalog.Find(*space->FindString("id"));
         if (existing) {
@@ -176,7 +176,7 @@ class ArcImporter : public base::RefCounted<ArcImporter> {
     const auto& source = profiles_[index_].GetDict();
     auto* manager = g_browser_process->profile_manager();
     // Find the profile by its import marker, never by a coincidentally equal
-    // name or Arc's directory basename (which may be an existing Bark profile).
+    // name or source directory basename (which may match an existing Bark profile).
     for (const auto& value : SpaceCatalog(g_browser_process->local_state()).List()) {
       if (!value.is_dict()) continue;
       const auto& space = value.GetDict();
@@ -185,13 +185,13 @@ class ArcImporter : public base::RefCounted<ArcImporter> {
       if (!origin || !key || *origin != *source.FindString("source")) continue;
       for (auto* entry : manager->GetProfileAttributesStorage().GetAllProfilesAttributes()) {
         if (!entry->IsOmitted() && entry->GetPath().BaseName().AsUTF8Unsafe() == *key) {
-          manager->CreateProfileAsync(entry->GetPath(), base::BindOnce(&ArcImporter::ProfileReady, this, false));
+          manager->CreateProfileAsync(entry->GetPath(), base::BindOnce(&BarkImporter::ProfileReady, this, false));
           return;
         }
       }
     }
     ProfileManager::CreateMultiProfileAsync(base::UTF8ToUTF16(*source.FindString("name")), 0, false,
-        base::BindOnce(&ArcImporter::ProfileReady, this, true));
+        base::BindOnce(&BarkImporter::ProfileReady, this, true));
   }
   void ProfileReady(bool created, Profile* profile) {
     if (!profile) { Finish("Bark couldn’t create or load an imported profile."); return; }
@@ -255,7 +255,7 @@ class ArcImporter : public base::RefCounted<ArcImporter> {
     if (!model->loaded()) {
       if (attempt >= 300) { Finish("Bookmarks took too long to load. Try again."); return; }
       base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(FROM_HERE,
-          base::BindOnce(&ArcImporter::WaitForBookmarks, this, attempt + 1), base::Milliseconds(100));
+          base::BindOnce(&BarkImporter::WaitForBookmarks, this, attempt + 1), base::Milliseconds(100));
       return;
     }
     SaveBookmarks(model);
@@ -274,7 +274,7 @@ class ArcImporter : public base::RefCounted<ArcImporter> {
       rows.push_back(std::move(row));
     }
     service->ScheduleDBTask(FROM_HERE, std::make_unique<ImportHistoryTask>(std::move(rows),
-        base::BindOnce(&ArcImporter::HistoryReady, this)), &history_tasks_);
+        base::BindOnce(&BarkImporter::HistoryReady, this)), &history_tasks_);
   }
   void SaveBookmarks(bookmarks::BookmarkModel* model) {
     const auto& source = profiles_[index_].GetDict();
@@ -295,7 +295,7 @@ class ArcImporter : public base::RefCounted<ArcImporter> {
     if (!nodes.contains("")) {
       bookmarks::BookmarkNode::MetaInfoMap meta = {{kBookmarkSource, prefix}};
       const auto* parent = model->other_node();
-      nodes[""] = model->AddFolder(parent, parent->children().size(), u"Imported from Arc", &meta);
+      nodes[""] = model->AddFolder(parent, parent->children().size(), u"Imported bookmarks", &meta);
     }
     for (const auto& value : entries) {
       const auto& item = value.GetDict();
@@ -327,9 +327,9 @@ class ArcImporter : public base::RefCounted<ArcImporter> {
 };
 }  // namespace
 
-bool IsArcImportInProgress() { return importing; }
+bool IsBarkImportInProgress() { return importing; }
 
-void ImportArc(const std::string& json, base::OnceCallback<void(base::DictValue)> completion) {
-  base::MakeRefCounted<ArcImporter>(std::move(completion))->Start(json);
+void ImportBrowserData(const std::string& json, base::OnceCallback<void(base::DictValue)> completion) {
+  base::MakeRefCounted<BarkImporter>(std::move(completion))->Start(json);
 }
 }  // namespace bark

@@ -49,9 +49,15 @@ jobs:
       - name: Sign and notarize
         run: |
           python3 tools/release_macos.py \
-            --source "$BARK_CHROMIUM_WORK_DIR/src/out/Bark-mac-arm64/Bark.app" \
+            --source "$BARK_CHROMIUM_WORK_DIR/src/out/Bark-mac-arm64/Bark-dev.app" \
             --chromium-src "$BARK_CHROMIUM_WORK_DIR/src" \
             --version "$RELEASE_VERSION" --build "$RELEASE_BUILD"
+      - name: Verify New Tab in the signed app
+        run: |
+          app="release/v$RELEASE_VERSION/Bark.app"
+          test "$(plutil -extract BarkEnableSwiftUI raw "$app/Contents/Info.plist")" = true
+          "$BARK_CHROMIUM_WORK_DIR/src/third_party/node/mac_arm64/node-darwin-arm64/bin/node" \
+            tools/test_chromium_new_tab_default.mjs "$app/Contents/MacOS/Bark"
       - name: Publish complete release and feed
         env:
           GH_TOKEN: ${{ github.token }}

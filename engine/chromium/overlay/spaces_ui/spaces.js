@@ -97,11 +97,13 @@ function spaceRow(space, index, spaces) {
   const emoji = element('cr-input', {
     class: 'emoji',
     value: space.emoji,
+    placeholder: '●',
     'aria-label': `Emoji for ${space.name}`,
     'data-focus-key': `emoji-${space.id}`,
     onchange: () => {
-      const value = normalizedEmoji(emoji.value);
-      if (value) {
+      // Clearing the field returns the space to its default dot.
+      const value = emoji.value.trim() ? normalizedEmoji(emoji.value) : '';
+      if (value !== null) {
         saveSpace(space, {emoji: value});
       } else {
         emoji.value = space.emoji;
@@ -161,14 +163,15 @@ function spaceRow(space, index, spaces) {
 
   const remove = element('cr-icon-button', {
     'iron-icon': 'cr:delete',
-    title: siblings < 2 ? 'Each profile needs at least one space' : 'Delete space',
+    title: state.spaces.length < 2 ? 'Keep at least one space' : 'Delete space',
     'aria-label': `Delete ${space.name}`,
     'data-focus-key': `delete-${space.id}`,
-    disabled: siblings < 2,
+    disabled: state.spaces.length < 2,
     onclick: async () => {
       if (await confirmAction('Delete space?',
-              `“${space.name}” is removed from the sidebar. Its open tabs move ` +
-                  `to another space in the “${profileName(space.profile)}” profile.`,
+              siblings < 2
+                  ? `“${space.name}” is removed from the sidebar. Its profile, tabs, sign-ins, and saved data are kept. To use them again, create a space in this profile.`
+                  : `“${space.name}” is removed from the sidebar. Its open tabs move to another space in the “${profileName(space.profile)}” profile.`,
               'Delete')) {
         chrome.send('deleteSpace', [space.id]);
       }

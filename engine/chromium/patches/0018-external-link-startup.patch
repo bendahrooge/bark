@@ -1,0 +1,160 @@
+diff --git a/chrome/browser/app_controller_mac.h b/chrome/browser/app_controller_mac.h
+--- a/chrome/browser/app_controller_mac.h
++++ b/chrome/browser/app_controller_mac.h
+@@ -46,6 +46,9 @@
+ // inside of Chromium (not inside of app shims; see AppShimDelegate). Guaranteed
+ // to not be nil.
+ @property(readonly, nonatomic, class) AppController* sharedController;
++
++// Called after Chromium has launched its initial profiles and windows.
++- (void)didFinishBrowserStartup;
+ 
+ @property(readonly, nonatomic) BOOL startupComplete;
+ @property(readonly, nonatomic) Profile* lastProfileIfLoaded;
+diff --git a/chrome/browser/app_controller_mac.mm b/chrome/browser/app_controller_mac.mm
+--- a/chrome/browser/app_controller_mac.mm
++++ b/chrome/browser/app_controller_mac.mm
+@@ -12,6 +12,7 @@
+ #include <memory>
+ #include <vector>
+ 
++#include "bark/native_ui_mac.h"
+ #include "base/apple/bridging.h"
+ #include "base/apple/foundation_util.h"
+ #include "base/apple/scoped_cftyperef.h"
+@@ -68,6 +69,7 @@
+ #include "chrome/browser/profiles/profile_observer.h"
+ #include "chrome/browser/profiles/profiles_state.h"
+ #include "chrome/browser/sessions/session_restore.h"
++#include "chrome/browser/sessions/session_restore_observer.h"
+ #include "chrome/browser/sessions/session_service.h"
+ #include "chrome/browser/sessions/session_service_factory.h"
+ #include "chrome/browser/sessions/tab_restore_service_factory.h"
+@@ -554,6 +556,7 @@
+ // once after startup has completed. It opens the tabs in |_startupTabs|, and
+ // clears |_startupTabs|.
+ - (void)openStartupUrls;
++- (void)resumeStartupUrlsAfterWindowActivation;
+ 
+ // Opens a tab for each StartupTab in |tabs|. If there is exactly one tab open
+ // before this method is called, and that tab is the NTP, then this method
+@@ -594,7 +597,8 @@
+ 
+ class AppControllerProfileObserver : public ProfileAttributesStorage::Observer,
+                                      public ProfileManagerObserver,
+-                                     public ProfileObserver {
++                                     public ProfileObserver,
++                                     public SessionRestoreObserver {
+  public:
+   AppControllerProfileObserver(
+       ProfileManager* profile_manager, AppController* app_controller)
+@@ -602,6 +606,7 @@
+         app_controller_(app_controller) {
+     DCHECK(profile_manager_);
+     DCHECK(app_controller_);
++    SessionRestore::AddObserver(this);
+     // Listen to ProfileObserver and ProfileManagerObserver.
+     profile_manager_observer_.Observe(profile_manager_.get());
+     for (Profile* profile : profile_manager_->GetLoadedProfiles()) {
+@@ -619,7 +624,13 @@
+   AppControllerProfileObserver& operator=(const AppControllerProfileObserver&) =
+       delete;
+ 
+-  ~AppControllerProfileObserver() override = default;
++  ~AppControllerProfileObserver() override {
++    SessionRestore::RemoveObserver(this);
++  }
++
++  void OnProfileSessionRestored(Profile*, int, int) override {
++    [app_controller_ resumeStartupUrlsAfterWindowActivation];
++  }
+ 
+  private:
+   // ProfileAttributesStorage::Observer implementation:
+@@ -716,6 +727,8 @@
+   // |_startupTabs| so that they can go in the first browser window/tab.
+   StartupTabs _startupTabs;
+   BOOL _startupComplete;
++  BOOL _browserStartupFinished;
++  BOOL _barkWaitingForStartupWindows;
+ 
+   // Outlets for testing close tab/window menu items.
+   NSMenuItem* __strong _cmdWMenuItemForTesting;
+@@ -806,6 +819,8 @@
+ 
+ - (instancetype)init {
+   if (self = [super init]) {
++    _barkWaitingForStartupWindows = bark::IsSwiftUIEnabled();
++
+     // -[NSMenu cr_menuItemForKeyEquivalentEvent:] lives in /content, but
+     // we need to execute special update code before the search begins.
+     // Setting this block gives us the hook we need.
+@@ -1247,10 +1262,30 @@
+ #endif
+ }
+ 
++- (void)didFinishBrowserStartup {
++  _browserStartupFinished = YES;
++  [self resumeStartupUrlsAfterWindowActivation];
++}
++
++- (void)resumeStartupUrlsAfterWindowActivation {
++  if (_barkWaitingForStartupWindows && _browserStartupFinished) {
++    // Let already queued startup-window activations run before opening a link.
++    dispatch_async(dispatch_get_main_queue(), ^{
++      [self openStartupUrls];
++    });
++  }
++}
++
+ - (void)openStartupUrls {
+-  CHECK(_startupComplete);
+-  [self openStartupTabsReplacingNTP:std::move(_startupTabs)];
+-  _startupTabs.clear();
++  if (!_startupComplete ||
++      (_barkWaitingForStartupWindows &&
++       (!_browserStartupFinished || SessionRestore::IsAnySessionCurrentlyRestoring()))) {
++    return;
++  }
++  _barkWaitingForStartupWindows = NO;
++  StartupTabs tabs;
++  tabs.swap(_startupTabs);
++  [self openStartupTabsReplacingNTP:std::move(tabs)];
+ }
+ 
+ - (void)openStartupTabsReplacingNTP:(StartupTabs)tabs {
+@@ -1258,7 +1293,7 @@
+     return;
+   }
+ 
+-  if (!_startupComplete) {
++  if (!_startupComplete || _barkWaitingForStartupWindows) {
+     for (auto& tab : tabs) {
+       _startupTabs.push_back(std::move(tab));
+     }
+diff --git a/chrome/browser/chrome_browser_main_mac.h b/chrome/browser/chrome_browser_main_mac.h
+--- a/chrome/browser/chrome_browser_main_mac.h
++++ b/chrome/browser/chrome_browser_main_mac.h
+@@ -31,6 +31,7 @@
+   void PostCreateMainMessageLoop() override;
+   int PreCreateThreads() override;
+   void PreProfileInit() override;
++  void PostBrowserStart() override;
+   void PostProfileInit(Profile* profile, bool is_initial_profile) override;
+ 
+   // Perform platform-specific work that needs to be done after the main event
+diff --git a/chrome/browser/chrome_browser_main_mac.mm b/chrome/browser/chrome_browser_main_mac.mm
+--- a/chrome/browser/chrome_browser_main_mac.mm
++++ b/chrome/browser/chrome_browser_main_mac.mm
+@@ -187,6 +187,11 @@
+   ChromeBrowserMainPartsPosix::PostProfileInit(profile, is_initial_profile);
+ }
+ 
++void ChromeBrowserMainPartsMac::PostBrowserStart() {
++  ChromeBrowserMainPartsPosix::PostBrowserStart();
++  [AppController.sharedController didFinishBrowserStartup];
++}
++
+ void ChromeBrowserMainPartsMac::DidEndMainMessageLoop() {
+   [AppController.sharedController didEndMainMessageLoop];
+ }
