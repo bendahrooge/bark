@@ -120,6 +120,7 @@ struct BarkPreferencesView: View {
     @State private var editingSpace: SpaceSettingsTarget?
     @State private var spaceProfile = ""
     @State private var newProfileName = ""
+    @State private var profileToDelete: ChromiumProfile?
     @State private var newSpace = false
     private var preferences: ChromiumPreferences? { model.snapshot.preferences }
     private var features: ChromiumFeatures { model.snapshot.features ?? ChromiumFeatures() }
@@ -180,6 +181,16 @@ struct BarkPreferencesView: View {
                     newSpace = false
                 }
             }
+            .alert(item: $profileToDelete) { profile in
+                let message = "This permanently deletes this profile’s Spaces, tabs, bookmarks, saved passwords, and browsing history from this Mac."
+                let lastProfile = model.snapshot.profiles?.count == 1
+                return Alert(title: Text("Delete “\(profile.name)”?"),
+                             message: Text(lastProfile ? message + " Bark will open a new, empty profile." : message),
+                             primaryButton: .cancel(),
+                             secondaryButton: .destructive(Text("Delete Profile")) {
+                                 model.send("deleteProfile", text: profile.id)
+                             })
+            }
     }
 
     @ViewBuilder private var general: some View {
@@ -210,6 +221,12 @@ struct BarkPreferencesView: View {
             advanced("Passwords and autofill", path: "autofill")
             advanced("Default browser", path: "defaultBrowser")
             advanced("All Chromium settings", path: "")
+        }
+        Section("Factory reset") {
+            Button("Reset Bark to factory settings…", role: .destructive) {
+                model.send("showFactoryReset")
+                PreferencesPresenter.shared.detach(model)
+            }
         }
     }
 
@@ -262,7 +279,13 @@ struct BarkPreferencesView: View {
         Section("Profiles") {
             ForEach(model.snapshot.profiles ?? []) { profile in
                 let count = model.snapshot.spaces.filter { $0.profile == profile.id }.count
-                HStack { Text(profile.name); Spacer(); Text(count == 1 ? "1 space" : "\(count) spaces").foregroundStyle(.secondary) }
+                HStack {
+                    Text(profile.name)
+                    Spacer()
+                    Text(count == 1 ? "1 space" : "\(count) spaces").foregroundStyle(.secondary)
+                    Button("Delete…", role: .destructive) { profileToDelete = profile }
+                        .accessibilityLabel("Delete profile \(profile.name)")
+                }
             }
             HStack {
                 TextField("New profile name", text: $newProfileName)
@@ -289,7 +312,7 @@ struct BarkPreferencesView: View {
             Button("View this space’s archive…") { model.showArchive(); model.hostView?.window?.makeKeyAndOrderFront(nil) }
         }
         Section("New tabs") {
-            Text("Click the address bar or press ⌘T to search or enter an address. The new tab appears in the sidebar when you open a page.")
+            Text("Click New tab in the sidebar, click the address bar, or press ⌘T to search or enter an address. The new tab appears in the sidebar when you open a page.")
                 .font(.callout).foregroundStyle(.secondary)
         }
     }

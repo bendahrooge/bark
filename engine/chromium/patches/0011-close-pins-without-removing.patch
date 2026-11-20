@@ -1,7 +1,8 @@
 diff --git a/chrome/browser/ui/browser_commands.cc b/chrome/browser/ui/browser_commands.cc
+index 99a8ccd..6c89623 100644
 --- a/chrome/browser/ui/browser_commands.cc
 +++ b/chrome/browser/ui/browser_commands.cc
-@@ -29,6 +29,9 @@
+@@ -30,6 +30,9 @@
  #include "base/time/time.h"
  #include "base/trace_event/trace_event.h"
  #include "build/build_config.h"
@@ -10,8 +11,8 @@ diff --git a/chrome/browser/ui/browser_commands.cc b/chrome/browser/ui/browser_c
 +#endif
  #include "chrome/app/chrome_command_ids.h"
  #include "chrome/browser/autocomplete/autocomplete_classifier_factory.h"
- #include "chrome/browser/bookmarks/bookmark_model_factory.h"
-@@ -1462,6 +1465,12 @@
+ #include "chrome/browser/bookmarks/bookmark_bar_utils.h"
+@@ -1465,6 +1468,12 @@ void CloseTab(BrowserWindowInterface* browser) {
      return;
    }
  

@@ -38,6 +38,8 @@ class SpaceCatalog {
   // Removes a sidebar space, keeping at least one available replacement.
   // A profile's last space is retained privately to preserve its tabs/data.
   bool Remove(const std::string& id, const std::string& replacement);
+  // Purges all Spaces and saved window selections owned by a deleted profile.
+  void RemoveSpacesForProfile(const std::string& profile);
   // Swaps the positions of two spaces in the sidebar order.
   bool Swap(const std::string& first, const std::string& second);
   // Moves a space to another profile. With an open sidebar its tabs reopen

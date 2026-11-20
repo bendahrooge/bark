@@ -189,6 +189,22 @@ class ChromiumBuildTests(unittest.TestCase):
                 self.assertEqual('developer work', (work / 'src/unrelated.txt').read_text())
                 self.assertEqual('cached object', (output / 'cached.o').read_text())
 
+    def test_product_icon_replacement_and_removal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, engine, work, lock = self.make_prepared_fixture(directory)
+            target = work / 'src/two.cc'
+            original = target.read_bytes()
+            artwork = root / 'icon.png'
+            artwork.write_bytes(b'\x89PNG\r\n\x1a\n')
+            manifest = engine / 'product-icons.json'
+            manifest.write_text(json.dumps({'two.cc': 'icon.png'}))
+            with patch.object(chromium, 'ROOT', root), patch.object(chromium, 'ENGINE', engine):
+                chromium.prepare(work, lock)
+                self.assertEqual(artwork.read_bytes(), target.read_bytes())
+                manifest.unlink()
+                chromium.prepare(work, lock)
+                self.assertEqual(original, target.read_bytes())
+
     def test_refresh_refuses_edited_prepared_output_or_new_patch_target(self):
         for target in ('one.cc', 'two.cc', 'bark/BRANDING'):
             with self.subTest(target=target), tempfile.TemporaryDirectory() as directory:

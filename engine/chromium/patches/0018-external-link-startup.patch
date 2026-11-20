@@ -12,9 +12,10 @@ diff --git a/chrome/browser/app_controller_mac.h b/chrome/browser/app_controller
  @property(readonly, nonatomic) BOOL startupComplete;
  @property(readonly, nonatomic) Profile* lastProfileIfLoaded;
 diff --git a/chrome/browser/app_controller_mac.mm b/chrome/browser/app_controller_mac.mm
+index 6c7c439..9de3e51 100644
 --- a/chrome/browser/app_controller_mac.mm
 +++ b/chrome/browser/app_controller_mac.mm
-@@ -12,6 +12,7 @@
+@@ -14,6 +14,7 @@
  #include <memory>
  #include <vector>
  
@@ -22,7 +23,7 @@ diff --git a/chrome/browser/app_controller_mac.mm b/chrome/browser/app_controlle
  #include "base/apple/bridging.h"
  #include "base/apple/foundation_util.h"
  #include "base/apple/scoped_cftyperef.h"
-@@ -68,6 +69,7 @@
+@@ -70,6 +71,7 @@
  #include "chrome/browser/profiles/profile_observer.h"
  #include "chrome/browser/profiles/profiles_state.h"
  #include "chrome/browser/sessions/session_restore.h"
@@ -30,7 +31,7 @@ diff --git a/chrome/browser/app_controller_mac.mm b/chrome/browser/app_controlle
  #include "chrome/browser/sessions/session_service.h"
  #include "chrome/browser/sessions/session_service_factory.h"
  #include "chrome/browser/sessions/tab_restore_service_factory.h"
-@@ -554,6 +556,7 @@
+@@ -557,6 +559,7 @@ - (void)profileWasRemoved:(const base::FilePath&)profilePath
  // once after startup has completed. It opens the tabs in |_startupTabs|, and
  // clears |_startupTabs|.
  - (void)openStartupUrls;
@@ -38,7 +39,7 @@ diff --git a/chrome/browser/app_controller_mac.mm b/chrome/browser/app_controlle
  
  // Opens a tab for each StartupTab in |tabs|. If there is exactly one tab open
  // before this method is called, and that tab is the NTP, then this method
-@@ -594,7 +597,8 @@
+@@ -597,7 +600,8 @@ - (void)onVerticalTabStripModeChanged:
  
  class AppControllerProfileObserver : public ProfileAttributesStorage::Observer,
                                       public ProfileManagerObserver,
@@ -48,15 +49,15 @@ diff --git a/chrome/browser/app_controller_mac.mm b/chrome/browser/app_controlle
   public:
    AppControllerProfileObserver(
        ProfileManager* profile_manager, AppController* app_controller)
-@@ -602,6 +606,7 @@
+@@ -605,6 +609,7 @@ - (void)onVerticalTabStripModeChanged:
          app_controller_(app_controller) {
-     DCHECK(profile_manager_);
-     DCHECK(app_controller_);
+     CHECK(profile_manager_, base::NotFatalUntil::M163);
+     CHECK(app_controller_, base::NotFatalUntil::M163);
 +    SessionRestore::AddObserver(this);
      // Listen to ProfileObserver and ProfileManagerObserver.
      profile_manager_observer_.Observe(profile_manager_.get());
      for (Profile* profile : profile_manager_->GetLoadedProfiles()) {
-@@ -619,7 +624,13 @@
+@@ -622,7 +627,13 @@ - (void)onVerticalTabStripModeChanged:
    AppControllerProfileObserver& operator=(const AppControllerProfileObserver&) =
        delete;
  
@@ -71,7 +72,7 @@ diff --git a/chrome/browser/app_controller_mac.mm b/chrome/browser/app_controlle
  
   private:
    // ProfileAttributesStorage::Observer implementation:
-@@ -716,6 +727,8 @@
+@@ -719,6 +730,8 @@ @implementation AppController {
    // |_startupTabs| so that they can go in the first browser window/tab.
    StartupTabs _startupTabs;
    BOOL _startupComplete;
@@ -80,7 +81,7 @@ diff --git a/chrome/browser/app_controller_mac.mm b/chrome/browser/app_controlle
  
    // Outlets for testing close tab/window menu items.
    NSMenuItem* __strong _cmdWMenuItemForTesting;
-@@ -806,6 +819,8 @@
+@@ -809,6 +822,8 @@ + (AppController*)sharedController {
  
  - (instancetype)init {
    if (self = [super init]) {
@@ -89,7 +90,7 @@ diff --git a/chrome/browser/app_controller_mac.mm b/chrome/browser/app_controlle
      // -[NSMenu cr_menuItemForKeyEquivalentEvent:] lives in /content, but
      // we need to execute special update code before the search begins.
      // Setting this block gives us the hook we need.
-@@ -1247,10 +1262,30 @@
+@@ -1218,10 +1233,30 @@ - (void)setUpdateCheckInterval {
  #endif
  }
  
@@ -123,7 +124,7 @@ diff --git a/chrome/browser/app_controller_mac.mm b/chrome/browser/app_controlle
  }
  
  - (void)openStartupTabsReplacingNTP:(StartupTabs)tabs {
-@@ -1258,7 +1293,7 @@
+@@ -1229,7 +1264,7 @@ - (void)openStartupTabsReplacingNTP:(StartupTabs)tabs {
      return;
    }
  

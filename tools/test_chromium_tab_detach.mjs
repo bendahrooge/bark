@@ -11,9 +11,8 @@ import {Browser} from './test_chromium_browser.mjs';
 const root = path.resolve('test-results/chromium-tab-detach');
 fs.mkdirSync(root, {recursive: true});
 const reports = fs.mkdtempSync(path.join(root, 'run-'));
-const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'bark-tab-detach-'));
-const driver = path.join(profile, '.bark-ui-driver');
-fs.mkdirSync(driver);
+const profiles = fs.mkdtempSync(path.join(os.tmpdir(), 'bark-tab-detach-'));
+let profile, driver;
 const report = {passed: false, checks: []};
 let browser, latest, sequence = 0;
 const visible = state => state.windows.find(window => window.visible && !window.incognito);
@@ -39,11 +38,14 @@ async function waitFor(predicate, label) {
   }
   throw Error('Timed out: ' + label);
 }
-function launch(name) {
+function launch(name, profileName = 'regular', initialURL = base + '/anchor') {
+  profile = path.join(profiles, profileName);
+  driver = path.join(profile, '.bark-ui-driver');
+  fs.mkdirSync(driver, {recursive: true});
   for (const file of ['request.json', 'response.json']) fs.rmSync(path.join(driver, file), {force: true});
   return new Browser(profile, path.join(reports, name + '.log'), {
     nativeWindow: true, nativeUI: true, loadFixture: false, testDirectory: driver, profileDirectory: null,
-    initialURL: base + '/anchor',
+    initialURL,
   });
 }
 async function close() { await browser.close(); browser = null; }
@@ -58,15 +60,68 @@ const windowById = (state, id) => state.windows.find(window => window.windowId =
 const tabIn = (window, name) => window?.allTabs.find(tab => tab.url === base + '/' + name);
 const owner = (state, name) => state.windows.find(window => tabIn(window, name));
 const emptyPins = window => window.allTabs.every(tab => !tab.pinned) && window.favorites.length === 0;
+async function attachToPage(name) {
+  const {targetInfos} = await browser.send('Target.getTargets');
+  const target = targetInfos.find(target => target.type === 'page' && target.url === base + '/' + name);
+  assert.ok(target, 'Expected a page target for ' + name);
+  const {sessionId} = await browser.send('Target.attachToTarget', {targetId: target.targetId, flatten: true});
+  return sessionId;
+}
 async function evaluate(sessionId, expression) {
   const result = await browser.send('Runtime.evaluate', {expression, returnByValue: true}, sessionId);
   assert.ok(!result.exceptionDetails, JSON.stringify(result.exceptionDetails));
   return result.result.value;
 }
+async function checkDetachDuringSessionRebuild() {
+  browser = launch('rebuild-detach', 'rebuild', base + '/partner');
+  let state = await waitFor(state => !!owner(state, 'partner')?.activeSpaceId, 'source for session rebuild');
+  const source = owner(state, 'partner');
+  await browser.send('Target.createTarget', {url: base + '/history'});
+  await waitFor(state => windowById(state, source.windowId)?.tabs.some(tab =>
+    tab.url === base + '/history' && tab.title === 'Detach test' && !tab.loading), 'load history');
+  await evaluate(await attachToPage('history'), "history.pushState({}, '', '/moved')");
+  state = await waitFor(state => !!tabIn(windowById(state, source.windowId), 'moved'), 'record navigation');
+  const movedId = tabIn(windowById(state, source.windowId), 'moved').id;
+  await command('select', {windowId: source.windowId, id: tabIn(source, 'partner').id});
+  await command('splitTab', {windowId: source.windowId, id: movedId, text: 'bottom'});
+  await waitFor(state => tabIn(windowById(state, source.windowId), 'moved')?.splitLayout === 'stacked', 'source split');
+
+  // Compact the session between creating the empty window and inserting the moved tab.
+  await command('testDetachDuringSessionRebuild', {windowId: source.windowId, id: movedId});
+  state = await waitFor(state => owner(state, 'moved')?.visible && owner(state, 'moved').windowId !== source.windowId,
+    'detach during session rebuild');
+  const destination = owner(state, 'moved');
+  assert.notEqual(destination.windowGroup, source.windowGroup);
+  assert.equal(destination.allTabs.length, 1);
+  assert.equal(destination.allTabs[0].sessionWindow, destination.windowId);
+  await close();
+
+  browser = launch('rebuild-restore', 'rebuild');
+  state = await waitFor(state => owner(state, 'partner')?.visible && owner(state, 'moved')?.visible, 'restore both panes');
+  const restored = owner(state, 'moved');
+  assert.equal(restored.windowGroup, destination.windowGroup,
+    'A session rebuild during detach must preserve the destination window after restart');
+  assert.equal(owner(state, 'partner').windowGroup, source.windowGroup);
+  assert.notEqual(restored.windowId, owner(state, 'partner').windowId);
+  for (const name of ['moved', 'partner']) {
+    const matches = state.windows.flatMap(window => window.allTabs).filter(tab => tab.url === base + '/' + name);
+    assert.equal(matches.length, 1, name + ' must restore exactly once');
+    assert.ok(!matches[0].splitLayout, name + ' must remain unsplit after restart');
+  }
+  await command('select', {windowId: restored.windowId, id: tabIn(restored, 'moved').id});
+  await waitFor(state => windowById(state, restored.windowId)?.tabs.some(tab =>
+    tab.active && tab.url === base + '/moved' && !tab.loading), 'activate detached page after restore');
+  const history = await browser.send('Page.getNavigationHistory', {}, await attachToPage('moved'));
+  assert.deepEqual(history.entries.map(entry => entry.url), [base + '/history', base + '/moved']);
+  assert.equal(history.currentIndex, 1);
+  await close();
+  report.checks.push('A session rebuild during detach preserves the independent window and navigation history on restart');
+}
 try {
   assert.equal(process.platform, 'darwin');
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   base = `http://127.0.0.1:${server.address().port}`;
+  await checkDetachDuringSessionRebuild();
   browser = launch('detach');
   let state = await waitFor(state => !!owner(state, 'anchor')?.activeSpaceId, 'initial window');
   const source = owner(state, 'anchor').windowId;
@@ -82,9 +137,7 @@ try {
     await command('moveTab', {windowId: source, id: id(name), metadata: {zone: 'favorites', before: ''}});
   }
   const movingId = id('move');
-  const {targetInfos} = await browser.send('Target.getTargets');
-  const target = targetInfos.find(target => target.url === base + '/move');
-  const {sessionId} = await browser.send('Target.attachToTarget', {targetId: target.targetId, flatten: true});
+  const sessionId = await attachToPage('move');
   await browser.send('Page.enable', {}, sessionId);
   await evaluate(sessionId, "window.moveMarker = 'live page'; document.querySelector('#draft').value = 'unsaved text'; history.pushState({marker: 42}, '', '/live-state')");
   const historyBefore = await browser.send('Page.getNavigationHistory', {}, sessionId);
@@ -185,6 +238,6 @@ try {
   server.closeAllConnections();
   await new Promise(resolve => server.close(resolve));
   fs.writeFileSync(path.join(reports, 'report.json'), JSON.stringify(report, null, 2) + '\n');
-  if (report.passed) fs.rmSync(profile, {recursive: true, force: true});
+  if (report.passed) fs.rmSync(profiles, {recursive: true, force: true});
   console.log('Reports:', reports);
 }

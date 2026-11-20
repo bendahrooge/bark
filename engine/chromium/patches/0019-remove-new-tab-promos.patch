@@ -1,4 +1,5 @@
 diff --git a/chrome/browser/ui/views/user_education/browser_ntp_promos.cc b/chrome/browser/ui/views/user_education/browser_ntp_promos.cc
+index d4eca39..f57f302 100644
 --- a/chrome/browser/ui/views/user_education/browser_ntp_promos.cc
 +++ b/chrome/browser/ui/views/user_education/browser_ntp_promos.cc
 @@ -4,152 +4,6 @@
@@ -36,8 +37,8 @@ diff --git a/chrome/browser/ui/views/user_education/browser_ntp_promos.cc b/chro
 -#include "extensions/browser/extension_util.h"
 -#include "extensions/common/extension_urls.h"
 -#include "ui/actions/actions.h"
+-#include "ui/base/mojom/window_open_disposition.mojom-shared.h"
 -#include "ui/base/page_transition_types.h"
--#include "ui/base/window_open_disposition.h"
 -
 -using user_education::NtpPromoContent;
 -using user_education::NtpPromoSpecification;
@@ -50,9 +51,7 @@ diff --git a/chrome/browser/ui/views/user_education/browser_ntp_promos.cc b/chro
 -  return context->AsA<BrowserUserEducationContext>()
 -      ->GetBrowserView()
 -      .GetProfile();
-+void MaybeRegisterNtpPromos(user_education::NtpPromoRegistry& registry) {
-+  // Bark exposes Space themes and extensions through its own menus.
- }
+-}
 -
 -NtpPromoSpecification::Eligibility CheckExtensionsPromoEligibility(
 -    ContextPtr context) {
@@ -80,7 +79,7 @@ diff --git a/chrome/browser/ui/views/user_education/browser_ntp_promos.cc b/chro
 -  NavigateParams params(
 -      context->AsA<BrowserUserEducationContext>()->GetBrowserView().browser(),
 -      url_with_utm, ui::PAGE_TRANSITION_LINK);
--  params.disposition = WindowOpenDisposition::kCurrentTab;
+-  params.disposition = ui::mojom::WindowOpenDisposition::kCurrentTab;
 -  Navigate(&params);
 -}
 -
@@ -117,7 +116,7 @@ diff --git a/chrome/browser/ui/views/user_education/browser_ntp_promos.cc b/chro
 -
 -}  // namespace
 -
--void MaybeRegisterNtpPromos(user_education::NtpPromoRegistry& registry) {
+ void MaybeRegisterNtpPromos(user_education::NtpPromoRegistry& registry) {
 -  if (registry.AreAnyPromosRegistered()) {
 -    return;
 -  }
@@ -155,7 +154,8 @@ diff --git a/chrome/browser/ui/views/user_education/browser_ntp_promos.cc b/chro
 -      user_education::Metadata(
 -          141, "cjgrant@google.com",
 -          "Promotes Chrome extensions on the New Tab Page")));
--}
++  // Bark exposes Space themes and extensions through its own menus.
+ }
 diff --git a/chrome/browser/new_tab_page/ntp_promo/ntp_promo_interactive_uitest.cc b/chrome/browser/new_tab_page/ntp_promo/ntp_promo_interactive_uitest.cc
 --- a/chrome/browser/new_tab_page/ntp_promo/ntp_promo_interactive_uitest.cc
 +++ b/chrome/browser/new_tab_page/ntp_promo/ntp_promo_interactive_uitest.cc

@@ -142,6 +142,9 @@ try {
     visible(state).spaces.length === 1 && !visible(state).switchingSpace, 'removed spaces stay absent after restart');
   assert.equal(visible(state).profiles.length, 3);
   report.checks.push('Removed default spaces stay out of the sidebar after restart while all profiles remain registered');
+  const survivingWindow = visible(state).windowId;
+  await command('navigateNew', {windowId: survivingWindow, text: base + '/survivor'});
+  await waitFor(state => visible(state)?.tabs.some(tab => tab.url === base + '/survivor' && !tab.loading), 'open a tab in the surviving profile');
 
   await command('createSpace', {windowId: visible(state).windowId, text: 'Personal again',
     metadata: {profile: originalId, theme: 'gray', emoji: '👤'}});
@@ -157,7 +160,42 @@ try {
   assert.equal(await evaluate(restored, "localStorage.getItem('keep-profile-data')"), 'yes');
   assert.match(await evaluate(restored, 'document.cookie'), /keep_profile=yes/);
   report.checks.push('A new space can reuse the original profile and recover its saved tabs and site data');
+
+  const workProfile = visible(state).profiles.find(item => item.name === 'Work').id;
+  const settingsURL = 'chrome://spaces/?profiles';
+  await command('navigateNew', {windowId: visible(state).windowId, text: settingsURL});
+  await waitFor(state => visible(state)?.tabs.some(tab => tab.active && tab.url === settingsURL && !tab.loading), 'profile settings');
+  const settings = await attach(settingsURL);
+  const removeProfile = `document.querySelector('[data-focus-key="delete-profile-${workProfile}"]')`;
+  await waitPage(settings, `Boolean(${removeProfile})`);
+  await evaluate(settings, `${removeProfile}.click()`);
+  await waitPage(settings, "document.querySelector('#deleteDialog').open");
+  assert.match(await evaluate(settings, "document.querySelector('#deleteDialog [slot=title]').textContent"), /Work/);
+  await evaluate(settings, "document.querySelector('#cancelDelete').click()");
+  assert.equal(visible(await command()).profiles.length, 3);
+  await evaluate(settings, `${removeProfile}.click()`);
+  await waitPage(settings, "document.querySelector('#deleteDialog').open");
+  await evaluate(settings, "document.querySelector('#confirmDelete').click()");
+  state = await waitFor(state => visible(state)?.profiles.length === 2, 'confirmed deletion of inactive profile');
+  assert.equal(visible(state).profileId, originalId);
+  assert.equal(await evaluate(restored, "localStorage.getItem('keep-profile-data')"), 'yes');
+  report.checks.push('Profile confirmation can be cancelled, and deleting a background profile preserves the current profile and its data');
+
+  await command('deleteSpace', {windowId: visible(state).windowId, text: 'source-imported'});
+  state = await waitFor(state => visible(state)?.spaces.length === 1, 'only the active profile has a visible Space');
+  await command('deleteProfile', {windowId: visible(state).windowId, text: originalId});
+  state = await waitFor(state => visible(state)?.profiles.length === 1 &&
+    visible(state).spaces.some(space => space.active && space.id === 'source-imported'), 'active profile deletion returns to the surviving Space');
+  assert.equal(visible(state).windowId, survivingWindow);
+  assert.ok(visible(state).allTabs.some(tab => tab.url === base + '/survivor'));
   await close();
+  const afterDelete = JSON.parse(fs.readFileSync(path.join(profile, 'Local State')));
+  for (const deleted of [workProfile, originalId]) {
+    assert.ok(!Object.hasOwn(afterDelete.profile.info_cache, deleted));
+    assert.ok(!afterDelete.bark.spaces.some(space => space.profile === deleted));
+  }
+  assert.ok(Object.values(afterDelete.bark.window_groups ?? {}).every(id => afterDelete.bark.spaces.some(space => space.id === id)));
+  report.checks.push('Deleting the active profile keeps other Spaces open and removes both visible and hidden Spaces of deleted profiles from disk');
   report.passed = true;
   console.log(`${report.checks.length} focused sidebar-space removal checks passed`);
 } catch (error) {

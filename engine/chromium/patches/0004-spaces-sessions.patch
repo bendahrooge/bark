@@ -47,6 +47,44 @@ diff --git a/chrome/browser/sessions/BUILD.gn b/chrome/browser/sessions/BUILD.gn
  }
  
  if (!is_android) {
+diff --git a/chrome/browser/sessions/session_service.cc b/chrome/browser/sessions/session_service.cc
+--- a/chrome/browser/sessions/session_service.cc
++++ b/chrome/browser/sessions/session_service.cc
+@@ -438,6 +438,21 @@
+       BrowserWindow::FromBrowser(browser)->IsVisibleOnAllWorkspaces());
+ }
+
++void SessionService::TrackWindowAfterTabMove(BrowserWindowInterface* browser) {
++  if (!is_saving_enabled() ||
++      ShouldTrackChangesToWindow(browser->GetSessionID()) ||
++      browser->IsDeleteScheduled() || !ShouldTrackBrowser(browser) ||
++      browser->GetTabStripModel()->empty()) {
++    return;
++  }
++
++  // A rebuild can forget a newly opened window while its first tab is still
++  // in the source. Snapshot the populated destination, including navigations
++  // and tab extra data, and resume tracking subsequent edits to this window.
++  BuildCommandsForBrowser(browser, tab_to_available_range(), windows_tracking());
++  command_storage_manager()->StartSaveTimer();
++}
++
+ void SessionService::WindowClosing(SessionID window_id) {
+   if (!ShouldTrackChangesToWindow(window_id)) {
+     return;
+diff --git a/chrome/browser/sessions/session_service.h b/chrome/browser/sessions/session_service.h
+--- a/chrome/browser/sessions/session_service.h
++++ b/chrome/browser/sessions/session_service.h
+@@ -143,6 +143,9 @@
+   // Notification a window has opened.
+   void WindowOpened(BrowserWindowInterface* browser) override;
+
++  // Resume session tracking if a rebuild skipped an empty tab-move destination.
++  void TrackWindowAfterTabMove(BrowserWindowInterface* browser);
++
+   // Notification the window is about to close.
+   void WindowClosing(SessionID window_id) override;
+
 diff --git a/chrome/browser/sessions/session_service_base.cc b/chrome/browser/sessions/session_service_base.cc
 --- a/chrome/browser/sessions/session_service_base.cc
 +++ b/chrome/browser/sessions/session_service_base.cc

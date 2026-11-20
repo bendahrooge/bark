@@ -244,12 +244,7 @@ def sync(work, lock, github_mirror=False, min_free=150):
     print('Dependencies fetched. On Linux, install the OS dependencies described in engine/chromium/README.md before configure.')
 
 
-def overlay_files():
-    """Map source-owned UI/core files into Chromium without duplicating them."""
-    result = {p.relative_to(ENGINE / 'overlay').as_posix(): p
-              for p in sorted((ENGINE / 'overlay').rglob('*'))
-              if p.is_file() and '__pycache__' not in p.parts and p.name != '.DS_Store'}
-    manifest = ENGINE / 'overlay-sources.json'
+def add_mapped_files(result, manifest):
     if manifest.exists():
         for name, source in json.loads(manifest.read_text()).items():
             destination = Path(name)
@@ -260,6 +255,14 @@ def overlay_files():
             if name in result:
                 raise ValueError('Duplicate overlay destination: ' + name)
             result[name] = origin
+
+
+def overlay_files():
+    """Map source-owned UI/core files into Chromium without duplicating them."""
+    result = {p.relative_to(ENGINE / 'overlay').as_posix(): p
+              for p in sorted((ENGINE / 'overlay').rglob('*'))
+              if p.is_file() and '__pycache__' not in p.parts and p.name != '.DS_Store'}
+    add_mapped_files(result, ENGINE / 'overlay-sources.json')
     return result
 
 
@@ -268,9 +271,12 @@ def prepare(work, lock):
     ensure_checkout(src, lock)
     stamp_path = work / 'bark-prepared.json'
     overlays = overlay_files()
+    product_icons = {}
+    add_mapped_files(product_icons, ENGINE / 'product-icons.json')
     patches = patch_files(lock)
     inputs = {p.relative_to(ENGINE).as_posix(): digest(p) for p in patches}
     inputs.update({'overlay/' + name: digest(source) for name, source in overlays.items()})
+    inputs.update({'product-icon/' + name: digest(source) for name, source in product_icons.items()})
     previous_outputs = {}
     previous_patch_paths = set()
     removed_overlays = set()
@@ -296,8 +302,9 @@ def prepare(work, lock):
                             if name.startswith('bark/') and name[5:] not in overlays}
     elif git(src, 'status', '--porcelain', '--untracked-files=normal'):
         raise RuntimeError('Refusing to patch a dirty Chromium checkout')
-    output_paths = sorted(set(patch_paths(patches)) | {'bark/' + name for name in overlays})
-    patch_targets = sorted(set(patch_paths(patches)) | previous_patch_paths)
+    tracked_targets = set(patch_paths(patches)) | set(product_icons)
+    output_paths = sorted(tracked_targets | {'bark/' + name for name in overlays})
+    patch_targets = sorted(tracked_targets | previous_patch_paths)
     pristine = {}
     # Validate new patch targets against HEAD, even if unrelated developer files
     # exist elsewhere. Only verified Bark outputs may be overwritten.
@@ -324,6 +331,8 @@ def prepare(work, lock):
         if patches:
             run(['git', 'apply', '--check', *patches], cwd=stage)
             run(['git', 'apply', *patches], cwd=stage)
+        for name, source in product_icons.items():
+            shutil.copyfile(source, stage / name)
         for name, source in overlays.items():
             target = stage / 'bark' / name
             target.parent.mkdir(parents=True, exist_ok=True)

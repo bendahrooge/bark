@@ -1,4 +1,5 @@
 #include "bark/space_catalog.h"
+#include <algorithm>
 #include <cmath>
 #include <optional>
 #include <map>
@@ -179,6 +180,32 @@ bool SpaceCatalog::Remove(const std::string& id, const std::string& replacement)
   });
   prefs_->SetList(kSpacesPref, std::move(list));
   return true;
+}
+void SpaceCatalog::RemoveSpacesForProfile(const std::string& profile) {
+  auto list = List().Clone();
+  std::set<std::string> removed_ids;
+  const size_t removed = list.EraseIf([&](const base::Value& value) {
+    const auto* space = value.GetIfDict();
+    const auto* owner = space ? space->FindString("profile") : nullptr;
+    if (!owner || *owner != profile) return false;
+    if (const auto* id = space->FindString("id")) removed_ids.insert(*id);
+    return true;
+  });
+  if (!removed) return;
+  // Deleting a profile can remove every visible Space while another profile
+  // still has its preserved, hidden Space. Make that Space reachable again.
+  if (!list.empty() && std::ranges::all_of(list, [](const base::Value& value) {
+        return value.is_dict() && value.GetDict().FindBool("hidden").value_or(false);
+      })) {
+    list.front().GetDict().Remove("hidden");
+  }
+  const auto& groups = prefs_->GetDict(kWindowGroupsPref);
+  auto remaining = groups.Clone();
+  for (const auto [group, space] : groups) {
+    if (space.is_string() && removed_ids.contains(space.GetString())) remaining.Remove(group);
+  }
+  if (remaining.size() != groups.size()) prefs_->SetDict(kWindowGroupsPref, std::move(remaining));
+  prefs_->SetList(kSpacesPref, std::move(list));
 }
 bool SpaceCatalog::Swap(const std::string& first, const std::string& second) {
   auto list = List().Clone();

@@ -140,6 +140,7 @@ struct ChromiumSnapshot: Decodable {
     var favorites: [ChromiumTab]? = nil
     // Tabs archived from the active space, most recent first.
     var archivedTabs: [ChromiumArchivedTab]? = nil
+    var archiveGeneration: Int? = nil
     var organizationUndoLabel: String? = nil
     var downloads: ChromiumDownloads? = nil
     // False once this profile's window is hidden behind another space's window.
@@ -211,6 +212,7 @@ enum AddressDisposition {
     // The sidebar's AppKit view, for window geometry and keyboard shortcuts.
     weak var hostView: NSView?
     weak var tabScrollView: NSScrollView?
+    weak var spaceDockScrollView: NSScrollView?
     let splitDrop = SplitDropController()
     // Incremented by the keyboard shortcut; the sidebar archives with undo.
     @Published private(set) var archiveRequests = 0
@@ -400,7 +402,7 @@ enum AddressDisposition {
     }
 
     func send(_ action: String, id: Int? = nil, text: String? = nil, width: Double? = nil, metadata: [String: String]? = nil) {
-        if isIncognito && ["space", "createSpace", "deleteSpace", "manageSpaces", "moveTabToSpace", "createProfile", "customizeSpace", "appearance", "importBrowserData"].contains(action) { return }
+        if isIncognito && ["space", "createSpace", "deleteSpace", "manageSpaces", "moveTabToSpace", "createProfile", "deleteProfile", "customizeSpace", "appearance", "importBrowserData"].contains(action) { return }
         var message: [String: Any] = ["action": action]
         if let id { message["id"] = id }
         if let text { message["text"] = text }
@@ -1637,28 +1639,19 @@ private struct TabFramesKey: PreferenceKey {
     }
 }
 
-// Keep native scrolling and thumb dragging without a permanent scroller gutter.
-// This view lives inside the tab list, never around the fixed sidebar controls.
-private struct SidebarScrollbarSize: NSViewRepresentable {
-    let model: ChromiumSidebarModel
-    func makeNSView(context: Context) -> SizingView { SizingView() }
-    func updateNSView(_ view: SizingView, context: Context) { view.model = model; view.applySize() }
+private struct EnclosingScrollView: NSViewRepresentable {
+    let configure: (NSScrollView) -> Void
+    func makeNSView(context: Context) -> Reader { Reader() }
+    func updateNSView(_ view: Reader, context: Context) { view.configure = configure; view.resolve() }
 
-    final class SizingView: NSView {
-        weak var model: ChromiumSidebarModel?
+    final class Reader: NSView {
+        var configure: ((NSScrollView) -> Void)?
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
-            DispatchQueue.main.async { [weak self] in self?.applySize() }
+            DispatchQueue.main.async { [weak self] in self?.resolve() }
         }
-        func applySize() {
-            guard let scrollView = enclosingScrollView else { return }
-            model?.tabScrollView = scrollView
-            if scrollView.scrollerStyle != .overlay { scrollView.scrollerStyle = .overlay }
-            scrollView.autohidesScrollers = true
-            if let scroller = scrollView.verticalScroller, scroller.controlSize != .small {
-                scroller.controlSize = .small
-                scrollView.tile()
-            }
+        func resolve() {
+            if let scrollView = enclosingScrollView { configure?(scrollView) }
         }
     }
 }
@@ -1710,6 +1703,7 @@ private struct SidebarResizeHandle: View {
 
 private struct ChromiumSidebar: View {
     @ObservedObject var model: ChromiumSidebarModel
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var draft: SpaceDraft?
     @State private var settingsSpace: SpaceSettingsTarget?
     @State private var settingsProfileID = ""
@@ -1866,7 +1860,15 @@ private struct ChromiumSidebar: View {
             }
             ScrollView(.vertical) {
                 tabList(model.outgoingTabs, space: model.outgoingSpace, interactive: true)
-                    .background(SidebarScrollbarSize(model: model).allowsHitTesting(false))
+                    .background(EnclosingScrollView { scrollView in
+                        model.tabScrollView = scrollView
+                        if scrollView.scrollerStyle != .overlay { scrollView.scrollerStyle = .overlay }
+                        scrollView.autohidesScrollers = true
+                        if let scroller = scrollView.verticalScroller, scroller.controlSize != .small {
+                            scroller.controlSize = .small
+                            scrollView.tile()
+                        }
+                    }.allowsHitTesting(false))
             }.scrollIndicators(.automatic)
                 // The scrollbar overlays only the tabs; the resize target is
                 // hosted on the outer boundary, without reserving row width.
@@ -1902,24 +1904,31 @@ private struct ChromiumSidebar: View {
     private func tabList(_ tabs: [ChromiumTab], space: ChromiumSpace?, interactive: Bool) -> some View {
         let pinned = tabs.filter(\.pinned)
         let folders = space?.folders ?? []
-        let entries = ChromiumFolderTree.entries(folders: folders, tabs: pinned)
         let pinsCollapsed = space?.pinsCollapsed == true
-        let hasUnpinned = tabs.contains { !$0.pinned }
+        let entries = ChromiumFolderTree.entries(folders: folders, tabs: pinned)
+        let showAllPins = !pinsCollapsed || tabDrag != nil
+        let unpinned = tabs.filter { !$0.pinned }
+        let hasUnpinned = !unpinned.isEmpty
+        let animation: Animation? = interactive && !reduceMotion && tabDrag == nil && !model.spaceInMotion
+            ? .easeInOut(duration: 0.20) : nil
         // Reuse the divider as the pin target so rows stay under the pointer.
         let pinZone = interactive && tabDrag?.dropped == false && pinned.isEmpty
-        return LazyVStack(spacing: 3) {
-            if !pinsCollapsed || tabDrag != nil {
-                ForEach(entries) { entry in
-                    if let folder = entry.folder {
-                        SidebarFolderHeader(model: model, folder: folder, count: entry.count, renameTarget: $folderToRename)
-                            .padding(.leading, CGFloat(entry.depth) * 14)
-                    } else if let tab = entry.tab {
-                        tabRow(tab, interactive: interactive, indent: CGFloat(entry.depth) * 14)
+        return VStack(spacing: 0) {
+            if !entries.isEmpty {
+                LazyVStack(spacing: 0) {
+                    ForEach(entries) { entry in
+                        SidebarFoldingRows(expanded: showAllPins || entry.tab?.visibleWhenCollapsed == true) {
+                            Group {
+                                if let folder = entry.folder {
+                                    SidebarFolderHeader(model: model, folder: folder, count: entry.count, renameTarget: $folderToRename)
+                                        .padding(.leading, CGFloat(entry.depth) * 14)
+                                } else if let tab = entry.tab {
+                                    tabRow(tab, interactive: interactive, indent: showAllPins ? CGFloat(entry.depth) * 14 : 0)
+                                }
+                            }.padding(.bottom, 3)
+                        }
                     }
                 }
-            } else {
-                // Keep the selected or just-closed pin within reach.
-                ForEach(pinned.filter(\.visibleWhenCollapsed)) { tabRow($0, interactive: interactive) }
             }
             // The divider below the pins hosts the Clear button for unpinned tabs.
             if !pinned.isEmpty || !folders.isEmpty || hasUnpinned || pinZone {
@@ -1940,8 +1949,23 @@ private struct ChromiumSidebar: View {
                     .overlay { if pinZone { dropHint("pin", "Drop here to pin", targeted: dropZone == .pinned) } }
                     .background { if interactive { frameReporter(Self.pinBoundaryKey) } }
             }
-            ForEach(tabs.filter { !$0.pinned }) { tabRow($0, interactive: interactive) }
-        }.padding(.leading, 8).padding(.trailing, trailingInset).padding(.bottom, 12)
+            Button { model.send("new") } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: "plus").frame(width: 16).accessibilityHidden(true)
+                    Text("New tab")
+                }.font(.system(size: 13)).foregroundStyle(.secondary)
+                    .padding(.horizontal, 11).frame(maxWidth: .infinity, alignment: .leading)
+                    .frame(height: 34).contentShape(Rectangle())
+            }.buttonStyle(SidebarButtonStyle()).help("New tab (⌘T)")
+            SidebarFoldingRows(expanded: hasUnpinned) {
+                LazyVStack(spacing: 3) {
+                    ForEach(unpinned) { tabRow($0, interactive: interactive) }
+                }.padding(.top, 3)
+            }
+        }.frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.leading, 8).padding(.trailing, trailingInset).padding(.bottom, 12)
+            .animation(animation, value: pinsCollapsed)
+            .animation(animation, value: model.snapshot.archiveGeneration)
     }
 
     // MARK: Favorites and tab dragging
@@ -2300,6 +2324,15 @@ private struct ChromiumSidebar: View {
                 downloadButton(downloads)
             }
             Spacer(minLength: 0)
+            spaceDockIcons
+            Spacer(minLength: 0)
+            Button(action: newSpace) { Image(systemName: "plus").font(.system(size: 14)).frame(width: 28, height: 30) }
+                .buttonStyle(SidebarButtonStyle()).foregroundStyle(.secondary).help("New space").accessibilityLabel("New space")
+        }
+    }
+
+    private var spaceDockIcons: some View {
+        ScrollViewReader { proxy in
             ScrollView(.horizontal) {
                 HStack(spacing: 4) {
                     ForEach(model.snapshot.spaces) { space in
@@ -2316,13 +2349,13 @@ private struct ChromiumSidebar: View {
                             .accessibilityValue(space.active ? "Selected" : "")
                             .contextMenu { spaceMenu(for: space) }
                             .disabled(model.switchingSpaceProfile)
+                            .id(space.id)
                     }
-                }
-            }.scrollIndicators(.hidden).fixedSize(horizontal: false, vertical: true)
-            Spacer(minLength: 0)
-            Button(action: newSpace) { Image(systemName: "plus").font(.system(size: 14)).frame(width: 28, height: 30) }
-                .buttonStyle(SidebarButtonStyle()).foregroundStyle(.secondary).help("New space").accessibilityLabel("New space")
-        }
+                }.background(EnclosingScrollView { model.spaceDockScrollView = $0 }.allowsHitTesting(false))
+            }.scrollIndicators(.never)
+                .onAppear { if let id = model.snapshot.activeSpaceId { proxy.scrollTo(id) } }
+                .onChange(of: model.snapshot.activeSpaceId) { id in if let id { proxy.scrollTo(id) } }
+        }.fixedSize(horizontal: false, vertical: true)
     }
 
     @ViewBuilder private func spaceMenu(for space: ChromiumSpace) -> some View {
@@ -2694,6 +2727,7 @@ struct SpaceSwipeVelocity {
     private enum SwipeState { case idle, undecided(CGSize), horizontal, passthrough }
     private var swipe: SwipeState = .idle
     private var swallowMomentum = false
+    private weak var scrollingDock: NSScrollView?
     private var swipeVelocity = SpaceSwipeVelocity()
     private var scrollMonitor: Any?
     fileprivate let addressBar: AddressBarController
@@ -2713,7 +2747,7 @@ struct SpaceSwipeVelocity {
             self.addressBar.show(over: self.window)
         }
         // A local monitor sees trackpad scrolls before the tab list's vertical
-        // ScrollView, so a horizontal gesture can be claimed for the whole sidebar.
+        // ScrollView, so the dock and Space switching can route each gesture.
         scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
             guard let self else { return event }
             return self.handleScroll(event) ? nil : event
@@ -2765,7 +2799,7 @@ struct SpaceSwipeVelocity {
         addressBar.tearDown()
     }
 
-    /// Returns true when the event belongs to a space swipe and is consumed.
+    /// Route a wheel tick or an entire trackpad gesture to its starting region.
     private func handleScroll(_ event: NSEvent) -> Bool {
         // Events normally name their window. Without one, the location is in
         // screen coordinates; use the window under it.
@@ -2773,6 +2807,26 @@ struct SpaceSwipeVelocity {
             NSWindow.windowNumber(at: event.locationInWindow, belowWindowWithWindowNumber: 0))
         guard let window, eventWindow === window else { return false }
         let locationInWindow = event.window == nil ? window.convertPoint(fromScreen: event.locationInWindow) : event.locationInWindow
+        let beginsGesture = event.phase.contains(.mayBegin) || event.phase.contains(.began)
+        let wheelTick = event.phase.isEmpty && event.momentumPhase.isEmpty
+        if beginsGesture || wheelTick {
+            scrollingDock = nil
+            if let dock = model.spaceDockScrollView, dock.window === window, !dock.isHiddenOrHasHiddenAncestor,
+               dock.visibleRect.contains(dock.convert(locationInWindow, from: nil)),
+               let document = dock.documentView, document.frame.width > dock.contentSize.width {
+                scrollingDock = dock
+            }
+        }
+        if let dock = scrollingDock {
+            let dx = event.scrollingDeltaX, dy = event.scrollingDeltaY
+            let delta = abs(dx) >= abs(dy) ? dx : dy
+            let clip = dock.contentView
+            var bounds = clip.bounds
+            bounds.origin.x -= delta * (event.hasPreciseScrollingDeltas ? 1 : dock.horizontalLineScroll)
+            clip.scroll(to: clip.constrainBoundsRect(bounds).origin)
+            dock.reflectScrolledClipView(clip)
+            return true
+        }
         // Trailing momentum after a swipe must not scroll the tab list.
         if !event.momentumPhase.isEmpty {
             guard swallowMomentum else { return false }
@@ -2784,7 +2838,7 @@ struct SpaceSwipeVelocity {
         // Content follows the fingers regardless of the natural-scrolling setting.
         let fingerX = event.isDirectionInvertedFromDevice ? event.scrollingDeltaX : -event.scrollingDeltaX
         let fingerY = event.isDirectionInvertedFromDevice ? event.scrollingDeltaY : -event.scrollingDeltaY
-        if event.phase.contains(.mayBegin) || event.phase.contains(.began) {
+        if beginsGesture {
             swallowMomentum = false
             let inside = !isHiddenOrHasHiddenAncestor && bounds.contains(convert(locationInWindow, from: nil))
             swipe = inside && model.canSwipeSpaces ? .undecided(.zero) : .passthrough

@@ -90,7 +90,7 @@ private final class Commands {
         precondition(model.theme == themeBefore && model.emoji.isEmpty,
                      "Private-window customization must not mutate a persistent space")
         let privateCommandCount = commands.messages.count
-        for action in ["space", "createSpace", "deleteSpace", "manageSpaces", "moveTabToSpace", "createProfile", "customizeSpace", "appearance", "importBrowserData"] { model.send(action, text: "private test") }
+        for action in ["space", "createSpace", "deleteSpace", "manageSpaces", "moveTabToSpace", "createProfile", "deleteProfile", "customizeSpace", "appearance", "importBrowserData"] { model.send(action, text: "private test") }
         precondition(commands.messages.count == privateCommandCount,
                      "Private windows cannot send commands that edit or open persistent spaces")
         model.send("new")
@@ -272,15 +272,47 @@ private final class Commands {
         let handle = barkSwiftSidebarCreate(context, callback)
         first.withCString { barkSwiftSidebarUpdate(handle, $0) }
         precondition(Unmanaged<AnyObject>.fromOpaque(handle).takeUnretainedValue() is NSView)
+        checkNewTabButton(handle, commands: commands)
         let header = barkSwiftSidebarHeaderCreate(handle)
         checkHeaderHoverExit(Unmanaged<NSView>.fromOpaque(header).takeUnretainedValue())
         barkSwiftSidebarHeaderDestroy(header)
+        checkSpaceDockScrolling(handle, commands: commands)
         let resize = barkSwiftSidebarResizeCreate(handle)
         let resizeView = Unmanaged<NSView>.fromOpaque(resize).takeUnretainedValue()
         precondition(!resizeView.isOpaque, "The boundary resize target must not paint over the page or sidebar")
         barkSwiftSidebarResizeDestroy(resize)
         barkSwiftSidebarDestroy(handle)
         print("Swift/Chromium bridge checks passed, including four-way split drop targets")
+    }
+}
+
+@MainActor private func checkNewTabButton(_ handle: UnsafeMutableRawPointer, commands: Commands) {
+    let host = Unmanaged<NSView>.fromOpaque(handle).takeUnretainedValue()
+    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 260, height: 480),
+                          styleMask: .borderless, backing: .buffered, defer: false)
+    window.contentView = host
+    let key = "accessibilityEnhancedUserInterface"
+    let previous = NSApp.value(forKey: key)
+    NSApp.setValue(true, forKey: key)
+    defer { NSApp.setValue(previous, forKey: key) }
+
+    for tabs in ["[]", #"[{"id":1,"title":"Example","url":"https://example.test/","active":true,"pinned":false,"loading":false}]"#] {
+        let state = #"{"tabs":\#(tabs),"spaces":[],"profile":"Default","canGoBack":false,"canGoForward":false}"#
+        state.withCString { barkSwiftSidebarUpdate(handle, $0) }
+        host.layoutSubtreeIfNeeded()
+        window.displayIfNeeded()
+        var nodes = host.accessibilityChildren() ?? []
+        var buttons: [AnyObject] = []
+        while let item = nodes.popLast() {
+            let node = item as AnyObject
+            if node.accessibilityRole?() == .button && node.accessibilityLabel?() == "New tab" { buttons.append(node) }
+            nodes += node.accessibilityChildren?() ?? []
+        }
+        precondition(buttons.count == 1, "The tab list must show a New tab button even when it is empty")
+        let count = commands.messages.count
+        precondition(buttons[0].accessibilityPerformPress?() == true)
+        precondition(commands.messages.count == count + 1 && commands.messages.last?["action"] as? String == "new",
+                     "Pressing the sidebar button must dispatch the native New Tab command once")
     }
 }
 
@@ -342,6 +374,84 @@ private final class Commands {
     model.perform(.tab(2))
     precondition(commands.messages.last?["action"] as? String == "select" && commands.messages.last?["id"] as? Int == 6,
                  "Numbered tab shortcuts count visible rows after pins")
+}
+
+private final class DockWheelEvent: NSEvent {
+    weak var target: NSWindow?
+    var point = CGPoint.zero
+    var delta = CGSize.zero
+    var gesturePhase: NSEvent.Phase = []
+    var momentum: NSEvent.Phase = []
+    override var type: EventType { .scrollWheel }
+    override var window: NSWindow? { target }
+    override var windowNumber: Int { target?.windowNumber ?? 0 }
+    override var locationInWindow: NSPoint { point }
+    override var phase: NSEvent.Phase { gesturePhase }
+    override var momentumPhase: NSEvent.Phase { momentum }
+    override var hasPreciseScrollingDeltas: Bool { !phase.isEmpty || !momentum.isEmpty }
+    override var scrollingDeltaX: CGFloat { delta.width }
+    override var scrollingDeltaY: CGFloat { delta.height }
+    override var isDirectionInvertedFromDevice: Bool { true }
+}
+
+@MainActor private func checkSpaceDockScrolling(_ handle: UnsafeMutableRawPointer, commands: Commands) {
+    let host = Unmanaged<NSView>.fromOpaque(handle).takeUnretainedValue()
+    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 260, height: 480),
+                          styleMask: .borderless, backing: .buffered, defer: false)
+    window.contentView = host
+    func show(_ active: Int) {
+        let spaces = (0..<20).map { #"{"id":"\#($0)","name":"Space \#($0)","active":\#($0 == active)}"# }.joined(separator: ",")
+        let state = #"{"tabs":[],"spaces":[\#(spaces)],"activeSpaceId":"\#(active)","profile":"Default","canGoBack":false,"canGoForward":false}"#
+        state.withCString { barkSwiftSidebarUpdate(handle, $0) }
+        host.layoutSubtreeIfNeeded()
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
+    }
+    show(0)
+    var views = [host]
+    var dockView: NSScrollView?
+    while let view = views.popLast() {
+        if let scroll = view as? NSScrollView, let doc = scroll.documentView, doc.frame.width > scroll.contentSize.width {
+            dockView = scroll
+            break
+        }
+        views += view.subviews
+    }
+    guard let dock = dockView else { preconditionFailure("Twenty Space icons must overflow the dock") }
+    let point = dock.convert(NSPoint(x: dock.bounds.midX, y: dock.bounds.midY), to: nil)
+    let tabList = CGPoint(x: point.x, y: point.y + 120)
+    func scroll(_ x: CGFloat, _ y: CGFloat, at location: CGPoint, phase: NSEvent.Phase = [], momentum: NSEvent.Phase = []) {
+        let event = DockWheelEvent()
+        event.target = window
+        event.point = location
+        event.delta = CGSize(width: x, height: y)
+        event.gesturePhase = phase
+        event.momentum = momentum
+        NSApp.sendEvent(event)
+    }
+    func offset() -> CGFloat { dock.contentView.bounds.minX }
+    let end = dock.documentView!.frame.width - dock.contentSize.width
+    let commandCount = commands.messages.count
+    scroll(0, -1, at: point)
+    precondition(offset() > 0, "A vertical mouse-wheel tick scrolls the Space icons")
+    scroll(0, 1000, at: point)
+    precondition(offset() == 0)
+    scroll(-24, 0, at: point, phase: .began)
+    scroll(-24, 0, at: tabList, phase: .changed)
+    scroll(0, 0, at: tabList, phase: .ended)
+    precondition(offset() == 48, "A trackpad gesture stays with the dock when the pointer leaves it")
+    scroll(-1000, 0, at: tabList, momentum: .began)
+    scroll(0, 0, at: tabList, momentum: .ended)
+    precondition(offset() == end && commands.messages.count == commandCount,
+                 "Scrolling can reveal the last Space without switching Spaces")
+    precondition(!dock.hasHorizontalScroller || dock.horizontalScroller?.isHidden == true)
+    show(1)
+    precondition(offset() < end, "An externally selected Space scrolls into view")
+    show(19)
+    precondition(offset() == end)
+    scroll(125, 0, at: tabList, phase: .began)
+    scroll(0, 0, at: tabList, phase: .ended)
+    precondition(commands.messages.last?["action"] as? String == "space" && commands.messages.last?["text"] as? String == "18",
+                 "Swiping above the dock still switches Spaces")
 }
 
 @MainActor private func checkSpacePager(callback: ChromiumCommand) {

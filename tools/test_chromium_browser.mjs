@@ -42,7 +42,8 @@ export class Browser {
     const flags = ['--remote-debugging-pipe', '--no-first-run',
       '--no-default-browser-check', '--disable-background-networking',
       '--disable-component-update', '--disable-sync',
-      `--user-data-dir=${profile}`, initialURL];
+      `--user-data-dir=${profile}`];
+    if (initialURL) flags.push(initialURL);
     if (!nativeWindow) flags.push('--headless');
     if (profileDirectory) flags.push(`--profile-directory=${profileDirectory}`);
     if (loadFixture) flags.push(`--load-extension=${fixture}`);
@@ -444,6 +445,7 @@ async function runAll() {
   const save = () => fs.writeFileSync(path.join(directory, 'report.json'), JSON.stringify(report, null, 2) + '\n');
   // The headed browser run already includes every headless extension check.
   const suites = [['browser', 'test_chromium_browser.mjs', native ? ['--headed', '--swift-ui'] : []]];
+  if (native || process.platform === 'linux') suites.push(['factory-reset', 'test_chromium_factory_reset.mjs', []]);
   if (process.platform === 'darwin') suites.push(['new-tab-default', 'test_chromium_new_tab_default.mjs', []]);
   if (native) suites.push(
     ['spaces-and-settings', 'test_chromium_spaces.mjs', []],

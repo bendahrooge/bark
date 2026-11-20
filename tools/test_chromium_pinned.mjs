@@ -6,7 +6,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import {setTimeout as delay} from 'node:timers/promises';
-import {Browser} from './test_chromium_browser.mjs';
+import {Browser, bundleEnablesSwiftUI} from './test_chromium_browser.mjs';
 
 const resultRoot = path.resolve('test-results/chromium-pinned');
 fs.mkdirSync(resultRoot, {recursive: true});
@@ -16,6 +16,7 @@ const driver = path.join(profile, '.bark-ui-driver');
 fs.mkdirSync(driver);
 const report = {passed: false, checks: []};
 const requests = new Map();
+const needsDevelopmentSwitch = !bundleEnablesSwiftUI();
 let sequence = 0, browser, latest;
 const visible = state => state.windows.find(window => window.visible && !window.incognito);
 async function command(action = 'snapshot', fields = {}) {
@@ -42,7 +43,8 @@ async function waitFor(predicate, label) {
 function launch(name) {
   for (const file of ['request.json', 'response.json']) fs.rmSync(path.join(driver, file), {force: true});
   return new Browser(profile, path.join(reports, name + '.log'), {
-    nativeWindow: true, nativeUI: true, loadFixture: false, testDirectory: driver, profileDirectory: null,
+    nativeWindow: true, nativeUI: needsDevelopmentSwitch, loadFixture: false, testDirectory: driver,
+    profileDirectory: null, initialURL: null,
   });
 }
 async function close() { await browser.close(); browser = null; }
@@ -71,6 +73,22 @@ try {
     const {sessionId} = await browser.send('Target.attachToTarget', {targetId: target.targetId, flatten: true});
     return sessionId;
   };
+  const setStartupPreference = async value => {
+    // Chromium protects the startup preference against edits made on disk.
+    const url = 'chrome://settings/onStartup';
+    const {targetId} = await browser.send('Target.createTarget', {url});
+    try {
+      await waitFor(state => visible(state)?.tabs.some(tab => tab.url === url && !tab.loading), 'startup settings');
+      const sessionId = await attachPage(url);
+      const {result} = await browser.send('Runtime.evaluate', {
+        expression: `chrome.settingsPrivate.setPref('session.restore_on_startup', ${value})`,
+        awaitPromise: true, returnByValue: true,
+      }, sessionId);
+      assert.equal(result.value, true, 'The browser saved the startup preference');
+    } finally {
+      await browser.send('Target.closeTarget', {targetId});
+    }
+  };
   const assertDormant = (state, suffixes) => {
     for (const suffix of suffixes) {
       const tab = tabFor(state, suffix);
@@ -92,6 +110,7 @@ try {
 
   browser = launch('seed');
   await waitFor(state => !!visible(state)?.activeSpaceId, 'initial window');
+  await setStartupPreference(1);  // Continue where you left off.
   for (const suffix of [...pins, '/ordinary']) {
     await browser.send('Target.createTarget', {url: base + suffix});
     const state = await waitFor(state => visible(state)?.tabs.some(tab =>
@@ -123,25 +142,11 @@ try {
   requests.clear();
 
   browser = launch('selected-pin-restore');
-  await waitFor(state => pins.every(suffix => !!tabFor(state, suffix)) && requests.get('/pin-a') === 1,
+  await waitFor(state => visible(state)?.tabs.some(tab => tab.url === base + '/pin-a' && tab.active) &&
+    pins.every(suffix => !!tabFor(state, suffix)) && requests.get('/pin-a') === 1,
     'restore the selected pinned page');
   assertDormant(await command(), ['/pin-b', '/favorite']);
   report.checks.push('The pinned page selected at shutdown still loads when restored on screen');
-  await close();
-  requests.clear();
-
-  // Pinned startup preferences also apply when session restoration is disabled.
-  editJSON(path.join(profile, 'Default', 'Preferences'), prefs => {
-    prefs.session ??= {};
-    prefs.session.restore_on_startup = 5;
-  });
-  browser = launch('new-tab-startup');
-  await waitFor(state => pins.every(suffix => !!tabFor(state, suffix)), 'pins without session restoration');
-  await delay(1000);
-  assertDormant(await command(), pins);
-  await select('/pin-b');
-  assertDormant(await command(), ['/pin-a', '/favorite']);
-  report.checks.push('New-tab startup restores pinned destinations without loading them, and selecting one loads it');
   await close();
   requests.clear();
 
@@ -319,9 +324,6 @@ try {
   report.checks.push('Closing a pin during its first page load preserves its destination and allows reopening');
   await close();
   requests.clear();
-  editJSON(path.join(profile, 'Default', 'Preferences'), prefs => {
-    if (prefs.session) delete prefs.session.restore_on_startup;
-  });
   browser = launch('closed-pins-restart');
   state = await waitFor(state => !!tabFor(state, suffix) && !!tabFor(state, '/favorite'), 'closed pins after restart');
   assertDormant(state, [suffix, '/favorite']);
@@ -331,6 +333,19 @@ try {
   assert.equal(tabFor(state, suffix).meta.folder, folder);
   assert.ok(visible(state).favorites.some(tab => tab.url === base + '/favorite'));
   report.checks.push('Closed pins and Favorites survive restart without loading; an explicitly unpinned and closed tab stays removed');
+  await setStartupPreference(5);  // Open the New Tab page.
+  await close();
+  requests.clear();
+
+  browser = launch('new-tab-startup');
+  await waitFor(state => pins.every(suffix => !!tabFor(state, suffix)), 'pins without session restoration');
+  await delay(1000);
+  state = await command();
+  assert.equal(tabFor(state, '/ordinary'), undefined, 'New-tab startup skips the old session');
+  assertDormant(state, pins);
+  await select('/pin-b');
+  assertDormant(await command(), ['/pin-a', '/favorite']);
+  report.checks.push('New-tab startup restores pinned destinations without loading them, and selecting one loads it');
   await close();
   report.passed = true;
   console.log(`${report.checks.length} focused pinned-tab checks passed`);

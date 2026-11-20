@@ -1,16 +1,16 @@
 diff --git a/chrome/common/chrome_paths_linux.cc b/chrome/common/chrome_paths_linux.cc
-index 5575c049b2..9833934936 100644
+index e8dd514..55e41f0 100644
 --- a/chrome/common/chrome_paths_linux.cc
 +++ b/chrome/common/chrome_paths_linux.cc
-@@ -95,7 +95,7 @@ bool GetDefaultUserDataDirectory(base::FilePath* result) {
+@@ -96,7 +96,7 @@ bool GetDefaultUserDataDirectory(base::FilePath* result) {
  #elif BUILDFLAG(GOOGLE_CHROME_BRANDING)
    std::string data_dir_basename = "google-chrome";
  #else
 -  std::string data_dir_basename = "chromium";
 +  std::string data_dir_basename = "bark";
  #endif
+   // LINT.ThenChange(//chrome/installer/linux/snap/build.py:ConfigDirName)
    *result = config_dir.Append(data_dir_basename + GetChannelSuffixForDataDir());
-   return true;
 diff --git a/chrome/common/chrome_paths_mac.mm b/chrome/common/chrome_paths_mac.mm
 index 6829c9cb92..1cca8798f5 100644
 --- a/chrome/common/chrome_paths_mac.mm

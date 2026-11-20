@@ -34,6 +34,12 @@
         <cr-button id="addProfile" class="action-button" disabled>Add profile</cr-button>
       </div>
     </section>
+    <section id="factory-reset" hidden>
+      <h2>Factory reset</h2>
+      <p class="hint">Erase Bark’s local data for every profile on this device and start fresh.</p>
+      <cr-button id="resetBark">Reset Bark…</cr-button>
+      <p id="resetStatus" role="status"></p>
+    </section>
   </main>
   <cr-dialog id="deleteDialog">
     <div slot="title">Delete space?</div>

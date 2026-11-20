@@ -1,6 +1,20 @@
 import AppKit
 import SwiftUI
 
+/// Clip the outgoing rows to their shrinking space while the rows below move up.
+struct SidebarFoldingRows<Content: View>: View {
+    let expanded: Bool
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if expanded {
+                content().transition(.offset(y: -5).combined(with: .opacity))
+            }
+        }.frame(maxWidth: .infinity, alignment: .leading).clipped()
+    }
+}
+
 /// Shared restrained treatment for sidebar, popover, and media controls.
 struct BarkControlStyle: ButtonStyle {
     var cornerRadius: CGFloat = 7
@@ -34,6 +48,7 @@ struct SpaceHeaderRow: View {
     @AccessibilityFocusState private var accessibilityFocused: Control?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private var showControls: Bool { hovered || focused != nil || accessibilityFocused != nil }
+    private var showChevron: Bool { pinsCollapsed || showControls }
 
     var body: some View {
         HStack(spacing: 0) {
@@ -41,11 +56,11 @@ struct SpaceHeaderRow: View {
                 HStack(spacing: 8) {
                     ZStack {
                         SpaceIcon(emoji: emoji, tint: tint).font(.system(size: 14))
-                            .opacity(showControls ? 0 : 1)
+                            .opacity(showChevron ? 0 : 1)
                         Image(systemName: "chevron.right").font(.system(size: 12, weight: .semibold))
                             .rotationEffect(.degrees(pinsCollapsed ? 0 : 90))
-                            .opacity(showControls ? 1 : 0)
-                    }.frame(width: 16).accessibilityHidden(true)
+                            .opacity(showChevron ? 1 : 0)
+                    }.fixedSize().frame(minWidth: 16).accessibilityHidden(true)
                     Text(name).font(.system(size: 13, weight: .semibold)).lineLimit(1)
                     Spacer(minLength: 0)
                 }.padding(.leading, 10).frame(height: 36).contentShape(Rectangle())

@@ -15,11 +15,22 @@
 #include "base/json/json_writer.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/ref_counted_memory.h"
+#include "base/memory/weak_ptr.h"
 #include "base/scoped_observation.h"
 #include "base/strings/string_util.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/values.h"
+#include "build/build_config.h"
+#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX)
+#include "bark/factory_reset.h"
+#include "base/task/thread_pool.h"
+#include "chrome/browser/lifetime/application_lifetime_desktop.h"
+#include "chrome/browser/lifetime/browser_shutdown.h"
+#endif
+#if BUILDFLAG(IS_MAC)
+#include "chrome/browser/ui/webui/profile_helper.h"
+#endif
 #include "chrome/browser/browser_process.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/profiles/profile_attributes_entry.h"
@@ -78,6 +89,12 @@ class SpacesHandler : public content::WebUIMessageHandler,
     Register("setSpaceProfile", &SpacesHandler::HandleSetSpaceProfile);
     Register("createProfile", &SpacesHandler::HandleCreateProfile);
     Register("renameProfile", &SpacesHandler::HandleRenameProfile);
+#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX)
+    Register("factoryResetRequiringGesture", &SpacesHandler::HandleFactoryReset);
+#endif
+#if BUILDFLAG(IS_MAC)
+    Register("deleteProfile", &SpacesHandler::HandleDeleteProfile);
+#endif
   }
 
   void OnJavascriptAllowed() override {
@@ -87,6 +104,7 @@ class SpacesHandler : public content::WebUIMessageHandler,
     observation_.Observe(storage_);
   }
   void OnJavascriptDisallowed() override {
+    weak_ptr_factory_.InvalidateWeakPtrs();
     prefs_.RemoveAll();
     observation_.Reset();
     last_state_.clear();
@@ -120,7 +138,7 @@ class SpacesHandler : public content::WebUIMessageHandler,
     return nullptr;
   }
 
-  base::DictValue State() const {
+  base::DictValue State() {
     base::ListValue profiles;
     std::set<std::string> keys;
     for (const auto* entry : storage_->GetAllProfilesAttributesSortedForDisplay()) {
@@ -160,6 +178,9 @@ class SpacesHandler : public content::WebUIMessageHandler,
     base::DictValue state;
     state.Set("spaces", std::move(spaces));
     state.Set("profiles", std::move(profiles));
+    state.Set("canDeleteProfiles", BUILDFLAG(IS_MAC) && Profile::FromWebUI(web_ui())->IsRegularProfile());
+    state.Set("canFactoryReset", (BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX)) &&
+                                 Profile::FromWebUI(web_ui())->IsRegularProfile());
     state.Set("themes", std::move(themes));
     return state;
   }
@@ -262,11 +283,60 @@ class SpacesHandler : public content::WebUIMessageHandler,
     Push();
   }
 
+#if BUILDFLAG(IS_MAC)
+  // [profile id]
+  void HandleDeleteProfile(const base::ListValue& args) {
+    if (!Profile::FromWebUI(web_ui())->IsRegularProfile()) return;
+    auto values = Strings(args, 1);
+    auto* entry = values ? FindProfile((*values)[0]) : nullptr;
+    if (!entry) return;
+    // Deleting the page's own profile may close its tab during dispatch.
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(FROM_HERE,
+        base::BindOnce(&webui::DeleteProfileAtPath, entry->GetPath(), ProfileMetrics::DELETE_PROFILE_SETTINGS));
+  }
+#endif
+
+#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX)
+  void HandleFactoryReset(const base::ListValue& args) {
+    if (args.size() != 1 || !args[0].is_string()) return;
+    AllowJavascript();
+    // Shared across windows. Only one reset may be scheduled at a time.
+    static bool pending = false;
+    if (pending || !Profile::FromWebUI(web_ui())->IsRegularProfile()) {
+      ResolveJavascriptCallback(args[0], base::Value(false));
+      return;
+    }
+    // All paths come from the browser. The page only supplies its callback ID.
+    auto* manager = g_browser_process->profile_manager();
+    std::vector<base::FilePath> profiles;
+    for (const auto* entry : storage_->GetAllProfilesAttributes())
+      profiles.push_back(entry->GetPath());
+    pending = true;
+    BeginFactoryReset();
+    base::ThreadPool::PostTaskAndReplyWithResult(FROM_HERE,
+        {base::MayBlock(), base::TaskPriority::USER_BLOCKING, base::TaskShutdownBehavior::BLOCK_SHUTDOWN},
+        base::BindOnce(&ScheduleFactoryReset, manager->user_data_dir(), std::move(profiles)),
+        base::BindOnce([](base::WeakPtr<SpacesHandler> handler, base::Value callback, bool ready) {
+          pending = ready;
+          if (handler && handler->IsJavascriptAllowed())
+            handler->ResolveJavascriptCallback(callback, base::Value(ready));
+          if (ready) {
+            // The user has confirmed closing all windows and erasing their data.
+            // A later tab or download prompt must not leave a reset armed.
+            browser_shutdown::OnShutdownStarting(browser_shutdown::ShutdownType::kSilentExit);
+            chrome::OnClosingAllBrowsers(true);
+            chrome::CloseAllBrowsersAndQuit();
+          }
+        }, weak_ptr_factory_.GetWeakPtr(), args[0].Clone()));
+  }
+#endif
+
   SpaceCatalog catalog_;
   raw_ptr<ProfileAttributesStorage> storage_;
   PrefChangeRegistrar prefs_;
   base::ScopedObservation<ProfileAttributesStorage, ProfileAttributesStorageObserver> observation_{this};
   std::string last_state_;
+  base::WeakPtrFactory<SpacesHandler> weak_ptr_factory_{this};
 };
 
 std::string_view RequestPath(const std::string& path) {

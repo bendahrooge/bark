@@ -52,11 +52,13 @@
 #include "chrome/browser/browser_process.h"
 #include "chrome/browser/content_settings/host_content_settings_map_factory.h"
 #include "chrome/browser/download/download_prefs.h"
+#include "chrome/browser/infobars/confirm_infobar_creation_allowlist.h"
 #include "chrome/browser/search_engines/template_url_service_factory.h"
 #include "chrome/common/pref_names.h"
 #include "chrome/browser/permissions/permission_actions_history_factory.h"
 #include "chrome/browser/permissions/permission_decision_auto_blocker_factory.h"
 #include "chrome/browser/profiles/profile.h"
+#include "chrome/browser/profiles/nuke_profile_directory_utils.h"
 #include "chrome/browser/profiles/profile_attributes_entry.h"
 #include "chrome/browser/profiles/profile_attributes_storage.h"
 #include "chrome/browser/profiles/profile_attributes_storage_observer.h"
@@ -75,6 +77,7 @@
 #include "chrome/browser/ui/browser_window/public/profile_browser_collection.h"
 #include "chrome/browser/ui/bubble_anchor_util.h"
 #include "chrome/browser/ui/extensions/extensions_container.h"
+#include "chrome/browser/ui/webui/profile_helper.h"
 #include "chrome/browser/ui/page_info/page_info_dialog.h"
 #include "chrome/browser/ui/startup/default_browser_prompt/default_browser_infobar_delegate.h"
 #include "chrome/browser/ui/startup/default_browser_prompt/default_browser_prompt_manager.h"
@@ -1125,6 +1128,13 @@ class SidebarMac::Impl : public TabStripModelObserver,
         if (host->view_->browser()->GetSessionID().id() != request.FindInt("windowId").value_or(-1)) continue;
         if (*action == "testCloseWindow") chrome::CloseWindow(host->view_->browser());
         else if (*action == "testCloseTab") chrome::CloseTab(host->view_->browser());
+        else if (*action == "testDetachDuringSessionRebuild") {
+          auto* session = SessionServiceFactory::GetForProfileIfExisting(host->view_->GetProfile());
+          if (session && session->is_saving_enabled()) {
+            host->DetachTabToWindow(host->FindTab(request.FindInt("id").value_or(-1)), std::nullopt,
+                base::BindOnce(&SessionServiceBase::ResetFromCurrentBrowsers, base::Unretained(session)));
+          }
+        }
         else if (*action == "testNewTab") {
           // Exercise the same native command as Cmd+T, including repeated presses.
           for (int i = 0; i < std::clamp(request.FindInt("count").value_or(1), 1, 20); ++i)
@@ -1164,11 +1174,13 @@ class SidebarMac::Impl : public TabStripModelObserver,
               manager->RemoveAllInfoBars(false);
               const auto* mode = request.FindString("text");
               if (!mode || *mode != "clear") {
-                manager->AddInfoBar(ConfirmInfoBar::Create(std::make_unique<BarkNoticeTestDelegate>(
-                    mode && *mode == "locked", base::BindRepeating(
-                        [](base::WeakPtr<Impl> self, std::string action) {
-                          if (self) self->test_notice_action_ = std::move(action);
-                        }, host->weak_factory_.GetWeakPtr()))));
+                manager->AddInfoBar(ConfirmInfoBar::Create(
+                    ConfirmInfoBarCreationAllowlist::GetPassKeyForTesting(),
+                    std::make_unique<BarkNoticeTestDelegate>(
+                        mode && *mode == "locked", base::BindRepeating(
+                            [](base::WeakPtr<Impl> self, std::string action) {
+                              if (self) self->test_notice_action_ = std::move(action);
+                            }, host->weak_factory_.GetWeakPtr()))));
               }
             }
           }
@@ -2623,6 +2635,24 @@ class SidebarMac::Impl : public TabStripModelObserver,
   }
   void CloseOtherHosts(BrowserWindowInterface*) {
     if (group_->closing) return;
+    if (IsProfileDirectoryScheduledForDeletion(view_->GetProfile()->GetPath())) {
+      // Chromium closes all windows of the deleted profile. Keep the other
+      // profiles in this logical window accessible, including hidden Spaces.
+      Impl* remaining = nullptr;
+      for (auto* host : Instances()) {
+        if (host->group_ != group_ || !host->tabs_ || host->tabs_->closing_all() ||
+            host->view_->browser()->IsDeleteScheduled() ||
+            IsProfileDirectoryScheduledForDeletion(host->view_->GetProfile()->GetPath())) continue;
+        if (host->view_->browser()->GetWindow()->IsVisible()) return;
+        if (!remaining) remaining = host;
+      }
+      if (remaining) {
+        remaining->Unconceal();
+        remaining->view_->browser()->GetWindow()->Show();
+        remaining->RememberActiveSpace();
+      }
+      return;
+    }
     group_->closing = true;
     std::vector<base::WeakPtr<Impl>> others;
     for (auto* host : Instances()) {
@@ -3359,6 +3389,7 @@ class SidebarMac::Impl : public TabStripModelObserver,
     state.Set("sidebarRevealed", revealed_);
     state.Set("sidebarWidth", expanded_width());
     state.Set("tabs", std::move(tab_list));
+    state.Set("archiveGeneration", archive_generation_);
     state.Set("favorites", std::move(favorites));
     state.Set("downloads", DownloadState());
     if (preferences_open_ && !incognito) state.Set("preferences", PreferencesState());
@@ -3428,7 +3459,8 @@ class SidebarMac::Impl : public TabStripModelObserver,
 
   // Move the real tab into an empty, independent browser of the same profile.
   // No startup/session tabs are copied into this window.
-  void DetachTabToWindow(int index, std::optional<NSPoint> drop_point) {
+  void DetachTabToWindow(int index, std::optional<NSPoint> drop_point,
+                         base::OnceClosure before_move_for_testing = {}) {
     if (!tabs_->ContainsIndex(index) || group_->closing ||
         (!InActiveSpace(index) && !IsFavorite(tabs_->GetWebContentsAt(index)))) return;
     AdoptTabs();
@@ -3467,12 +3499,18 @@ class SidebarMac::Impl : public TabStripModelObserver,
       else NavigateTo(GURL("about:blank"), true);
     }
     index = tabs_->GetIndexOfWebContents(contents);
+    if (before_move_for_testing) std::move(before_move_for_testing).Run();
     chrome::MoveTabsToExistingWindow(source, destination, {index});
     target->AdoptTabs();
     // Chromium transfers the tab's saved extra data as well as its live
     // WebContents. Rewrite that saved membership in the destination session
     // so a restart cannot put this window back into the source's group.
-    if (!target->IsPrivate()) target->PersistTab(contents);
+    if (!target->IsPrivate()) {
+      target->PersistTab(contents);
+      if (auto* session = SessionServiceFactory::GetForProfileIfExisting(destination->GetProfile())) {
+        session->TrackWindowAfterTabMove(destination);
+      }
+    }
     if (drop_point) {
       NSWindow* window = target->view_->GetNativeWindow().GetNativeNSWindow();
       NSRect frame = window.frame;
@@ -3596,6 +3634,8 @@ class SidebarMac::Impl : public TabStripModelObserver,
       closing.push_back(contents->GetWeakPtr());
     }
     if (closing.empty()) return;
+    // Let the sidebar animate the snapshot produced by this Clear action.
+    ++archive_generation_;
     if (!IsPrivate()) {
       // The newest batch sits at the front of the archive, for "Undo".
       last_archive_space_ = active_space_;
@@ -3878,7 +3918,7 @@ class SidebarMac::Impl : public TabStripModelObserver,
     // creation or the original profile's appearance settings.
     if (incognito && (*action == "space" || *action == "createSpace" || *action == "deleteSpace" ||
                       *action == "manageSpaces" || *action == "moveTabToSpace" ||
-                      *action == "createProfile" || *action == "customizeSpace" || *action == "appearance" || *action == "importBrowserData")) return;
+                      *action == "createProfile" || *action == "deleteProfile" || *action == "customizeSpace" || *action == "appearance" || *action == "importBrowserData")) return;
     auto* active = tabs_->GetActiveWebContents();
     // Scope popover actions to the page they described, including navigations
     // in the same tab, so stale extension clicks cannot grant another page access.
@@ -4186,6 +4226,8 @@ class SidebarMac::Impl : public TabStripModelObserver,
       catalog_.Remove(*text, VisibleSpaceExcept(*text));
     } else if (*action == "manageSpaces") {
       NavigateTo(GURL("chrome://spaces/"), true);
+    } else if (*action == "showFactoryReset" && view_->GetProfile()->IsRegularProfile()) {
+      NavigateTo(GURL("chrome://spaces/#factory-reset"), true);
     } else if (*action == "importBrowserData" && text) {
       browser_import_result_.reset();
       ImportBrowserData(*text, base::BindOnce([](base::WeakPtr<Impl> self, base::DictValue result) {
@@ -4293,6 +4335,10 @@ class SidebarMac::Impl : public TabStripModelObserver,
         auto* profile = metadata->FindString("profile");
         if (space && profile) MoveSpaceToProfile(*space, *profile);
       }
+    } else if (*action == "deleteProfile" && text) {
+      const base::FilePath path = ProfilePath(*text);
+      if (!path.empty()) webui::DeleteProfileAtPath(path, ProfileMetrics::DELETE_PROFILE_SETTINGS);
+      return;  // Deleting this window's profile can destroy the sidebar.
     } else if (*action == "createProfile" && text && !text->empty() && text->size() <= 128) {
       ProfileManager::CreateMultiProfileAsync(base::UTF8ToUTF16(*text), 0, false,
           base::BindOnce([](base::WeakPtr<Impl> self, Profile* profile) {
@@ -4310,6 +4356,7 @@ class SidebarMac::Impl : public TabStripModelObserver,
   std::vector<OrganizationUndo> organization_undo_;
   std::string last_archive_space_;
   size_t last_archive_count_ = 0;
+  int archive_generation_ = 0;
   raw_ptr<BrowserView> view_;
   raw_ptr<TabStripModel> tabs_;
   raw_ptr<ProfileAttributesStorage> profiles_;

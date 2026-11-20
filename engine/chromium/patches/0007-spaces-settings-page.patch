@@ -1,35 +1,37 @@
-diff --git a/chrome/browser/resources/settings/settings_menu/settings_menu.html b/chrome/browser/resources/settings/settings_menu/settings_menu.html
-index c35c985ddf..913cc33464 100644
---- a/chrome/browser/resources/settings/settings_menu/settings_menu.html
-+++ b/chrome/browser/resources/settings/settings_menu/settings_menu.html
-@@ -1,5 +1,6 @@
-     <div role="navigation">
--      <cr-menu-selector id="menu" selectable="a:not(#extensionsLink)"
-+      <cr-menu-selector id="menu"
-+          selectable="a:not(#extensionsLink):not(#barkSpacesLink)"
-           attr-for-selected="href" @iron-activate="${this.onIronActivate_}"
-           @click="${this.onLinkClick_}" selected-attribute="selected">
-         <a role="menuitem"
-@@ -15,6 +16,19 @@
-           <span class="menu-label">$i18n{peoplePageTitle}</span>
-           <cr-ripple></cr-ripple>
-         </a>
-+        <a role="menuitem" id="barkSpacesLink" class="cr-nav-menu-item"
-+            href="chrome://spaces">
-+          <cr-icon icon="settings:dashboard"></cr-icon>
-+          <span class="menu-label">Spaces &amp; profiles</span>
-+          <cr-ripple></cr-ripple>
-+        </a>
-+        <a role="menuitem" id="barkImportLink" href="/importData"
-+            ?hidden="${this.shouldHideMenuItem_(this.pageVisibility_?.people)}"
-+            class="cr-nav-menu-item">
-+          <cr-icon icon="settings:file-save"></cr-icon>
-+          <span class="menu-label">$i18n{importTitle}</span>
-+          <cr-ripple></cr-ripple>
-+        </a>
-         <a role="menuitem" id="autofill" href="/autofill"
-             @click="${this.onAutofillClick_}"
-             class="cr-nav-menu-item"
+diff --git a/chrome/browser/resources/settings/settings_menu/settings_menu.html.ts b/chrome/browser/resources/settings/settings_menu/settings_menu.html.ts
+index a2dd519..b54c4c5 100644
+--- a/chrome/browser/resources/settings/settings_menu/settings_menu.html.ts
++++ b/chrome/browser/resources/settings/settings_menu/settings_menu.html.ts
+@@ -9,7 +9,8 @@ import type {SettingsMenuElement} from './settings_menu.js';
+ export function getHtml(this: SettingsMenuElement) {
+   return html`<!--_html_template_start_-->
+ <div role="navigation">
+-  <cr-menu-selector id="menu" selectable="a:not(#extensionsLink)"
++  <cr-menu-selector id="menu"
++      selectable="a:not(#extensionsLink):not(#barkSpacesLink)"
+       attr-for-selected="href" @iron-activate="${this.onIronActivate_}"
+       @click="${this.onLinkClick_}" selected-attribute="selected">
+     ${this.settingsRefresh2026Enabled_ ? html`
+@@ -35,6 +36,19 @@ export function getHtml(this: SettingsMenuElement) {
+         <cr-ripple></cr-ripple>
+       </a>
+     `}
++    <a role="menuitem" id="barkSpacesLink" class="cr-nav-menu-item"
++        href="chrome://spaces">
++      <cr-icon icon="settings:dashboard"></cr-icon>
++      <span class="menu-label">Spaces &amp; profiles</span>
++      <cr-ripple></cr-ripple>
++    </a>
++    <a role="menuitem" id="barkImportLink" href="/importData"
++        ?hidden="${this.shouldHideMenuItem_(this.pageVisibility_?.people)}"
++        class="cr-nav-menu-item">
++      <cr-icon icon="settings:file-save"></cr-icon>
++      <span class="menu-label">$i18n{importTitle}</span>
++      <cr-ripple></cr-ripple>
++    </a>
+     <a role="menuitem" id="autofill" href="/autofill"
+         @click="${this.onAutofillClick_}" class="cr-nav-menu-item" ?hidden="${
+             this.shouldHideMenuItem_(this.pageVisibility_?.yourSavedInfo)}">
 diff --git a/chrome/browser/resources/settings/settings_menu/settings_menu.ts b/chrome/browser/resources/settings/settings_menu/settings_menu.ts
 index 931eefe24e..96f7264e25 100644
 --- a/chrome/browser/resources/settings/settings_menu/settings_menu.ts

@@ -53,12 +53,12 @@
   </defs>
   <g clip-path="url(#frame)" font-family="Arial, Helvetica, sans-serif">
     <rect width="1280" height="420" fill="#262437"/>
-    <text x="46" y="238" fill="#faf3dd" font-family="'Arial Black', 'Helvetica Neue', Arial, sans-serif" font-size="162" font-weight="900" letter-spacing="-12">Bark</text>
-    <text x="56" y="297" fill="#eee8df" font-size="27" letter-spacing="-.65">A better place to browse</text>
+    <text x="48" y="236" fill="#faf3dd" font-family="'Arial Black', 'Helvetica Neue', Arial, sans-serif" font-size="148" font-weight="900" letter-spacing="-10">Bark</text>
+    <text x="56" y="291" fill="#eee8df" font-size="32" letter-spacing="-.65">A better place to browse</text>
     <!-- Each window reveals the sidebar of a different Space. -->
     <g transform="translate(467 202)" fill="#282439" color="#565062" font-size="13">
       <rect width="489" height="398" rx="15" fill="url(#studio-theme)" stroke="#262437" stroke-width="2"/>
-      <rect x="217" y="7" width="265" height="384" rx="10" fill="#f3edf6"/>
+      <rect x="232" y="7" width="250" height="384" rx="10" fill="#f3edf6"/>
       <use xlink:href="#window-buttons" fill="#857a94" opacity=".54"/>
       <use xlink:href="#sidebar-chrome"/>
       <text x="19" y="60.5" font-size="12.5">figma.com</text>
@@ -76,7 +76,7 @@
     </g>
     <g transform="translate(689 128)" fill="#3c2c2a" color="#6a5045" font-size="13">
       <rect width="487" height="411" rx="15" fill="url(#library-theme)" stroke="#262437" stroke-width="2"/>
-      <rect x="217" y="7" width="263" height="397" rx="10" fill="#f6eee3"/>
+      <rect x="232" y="7" width="248" height="397" rx="10" fill="#f6eee3"/>
       <use xlink:href="#window-buttons" fill="#a27867" opacity=".57"/>
       <use xlink:href="#sidebar-chrome"/>
       <text x="19" y="60.5" font-size="12.5">archive.org</text>

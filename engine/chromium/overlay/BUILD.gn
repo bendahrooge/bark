@@ -44,6 +44,17 @@ action("spaces_resources") {
   ]
 }
 
+if (is_mac || is_linux) {
+  source_set("factory_reset") {
+    sources = [ "factory_reset.cc", "factory_reset.h" ]
+    deps = [ "//base", "//chrome/common" ]
+    if (is_mac) {
+      sources += [ "factory_reset_mac.h", "factory_reset_mac.mm" ]
+      frameworks = [ "AppKit.framework" ]
+    }
+  }
+}
+
 # chrome://spaces, registered in chrome/browser/ui/webui/chrome_web_ui_configs.cc.
 source_set("spaces_ui") {
   sources = [ "spaces_ui/spaces_ui.cc", "spaces_ui/spaces_ui.h" ]
@@ -62,6 +73,15 @@ source_set("spaces_ui") {
     "//content/public/common",
     "//ui/webui",
   ]
+  if (is_mac) {
+    deps += [ "//chrome/browser/ui/webui:profile_helper" ]
+  }
+  if (is_mac || is_linux) {
+    deps += [
+      ":factory_reset",
+      "//chrome/browser/lifetime",
+    ]
+  }
 }
 
 if (is_mac) {
@@ -170,12 +190,14 @@ if (is_mac) {
       "//chrome/browser/content_settings:content_settings_factory",
       "//chrome/browser/download",
       "//chrome/browser/history",
+      "//chrome/browser/infobars",
       "//chrome/browser/permissions",
       "//chrome/browser/profiles/keep_alive",
       "//components/bookmarks/browser",
       "//components/history/core/browser",
       "//chrome/browser/profiles:profile",
       "//chrome/browser/profiles:profile_manager",
+      "//chrome/browser/profiles:profile_util",
       "//chrome/browser/search_engines",
       "//chrome/browser/sessions",
       "//chrome/browser/themes",
@@ -188,6 +210,7 @@ if (is_mac) {
       "//chrome/browser/ui/page_info",
       "//chrome/browser/ui/startup/default_browser_prompt",
       "//chrome/browser/ui/views/infobars",
+      "//chrome/browser/ui/webui:profile_helper",
       "//chrome/browser/ui:recently_audible_helper",
       "//chrome/browser/ui/navigator",
       "//chrome/browser/ui/tabs:tab_strip",

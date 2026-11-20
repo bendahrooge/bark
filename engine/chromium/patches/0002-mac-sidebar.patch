@@ -33,10 +33,10 @@ index f1d133b6cd..6f0ad588a4 100644
      framework_contents = [
        "Helpers",
 diff --git a/chrome/browser/ui/views/bubble_anchor_util_views.cc b/chrome/browser/ui/views/bubble_anchor_util_views.cc
-index c9a9e72e45..83ac9d16ef 100644
+index 97995fe..2121448 100644
 --- a/chrome/browser/ui/views/bubble_anchor_util_views.cc
 +++ b/chrome/browser/ui/views/bubble_anchor_util_views.cc
-@@ -37,6 +37,14 @@ AnchorConfiguration GetPageInfoAnchorConfiguration(
+@@ -99,6 +99,14 @@ AnchorConfiguration GetPageInfoAnchorConfiguration(
      BrowserWindowInterface* browser,
      Anchor anchor) {
    BrowserView* browser_view = BrowserView::GetBrowserViewForBrowser(browser);
@@ -51,18 +51,18 @@ index c9a9e72e45..83ac9d16ef 100644
    auto* location_bar_view =
        browser_view ? browser_view->GetLocationBarView() : nullptr;
  
-@@ -130,6 +138,11 @@ AnchorConfiguration GetPermissionPromptBubbleAnchorConfiguration(
-       tab ? tab->GetBrowserWindowInterface()
-           : webui::GetBrowserWindowInterface(web_contents);
+@@ -197,6 +205,11 @@ AnchorConfiguration GetPermissionPromptBubbleAnchorConfiguration(
+
+   BrowserWindowInterface* browser = GetBrowserForWebContents(web_contents);
    if (browser) {
 +#if BUILDFLAG(IS_MAC)
 +    auto* browser_view = BrowserView::GetBrowserViewForBrowser(browser);
 +    if (browser_view && browser_view->GetBarkToolbarAnchor(false))
 +      return GetPageInfoAnchorConfiguration(browser);
 +#endif
-     LocationBar* location_bar =
-         location_bar::GetLocationBarForWebContents(web_contents);
-     ChipController* chip_controller =
+     // Overridden location bars are handled above, so use the window's own
+     // location bar. This includes non-tab WebUIs embedded in the window (e.g.
+     // the omnibox popup), for which `GetLocationBarForWebContents()` returns
 diff --git a/chrome/browser/ui/views/extensions/extensions_toolbar_button.cc b/chrome/browser/ui/views/extensions/extensions_toolbar_button.cc
 index a36455069d..0e60179f9f 100644
 --- a/chrome/browser/ui/views/extensions/extensions_toolbar_button.cc
@@ -152,7 +152,7 @@ index 07ff3566c1..c4ab76aa56 100644
        ":immersive_mode_overlay_views_mac",
        "//chrome/browser:global_keyboard_shortcuts_mac",
 diff --git a/chrome/browser/ui/views/frame/browser_view.cc b/chrome/browser/ui/views/frame/browser_view.cc
-index d441b8a76b..81489b1980 100644
+index 0dabb77..ac24bc8 100644
 --- a/chrome/browser/ui/views/frame/browser_view.cc
 +++ b/chrome/browser/ui/views/frame/browser_view.cc
 @@ -4,6 +4,10 @@
@@ -166,7 +166,7 @@ index d441b8a76b..81489b1980 100644
  #include <stdint.h>
  
  #include <algorithm>
-@@ -1108,6 +1112,9 @@ BrowserView::BrowserView(BrowserWindowInterface* browser)
+@@ -1122,6 +1126,9 @@ BrowserView::BrowserView(BrowserWindowInterface* browser)
  }
  
  BrowserView::~BrowserView() {
@@ -176,7 +176,7 @@ index d441b8a76b..81489b1980 100644
    // Remove the layout manager to avoid dangling. This needs to be earlier than
    // other cleanups that destroy views referenced in the layout manager.
    SetLayoutManager(nullptr);
-@@ -1425,6 +1432,9 @@ bool BrowserView::ShouldDrawTabStrokes() const {
+@@ -1453,6 +1460,9 @@ bool BrowserView::ShouldDrawTabStrokes() const {
  }
  
  bool BrowserView::ShouldDrawTabStrip() const {
@@ -186,7 +186,7 @@ index d441b8a76b..81489b1980 100644
    // Return false if this window does not normally display a tabstrip or if the
    // tabstrip is currently hidden, e.g. because we're in fullscreen.
    if (!WindowFeatureController::From(browser_)->SupportsWindowFeature(
-@@ -2347,6 +2357,19 @@ PinnedToolbarActions* BrowserView::GetPinnedToolbarActions() {
+@@ -2418,6 +2428,19 @@ PinnedToolbarActions* BrowserView::GetPinnedToolbarActions() {
  }
  
  void BrowserView::SetFocusToLocationBar(bool is_user_initiated) {
@@ -206,7 +206,7 @@ index d441b8a76b..81489b1980 100644
    // On Windows, changing focus to the location bar causes the browser window to
    // become active. This can steal focus if the user has another window open
    // already. On Chrome OS, changing focus makes a view believe it has a focus
-@@ -3062,6 +3085,8 @@ void BrowserView::DisableTabStripEditingForTesting() {
+@@ -3135,6 +3158,8 @@ void BrowserView::DisableTabStripEditingForTesting() {
  
  bool BrowserView::IsToolbarVisible() const {
  #if BUILDFLAG(IS_MAC)
@@ -215,7 +215,7 @@ index d441b8a76b..81489b1980 100644
    // Immersive full screen makes it possible to display the toolbar when
    // kShowFullscreenToolbar is not set.
    if (!WindowFeatureController::From(browser())
-@@ -3088,6 +3113,10 @@ bool BrowserView::IsToolbarShowing() const {
+@@ -3161,6 +3186,10 @@ bool BrowserView::IsToolbarShowing() const {
  }
  
  bool BrowserView::IsLocationBarVisible() const {
@@ -226,7 +226,7 @@ index d441b8a76b..81489b1980 100644
    return WindowFeatureController::From(browser_)->SupportsWindowFeature(
               WindowFeatureController::WindowFeature::kFeatureLocationBar) &&
           GetLocationBar()->IsVisible();
-@@ -4824,7 +4853,14 @@ int BrowserView::NonClientHitTest(const gfx::Point& point) {
+@@ -4912,7 +4941,14 @@ int BrowserView::NonClientHitTest(const gfx::Point& point) {
  
  gfx::Size BrowserView::GetMinimumSize() const {
    auto* const layout = GetBrowserViewLayout();
@@ -242,7 +242,7 @@ index d441b8a76b..81489b1980 100644
  }
  
  ///////////////////////////////////////////////////////////////////////////////
-@@ -4883,6 +4919,9 @@ void BrowserView::Layout(PassKey) {
+@@ -4976,6 +5012,9 @@ void BrowserView::Layout(PassKey) {
    }
  
    LayoutSuperclass<views::View>(this);
@@ -252,21 +252,21 @@ index d441b8a76b..81489b1980 100644
  
    // TODO(jamescook): Why was this in the middle of layout code?
    toolbar_->location_bar()->UpdateFocusBehavior(IsToolbarVisible());
-@@ -5172,8 +5211,23 @@ void BrowserView::AddedToWidget() {
-       kFallbackPopupAnchorElementId, *this);
- 
-   initialized_ = true;
+@@ -5279,8 +5318,23 @@ void BrowserView::AddedToWidget() {
+           views::features::kSkipRedundantSetNativeThemeUpdate)) {
+     FrameColorsChanged();
+   }
 +#if BUILDFLAG(IS_MAC)
 +  if (bark::SidebarMac::IsEnabled(browser()))
 +    bark_sidebar_ = std::make_unique<bark::SidebarMac>(this);
 +#endif
- }
- 
++}
++
 +#if BUILDFLAG(IS_MAC)
 +int BrowserView::GetBarkSidebarWidth() const {
 +  return bark_sidebar_ ? bark_sidebar_->width() : 0;
-+}
-+
+ }
+
 +views::View* BrowserView::GetBarkToolbarAnchor(bool extensions) const {
 +  return bark_sidebar_ && !IsFullscreen()
 +             ? bark_sidebar_->bubble_anchor(extensions) : nullptr;

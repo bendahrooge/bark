@@ -104,6 +104,18 @@ try {
   await command('advancedSettings', {windowId: window.windowId, text: 'privacy'});
   await waitFor(state => visible(state)?.tabs.some(tab => tab.active && tab.url === 'chrome://settings/privacy'), 'advanced settings route');
   report.checks.push('Advanced privacy controls still open the full Chromium settings page');
+  await command('showFactoryReset', {windowId: window.windowId});
+  await waitFor(state => visible(state)?.tabs.some(tab => tab.active &&
+    tab.url === 'chrome://spaces/#factory-reset'), 'factory reset confirmation route');
+  report.checks.push('General settings opens the confirmation for resetting every profile');
+  const onlyProfile = window.profileId;
+  await command('deleteProfile', {windowId: window.windowId, text: '../Default'});
+  assert.equal(visible(await command()).profiles[0].id, onlyProfile);
+  await command('deleteProfile', {windowId: window.windowId, text: onlyProfile});
+  state = await waitFor(state => visible(state)?.activeSpaceId && visible(state).profileId !== onlyProfile &&
+    visible(state).profiles.length === 1, 'new profile after deleting the last profile');
+  assert.ok(visible(state).spaces.every(space => space.profile === visible(state).profileId));
+  report.checks.push('Unknown profile IDs are ignored and deleting the only profile opens a fresh profile and Space');
   await browser.close(); browser = null;
   report.passed = true;
   console.log(`${report.checks.length} focused native preferences checks passed`);

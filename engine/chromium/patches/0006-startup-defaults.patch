@@ -21,11 +21,11 @@ index d1fcd93ded..e63832c66a 100644
  #if !BUILDFLAG(IS_ANDROID) && !BUILDFLAG(IS_CHROMEOS)
    registry->RegisterBooleanPref(
 diff --git a/chrome/browser/ui/startup/first_run_service.cc b/chrome/browser/ui/startup/first_run_service.cc
-index 7e1709c674..2baf9f0f7f 100644
+index 0ab672a..94df344 100644
 --- a/chrome/browser/ui/startup/first_run_service.cc
 +++ b/chrome/browser/ui/startup/first_run_service.cc
-@@ -32,7 +32,7 @@
- #include "content/public/browser/browser_context.h"
+@@ -34,7 +34,7 @@
+ #include "content/public/browser/browser_thread.h"
  
  namespace {
 -bool IsFirstRunEligibleProfile(Profile* profile) {
@@ -33,7 +33,7 @@ index 7e1709c674..2baf9f0f7f 100644
    if (profile->IsOffTheRecord()) {
      return false;
    }
-@@ -46,7 +46,7 @@ bool IsFirstRunEligibleProfile(Profile* profile) {
+@@ -48,7 +48,7 @@ bool IsFirstRunEligibleProfile(Profile* profile) {
    return true;
  }
  
@@ -42,7 +42,7 @@ index 7e1709c674..2baf9f0f7f 100644
    if (!first_run::IsChromeFirstRun()) {
      return false;
    }
-@@ -295,6 +295,8 @@ FirstRunServiceFactory::BuildServiceInstanceForBrowserContext(
+@@ -310,6 +310,8 @@ FirstRunServiceFactory::BuildServiceInstanceForBrowserContext(
  // Helpers ---------------------------------------------------------------------
  
  bool ShouldOpenFirstRun(Profile* profile) {

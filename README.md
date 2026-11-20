@@ -1,9 +1,9 @@
-![Bark — A calmer place to browse.](docs/assets/cover.svg)
+![Bark — A better place to browse. Three overlapping windows show the Studio, Library, and Garden Spaces.](docs/assets/banner-concepts/spaces.svg)
 
 # Bark
 
 [![GitHub stars](https://img.shields.io/github/stars/bendahrooge/bark?style=flat&color=789b72)](https://github.com/bendahrooge/bark/stargazers)
-[![README views](https://hits.dwyl.com/bendahrooge/bark.svg?style=flat-square)](https://hits.dwyl.com/bendahrooge/bark)
+[![Total release downloads](https://img.shields.io/github/downloads/bendahrooge/bark/total?style=flat&color=789b72)](https://github.com/bendahrooge/bark/releases)
 
 **[Download the latest release](https://github.com/bendahrooge/bark/releases/latest)**
 

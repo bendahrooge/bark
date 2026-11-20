@@ -1,15 +1,16 @@
 diff --git a/chrome/browser/ui/browser_actions.cc b/chrome/browser/ui/browser_actions.cc
+index 66af63a..3c8a282 100644
 --- a/chrome/browser/ui/browser_actions.cc
 +++ b/chrome/browser/ui/browser_actions.cc
-@@ -70,6 +70,7 @@
+@@ -72,6 +72,7 @@
  #include "ui/base/interaction/element_tracker.h"
- #include "ui/base/window_open_disposition.h"
+ #include "ui/base/mojom/window_open_disposition.mojom.h"
  #if BUILDFLAG(IS_MAC)
 +#include "bark/browser_hooks.h"
  #include "chrome/browser/global_keyboard_shortcuts_mac.h"
  #include "chrome/browser/ui/browser_commands_mac.h"
  #endif
-@@ -1356,6 +1357,11 @@
+@@ -1424,6 +1425,11 @@ void BrowserActions::InitializeChromeMenuActions() {
            base::BindRepeating(
                [](BrowserWindowInterface* bwi, actions::ActionItem* item,
                   actions::ActionInvocationContext context) {
@@ -18,9 +19,9 @@ diff --git a/chrome/browser/ui/browser_actions.cc b/chrome/browser/ui/browser_ac
 +                  return;
 +                }
 +#endif
-                 chrome::NewTab(bwi, NewTabTypes::kNewTabCommand);
-               },
-               bwi))
+                 const NewTabTypes new_tab_type =
+                     context.GetProperty(chrome::kActionInvocationSourceKey) ==
+                             chrome::ActionInvocationSource::kViewButton
 diff --git a/chrome/browser/ui/browser_command_controller.cc b/chrome/browser/ui/browser_command_controller.cc
 --- a/chrome/browser/ui/browser_command_controller.cc
 +++ b/chrome/browser/ui/browser_command_controller.cc

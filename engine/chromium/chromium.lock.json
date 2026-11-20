@@ -2,27 +2,27 @@
   "schema": 1,
   "channel": "Stable",
   "reference_platform": "Mac",
-  "version": "158.0.8127.37",
-  "revision": "b8c2be851f62f6a394ec57955d7f31335d7cb6d4",
+  "version": "159.0.8154.13",
+  "revision": "4d790f9eb4c8abe65b8aaa3feba664e7c734ba56",
   "depot_tools_revision": "c4cdaeebba9b9ed92d041997317ffdbd042158ac",
   "upstream": "https://chromium.googlesource.com/chromium/src.git",
   "depot_tools": "https://chromium.googlesource.com/chromium/tools/depot_tools.git",
   "patches": [
     {
       "file": "0001-identity.patch",
-      "sha256": "a5483ccb131ba846975520776f0554fb3c4afab656f47b362a9466c20d7a89ce"
+      "sha256": "9c54d95f41e24a44d5f86751a667ec273f500a9f0d33db46f1af6fb999718e60"
     },
     {
       "file": "0002-mac-sidebar.patch",
-      "sha256": "35dab0a6816ff7f6998332e00392d52ed2afc79e0b64d4688c5af95c072deb97"
+      "sha256": "2478083310ff4482d76b45659b4a60d27eaa579ee806feb1e662d7ac7d1a9b19"
     },
     {
       "file": "0003-branding.patch",
-      "sha256": "b8ee454e3da047b8c3982da3cc019c1828ddc905a83f98125801a4d36cbae4da"
+      "sha256": "e6b3a134f2106a267e034dae3a13b034e6c06a8d9e4e8e2f3601fb0c34cec21a"
     },
     {
       "file": "0004-spaces-sessions.patch",
-      "sha256": "b688f13163f0168f1ba55840a71e7c3fa3d8f542232c8713a9c7df1058df6a56"
+      "sha256": "2edfe66228977f2789352d7657c7d3d8aff575652d70c6cc4b74b5bbbe3139d0"
     },
     {
       "file": "0005-extensions.patch",
@@ -30,15 +30,15 @@
     },
     {
       "file": "0006-startup-defaults.patch",
-      "sha256": "86fc6ee0f2459d654fbc02194d1aa9d187042b1e7fccbf06cfa398166b30a7c8"
+      "sha256": "58c2606cf1a19aea5918b38b95841ea11ae0d9886f358e37d8dc3aa96d56eaa2"
     },
     {
       "file": "0007-spaces-settings-page.patch",
-      "sha256": "ca7de4595938895ce759a4c7ae2a65f428da08b72a12863c13d27c1b618205de"
+      "sha256": "391ef997f3efef8f0389c8753172e82dcada8e0b8eae37b7d5812cb10c650e0d"
     },
     {
       "file": "0008-bark-about-updates.patch",
-      "sha256": "4aac734314c7475c580fa30901fb6025e8d87493f4634a19a2e64209426d7652"
+      "sha256": "82097f7c1598a78f9c9041a26f11c08f5d854f4d91979e3f3e8e6c4500ff6cf0"
     },
     {
       "file": "0009-immediate-quit.patch",
@@ -46,11 +46,11 @@
     },
     {
       "file": "0010-lazy-pinned-tabs.patch",
-      "sha256": "de9c2a19739c93f3b09069134e279cf33a070ed86cd344d31b5fef347e413f19"
+      "sha256": "f20a25ae53b8ab33cd94d1e1bde3e598502078a7b8deee07f10c6882d28be64a"
     },
     {
       "file": "0011-close-pins-without-removing.patch",
-      "sha256": "bfeb9f91bd9628c96c4fba28e2c4115344f44fae498122447e158b5b3b21cdb4"
+      "sha256": "3010ad86344771d9cc2acd104ccd121612c8bad16b199bd71831396f291998b7"
     },
     {
       "file": "0012-development-app-identity.patch",
@@ -62,7 +62,7 @@
     },
     {
       "file": "0014-reuse-new-tab.patch",
-      "sha256": "27f297ed81d1c11c4d8b70b28b672bae714610a28f504917573d939a01444007"
+      "sha256": "1effe1bc6da68d5b6ddbc260a4c7a6da4ab6c61e0809334d1a15a252ec66fa0f"
     },
     {
       "file": "0015-no-notification-banners.patch",
@@ -78,11 +78,11 @@
     },
     {
       "file": "0018-external-link-startup.patch",
-      "sha256": "28481c21665c9fbaf945012105039e22375031e976b6e3bfdaae3ced39caa50b"
+      "sha256": "8334370ee874f6804f58577b8c3e09d2aedd0e18aa352e46bfcd18cd9a3ceb7b"
     },
     {
       "file": "0019-remove-new-tab-promos.patch",
-      "sha256": "eace262808eba1bb3be2b38386185a5abe19a556828533b273aa22c634dd01f5"
+      "sha256": "07cca17304b9aaea981e333364a25557b1aebf46861a77d4adae3a19952444ea"
     },
     {
       "file": "0020-remove-tab-tutorial-promos.patch",
@@ -91,6 +91,18 @@
     {
       "file": "0021-release-new-tab.patch",
       "sha256": "8ed9b4826b286228bc839184b37ce972209efae884b39a677fd6ee6782d9a96c"
+    },
+    {
+      "file": "0022-profile-deletion.patch",
+      "sha256": "3e1e61d71aff4af3042f09de18df1d7142a59b4fe8fc4b2799d33719f7e2e08e"
+    },
+    {
+      "file": "0023-product-icons.patch",
+      "sha256": "2c05d31d72153dbed3a1ec790a4dbc11d70a0bdcd7e3cae1dbf2d0af0614bf5c"
+    },
+    {
+      "file": "0024-factory-reset.patch",
+      "sha256": "4ba791a4de6433a6a0a3f7b98235eddeabf081c624a8cfe01b2fc0eedb10a98b"
     }
   ]
 }

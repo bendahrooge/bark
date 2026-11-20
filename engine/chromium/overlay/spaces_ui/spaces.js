@@ -222,10 +222,26 @@ function profileRow(profile) {
     },
   });
   const count = profile.spaces === 1 ? '1 space' : `${profile.spaces} spaces`;
-  return element('div', {class: 'row profile'}, [
+  const row = element('div', {class: 'row profile'}, [
     name,
     element('span', {class: 'count', text: count}),
   ]);
+  if (state.canDeleteProfiles) {
+    row.append(element('cr-icon-button', {
+      'iron-icon': 'cr:delete',
+      title: 'Delete profile',
+      'aria-label': `Delete profile ${profile.name}`,
+      'data-focus-key': `delete-profile-${profile.id}`,
+      onclick: async () => {
+        const message = 'This permanently deletes this profile’s Spaces, tabs, bookmarks, saved passwords, and browsing history from this Mac.';
+        const detail = state.profiles.length === 1 ? message + ' Bark will open a new, empty profile.' : message;
+        if (await confirmAction(`Delete “${profile.name}”?`, detail, 'Delete Profile')) {
+          chrome.send('deleteProfile', [profile.id]);
+        }
+      },
+    }));
+  }
+  return row;
 }
 
 function render() {
@@ -238,6 +254,7 @@ function render() {
     spaces.append(element('div', {class: 'empty', text: 'No spaces yet.'}));
   }
   $('profiles').replaceChildren(...state.profiles.map(profileRow));
+  $('factory-reset').hidden = !state.canFactoryReset;
 
   if (focused) {
     const target = document.querySelector(`[data-focus-key="${CSS.escape(focused)}"]`);
@@ -275,5 +292,33 @@ $('newProfile').addEventListener('keydown', event => {
 });
 $('addProfile').addEventListener('click', addProfile);
 
+async function showFactoryReset() {
+  if (!state.canFactoryReset || $('resetBark').disabled || $('deleteDialog').open) return;
+  const confirmed = await confirmAction('Reset Bark to factory settings?',
+      'Bark will close every window and permanently erase all local spaces, profiles, tabs, ' +
+      'bookmarks, saved passwords, history, extensions, site data, and settings. ' +
+      'Files saved outside Bark’s data folder stay on disk. The next time you open Bark, it will have a fresh profile.',
+      'Erase and quit');
+  if (!confirmed) return;
+  $('resetBark').disabled = true;
+  $('resetStatus').textContent = 'Preparing to erase data and quit Bark…';
+  try {
+    if (await sendWithPromise('factoryResetRequiringGesture')) return;
+  } catch {}
+  $('resetBark').disabled = false;
+  $('resetStatus').textContent = 'Bark couldn’t start the reset. Check that its data folder is writable and try again.';
+}
+
+$('resetBark').addEventListener('click', showFactoryReset);
+function openResetFromSettings() {
+  if (location.hash === '#factory-reset' && state.canFactoryReset) {
+    $('resetBark').focus();
+    showFactoryReset();
+  }
+}
+window.addEventListener('hashchange', openResetFromSettings);
 addWebUiListener('state-changed', update);
-sendWithPromise('getState').then(update);
+sendWithPromise('getState').then(next => {
+  update(next);
+  openResetFromSettings();
+});
