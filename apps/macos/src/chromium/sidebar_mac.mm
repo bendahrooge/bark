@@ -42,6 +42,7 @@
 #include "base/strings/sys_string_conversions.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/task/bind_post_task.h"
+#include "base/task/cancelable_task_tracker.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/time/time.h"
 #include "base/timer/timer.h"
@@ -52,6 +53,8 @@
 #include "chrome/browser/browser_process.h"
 #include "chrome/browser/content_settings/host_content_settings_map_factory.h"
 #include "chrome/browser/download/download_prefs.h"
+#include "chrome/browser/favicon/favicon_service_factory.h"
+#include "chrome/browser/history/history_service_factory.h"
 #include "chrome/browser/infobars/confirm_infobar_creation_allowlist.h"
 #include "chrome/browser/search_engines/template_url_service_factory.h"
 #include "chrome/common/pref_names.h"
@@ -106,8 +109,9 @@
 #include "components/content_settings/core/common/content_settings_types.h"
 #include "components/download/content/public/all_download_item_notifier.h"
 #include "components/download/public/common/download_item.h"
+#include "components/favicon/core/favicon_service.h"
+#include "components/history/core/browser/history_service.h"
 #include "content/public/browser/download_manager.h"
-#include "components/favicon/content/content_favicon_driver.h"
 #include "components/infobars/content/content_infobar_manager.h"
 #include "components/infobars/core/confirm_infobar_delegate.h"
 #include "components/infobars/core/infobar.h"
@@ -168,6 +172,7 @@ void BarkSwiftSidebarComposeAddress(void*);
 void BarkSwiftSidebarDismissAddress(void*);
 bool BarkSwiftSidebarAddressVisible(void*);
 void BarkSwiftSidebarOpenSuggestion(void*, const char*);
+void BarkSwiftSidebarSelectSpace(void*, const char*);
 void BarkSwiftSidebarShowPreferences(void*);
 void BarkSwiftSidebarDestroy(void*);
 void* BarkSwiftSidebarHeaderCreate(void*);
@@ -232,6 +237,7 @@ namespace {
 constexpr NSString* kSidebarWidth = @"BarkChromium.SidebarWidth";
 constexpr NSString* kSidebarCollapsed = @"BarkChromium.SidebarCollapsed";
 constexpr char kSavedSessionTitle[] = "bark.saved_session_title";
+constexpr char kCheckedPinHistory[] = "bark.checked_pin_history";
 struct SavedSessionTitle : base::SupportsUserData::Data {
   int navigation_id = 0;
   std::u16string title;
@@ -245,6 +251,15 @@ struct WindowGroup {
   bool user_presented = false;
   // True while a space switch cross-fades between this group's windows.
   int transitions = 0;
+  // A new gesture can end on the outgoing profile's window before or just
+  // after the incoming window takes over the same screen position.
+  struct SwipeHandoff {
+    int source_window;
+    std::string landing_space;
+    std::string next_space;
+    bool tracking = false;
+  };
+  std::optional<SwipeHandoff> swipe_handoff;
 };
 
 // A profile window that a space switch is about to open. It starts invisible
@@ -340,6 +355,23 @@ class BarkNoticeTestDelegate : public ConfirmInfoBarDelegate {
 
 bool IsBlankPage(const GURL& url) {
   return !url.is_valid() || url.IsAboutBlank() || (url.SchemeIs("chrome") && url.host() == "newtab");
+}
+
+std::string FaviconPNG(content::NavigationEntry* entry, size_t max_bytes) {
+  if (!entry) return {};
+  const auto& icon = entry->GetFavicon();
+  if (!icon.valid || icon.image.IsEmpty()) return {};
+  auto png = icon.image.As1xPNGBytes();
+  return png && png->size() <= max_bytes ? base::Base64Encode(*png) : std::string();
+}
+
+const base::DictValue* CachedPinPage(const base::DictValue& meta, const GURL& url) {
+  for (const char* key : {"pinPage", "visitedPage"}) {
+    const auto* page = meta.FindDict(key);
+    const auto* spec = page ? page->FindString("url") : nullptr;
+    if (spec && url.EqualsIgnoringRef(GURL(*spec))) return page;
+  }
+  return nullptr;
 }
 
 // Navigate shows a new popup before returning, even with kNoAction. Keep
@@ -443,6 +475,10 @@ class SidebarMac::Impl : public TabStripModelObserver,
   }
 
   ~Impl() override {
+    if (group_->swipe_handoff &&
+        (group_->swipe_handoff->source_window == view_->browser()->GetSessionID().id() ||
+         (revealing_ && group_->swipe_handoff->landing_space == active_space_)))
+      group_->swipe_handoff.reset();
     std::erase(Instances(), this);
     ClearPromotionCover();
     for (auto& popup : popups_) {
@@ -655,6 +691,7 @@ class SidebarMac::Impl : public TabStripModelObserver,
     QueueGroupSnapshot();
   }
   void OnTabChangedAt(tabs::TabInterface* tab, TabChangeType) override {
+    if (tab->IsPinned()) RememberPinnedPage(tab->GetContents(), true);
     PersistTitle(tab->GetContents());
     QueueGroupSnapshot();
   }
@@ -666,10 +703,12 @@ class SidebarMac::Impl : public TabStripModelObserver,
       EditTabMeta(contents, [](base::DictValue& meta) {
         const bool url = meta.Remove("pinnedURL");
         const bool folder = meta.Remove("folder");
-        return url || folder;
+        const bool home = meta.Remove("pinPage");
+        const bool visited = meta.Remove("visitedPage");
+        return url || folder || home || visited;
       });
     } else {
-      RememberPinnedURL(contents);
+      RememberPinnedPage(contents, true);
     }
     QueueGroupSnapshot();
   }
@@ -1274,6 +1313,10 @@ class SidebarMac::Impl : public TabStripModelObserver,
       auto state = host->MakeSnapshot();
       if (const auto* action = request.FindString("action"); action && *action == "testCommandSuggestions")
         state.Set("commandSuggestions", host->CommandSuggestions(request.FindString("text") ? *request.FindString("text") : ""));
+      if (const auto* action = request.FindString("action"); action && *action == "testOpenTabSuggestions") {
+        const auto* query = request.FindString("text");
+        state.Set("openTabSuggestions", host->MatchOpenTabs(query ? *query : ""));
+      }
       state.Set("windowId", host->view_->browser()->GetSessionID().id());
       state.Set("lastNoticeAction", host->test_notice_action_);
       state.Set("windowGroup", host->group_->id);
@@ -1494,7 +1537,7 @@ class SidebarMac::Impl : public TabStripModelObserver,
     auto meta = ReadTabMeta(contents);
     if (!edit(meta)) return false;
     auto json = base::WriteJson(meta);
-    if (!json) return false;
+    if (!json || json->size() > kMaxTabMetaBytes) return false;
     SetTabMeta(contents, meta.empty() ? std::string() : *json);
     if (auto* session = SessionServiceFactory::GetForProfileIfExisting(view_->GetProfile())) {
       if (auto* helper = sessions::SessionTabHelper::FromWebContents(contents))
@@ -1513,15 +1556,91 @@ class SidebarMac::Impl : public TabStripModelObserver,
   }
   // Pins made before Bark remembered URLs, or pinned on a blank page, take
   // the first real page they show.
-  void RememberPinnedURL(content::WebContents* contents) {
+  void RememberPinnedPage(content::WebContents* contents, bool refresh) {
     const GURL url = PageURL(contents);
     if (IsBlankPage(url)) return;
     EditTabMeta(contents, [&](base::DictValue& meta) {
-      if (meta.FindString("pinnedURL")) return false;
-      meta.Set("pinnedURL", url.spec());
+      const bool new_pin = !meta.FindString("pinnedURL");
+      if (new_pin) meta.Set("pinnedURL", url.spec());
+      if (!new_pin && !refresh && CachedPinPage(meta, url)) return false;
+      auto* entry = contents->GetController().GetLastCommittedEntry();
+      if (!entry || entry->GetPageType() == content::PAGE_TYPE_ERROR ||
+          !entry->GetVirtualURL().EqualsIgnoringRef(url))
+        return new_pin;
+
+      // Keep the home page when a pin navigates away. Closing the session
+      // returns to it, even when its navigation entry has lost its favicon.
+      const bool home = url.EqualsIgnoringRef(GURL(*meta.FindString("pinnedURL")));
+      const char* key = home ? "pinPage" : "visitedPage";
+      const auto* saved = CachedPinPage(meta, url);
+      base::DictValue page = saved ? saved->Clone() : base::DictValue();
+      // A restored entry can receive older, URL-wide data from history.
+      // Only a live page replaces what this particular pin last displayed.
+      const bool dormant = IsDormantPin(contents);
+      if (!entry->GetTitle().empty() && (!dormant || !page.contains("title"))) {
+        const auto title = base::UTF16ToUTF8(entry->GetTitle());
+        page.Set("title", base::TruncateUTF8ToByteSize(title, 4096));
+      }
+      if (!dormant || !page.contains("favicon")) {
+        auto icon = FaviconPNG(entry, 4096);
+        if (!icon.empty()) page.Set("favicon", std::move(icon));
+      }
+      if (page.empty()) return new_pin;
+      page.Set("url", url.spec());
+      const bool cleared = home && meta.Remove("visitedPage");
+      const auto* previous = meta.FindDict(key);
+      if (previous && *previous == page) return new_pin || cleared;
+      meta.Set(key, std::move(page));
       return true;
     });
   }
+  // A history result may arrive after a pin has opened, moved, or been removed.
+  static content::NavigationEntry* DormantEntryForURL(content::WebContents* contents,
+                                                       const GURL& url) {
+    if (!contents || !IsDormantPin(contents)) return nullptr;
+    auto* tab = tabs::TabInterface::MaybeGetFromContents(contents);
+    if (!tab || !tab->IsPinned()) return nullptr;
+    auto* entry = contents->GetController().GetLastCommittedEntry();
+    return entry && entry->GetVirtualURL() == url ? entry : nullptr;
+  }
+
+  // Older profiles saved only the URL. Look up missing fields in this
+  // profile's local history once, without starting a navigation.
+  void BackfillPinnedPage(content::WebContents* contents) {
+    if (contents->GetUserData(kCheckedPinHistory) || !IsDormantPin(contents)) return;
+    auto* entry = contents->GetController().GetLastCommittedEntry();
+    if (!entry || IsBlankPage(entry->GetVirtualURL())) return;
+    contents->SetUserData(kCheckedPinHistory, std::make_unique<base::SupportsUserData::Data>());
+    const GURL url = entry->GetVirtualURL();
+    const auto meta = ReadTabMeta(contents);
+    const auto* page = CachedPinPage(meta, url);
+    auto* profile = view_->GetProfile();
+    if (entry->GetTitle().empty() && !(page && page->FindString("title"))) {
+      if (auto* service = HistoryServiceFactory::GetForProfile(profile, ServiceAccessType::IMPLICIT_ACCESS)) {
+        service->QueryURL(url, base::BindOnce([](base::WeakPtr<content::WebContents> tab,
+            const GURL& url, history::QueryURLResult result) {
+          auto* entry = DormantEntryForURL(tab.get(), url);
+          if (entry && entry->GetTitle().empty() && result.success && !result.row.title().empty())
+            tab->UpdateTitleForEntry(entry, result.row.title());
+        }, contents->GetWeakPtr(), url), &pin_history_tasks_);
+      }
+    }
+    if (!entry->GetFavicon().valid && !(page && page->FindString("favicon"))) {
+      if (auto* favicons = FaviconServiceFactory::GetForProfile(profile, ServiceAccessType::IMPLICIT_ACCESS)) {
+        favicons->GetFaviconImageForPageURL(url, base::BindOnce([](base::WeakPtr<content::WebContents> tab,
+            const GURL& url, const favicon_base::FaviconImageResult& result) {
+          auto* entry = DormantEntryForURL(tab.get(), url);
+          if (!entry || entry->GetFavicon().valid || result.image.IsEmpty()) return;
+          auto& icon = entry->GetFavicon();
+          icon.valid = true;
+          icon.url = result.icon_url;
+          icon.image = result.image;
+          tab->NotifyNavigationStateChanged(content::INVALIDATE_TYPE_TAB);
+        }, contents->GetWeakPtr(), url), &pin_history_tasks_);
+      }
+    }
+  }
+
   // A pinned tab that navigated away from the page it was pinned on.
   static bool Drifted(content::WebContents* contents, const base::DictValue& meta) {
     const auto* pinned = meta.FindString("pinnedURL");
@@ -2434,6 +2553,7 @@ class SidebarMac::Impl : public TabStripModelObserver,
       if (host->group_ == group_ && !host->view_->browser()->IsDeleteScheduled()) {
         if (widget) widget->SetVisibilityChangedAnimationsEnabled(false);
         host->view_->browser()->GetWindow()->Hide();
+        host->AwaitSpaceSwipeRelease();
         if (widget) widget->SetVisibilityChangedAnimationsEnabled(true);
       }
       if (widget) widget->SetOpacity(1.f);
@@ -2442,6 +2562,55 @@ class SidebarMac::Impl : public TabStripModelObserver,
     reveal_outgoing_.clear();
     group_->transitions = std::max(0, group_->transitions - 1);
     RememberActiveSpace();
+    ScheduleSpaceSwipe();
+  }
+  void ScheduleSpaceSwipe() {
+    // Swift posts gesture commands on this same UI task runner. A candidate
+    // that started just before Hide() gets to register before we consume its queue.
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
+        FROM_HERE, base::BindOnce(&Impl::ContinueSpaceSwipe, weak_factory_.GetWeakPtr()));
+  }
+  void AwaitSpaceSwipeRelease() {
+    const auto& handoff = group_->swipe_handoff;
+    if (!handoff || !handoff->tracking || handoff->source_window != view_->browser()->GetSessionID().id()) return;
+    // AppKit can omit the final event when a gesture's window is hidden.
+    swipe_release_timeout_.Start(FROM_HERE, base::Seconds(3), base::BindOnce(
+        &Impl::UpdateSpaceSwipe, weak_factory_.GetWeakPtr(), handoff->landing_space, false, nullptr));
+  }
+  // Run the follow-up on the sidebar that actually owns the visible Space.
+  void ContinueSpaceSwipe() {
+    auto& handoff = group_->swipe_handoff;
+    if (!handoff || handoff->tracking || handoff->next_space.empty() || group_->closing || group_->transitions ||
+        handoff->landing_space != active_space_ || !view_->browser()->GetWindow()->IsVisible() ||
+        view_->browser()->IsDeleteScheduled() || handoff->source_window == view_->browser()->GetSessionID().id())
+      return;
+    const std::string next = std::move(handoff->next_space);
+    handoff.reset();
+    if (!tabs_ || tabs_->closing_all() || !SpaceBelongsHere(active_space_) || catalog_.IsHidden(active_space_) ||
+        !catalog_.Find(next) || catalog_.IsHidden(next)) return;
+    Snapshot();
+    BarkSwiftSidebarSelectSpace(swift_, next.c_str());
+  }
+  void UpdateSpaceSwipe(const std::string& after, bool tracking, const std::string* next) {
+    auto& handoff = group_->swipe_handoff;
+    if (!handoff || handoff->source_window != view_->browser()->GetSessionID().id() ||
+        handoff->landing_space != after) return;
+    // The outgoing host can still own a finger gesture when the cover is
+    // hidden. Its release may replace the destination queued by an earlier swipe.
+    swipe_release_timeout_.Stop();
+    handoff->tracking = tracking;
+    if (tracking) {
+      if (!view_->browser()->GetWindow()->IsVisible()) AwaitSpaceSwipeRelease();
+      return;
+    }
+    if (next && catalog_.Find(*next) && !catalog_.IsHidden(*next))
+      handoff->next_space = *next == after ? std::string() : *next;
+    // FinishReveal handles a gesture received while this window still covers
+    // the destination. An already-posted command may also arrive after Hide().
+    if (!view_->browser()->GetWindow()->IsVisible()) {
+      for (auto* host : Instances())
+        if (host->group_ == group_ && host != this) host->ScheduleSpaceSwipe();
+    }
   }
   // A new switch first completes any switch still in progress in the group.
   void SettleReveals() {
@@ -2494,7 +2663,10 @@ class SidebarMac::Impl : public TabStripModelObserver,
       auto* contents = tabs_->GetWebContentsAt(i);
       if (!IsFavorite(contents) && !SpaceBelongsHere(GetTabSpace(contents))) AssignTab(contents, active_space_);
       else if (GetTabWindowGroup(contents) != group_->id) PersistTab(contents);
-      if (tabs_->IsTabPinned(i)) RememberPinnedURL(contents);
+      if (tabs_->IsTabPinned(i)) {
+        RememberPinnedPage(contents, false);
+        BackfillPinnedPage(contents);
+      }
     }
     if (auto* active = tabs_->GetActiveWebContents()) {
       const std::string space = GetTabSpace(active);
@@ -2507,6 +2679,8 @@ class SidebarMac::Impl : public TabStripModelObserver,
   }
   void SelectLocalSpace(const std::string& id) {
     if (!tabs_ || tabs_->closing_all() || !SpaceBelongsHere(id) || catalog_.IsHidden(id)) return;
+    if (group_->swipe_handoff && group_->swipe_handoff->landing_space != id)
+      group_->swipe_handoff.reset();
     AdoptTabs();
     if (id != active_space_) just_closed_pin_.reset();
     OpenPendingTabs(id);
@@ -2519,11 +2693,6 @@ class SidebarMac::Impl : public TabStripModelObserver,
     }
     if (selection >= 0) tabs_->ActivateTabAt(selection);
     else NavigateTo(GURL("about:blank"), true);
-    // A favorite chosen from another profile's window.
-    if (const int favorite = std::exchange(pending_favorite_, -1); favorite >= 0) {
-      const int index = FindTab(favorite);
-      if (tabs_->ContainsIndex(index) && IsFavorite(tabs_->GetWebContentsAt(index))) tabs_->ActivateTabAt(index);
-    }
     QueueSnapshot();
   }
   void SwitchSpace(const std::string& id, base::TimeDelta slide_duration = {}) {
@@ -2532,12 +2701,14 @@ class SidebarMac::Impl : public TabStripModelObserver,
     if (!space || !space->FindString("profile")) return;
     const std::string profile_key = *space->FindString("profile");
     if (profile_key == ProfileKey()) {
+      group_->swipe_handoff.reset();
       reveal_not_before_ = base::TimeTicks();
       SelectLocalSpace(id);
       return;
     }
     const base::FilePath path = ProfilePath(profile_key);
     if (path.empty()) return;
+    group_->swipe_handoff = WindowGroup::SwipeHandoff{view_->browser()->GetSessionID().id(), id, {}};
     just_closed_pin_.reset();
     reveal_not_before_ = slide_duration.is_positive()
         ? base::TimeTicks::Now() + slide_duration : base::TimeTicks();
@@ -2568,7 +2739,12 @@ class SidebarMac::Impl : public TabStripModelObserver,
     manager->CreateProfileAsync(path, base::DoNothing());
   }
   void OpenSpaceProfile(const std::string& id, Profile* profile) {
-    if (!profile) { switching_space_ = false; QueueSnapshot(); return; }
+    if (!profile) {
+      CancelSpaceHandoff(id);
+      switching_space_ = false;
+      QueueSnapshot();
+      return;
+    }
     bool separate_window = false;
     for (auto* host : Instances()) {
       if (host->view_->GetProfile() == profile && host->group_ != group_)
@@ -2581,23 +2757,34 @@ class SidebarMac::Impl : public TabStripModelObserver,
         base::BindOnce(&Impl::PresentSpace, weak_factory_.GetWeakPtr(), id),
         separate_window, false, false, profile);
   }
+  void CancelSpaceHandoff(const std::string& id) {
+    const auto& handoff = group_->swipe_handoff;
+    if (handoff && handoff->source_window == view_->browser()->GetSessionID().id() &&
+        handoff->landing_space == id) group_->swipe_handoff.reset();
+  }
   void PresentSpace(const std::string& id, BrowserWindowInterface* browser) {
     switching_space_ = false;
     PendingPresentation().reset();
-    if (!browser || browser->IsDeleteScheduled() || !tabs_ || tabs_->closing_all()) { QueueSnapshot(); return; }
+    if (!browser || browser->IsDeleteScheduled() || !tabs_ || tabs_->closing_all()) {
+      CancelSpaceHandoff(id);
+      QueueSnapshot();
+      return;
+    }
     Impl* target = nullptr;
     for (auto* host : Instances()) if (host->view_->browser() == browser) target = host;
     if (!target || target->IsPrivate() || !target->SpaceBelongsHere(id)) {
+      CancelSpaceHandoff(id);
       if (target) target->Unconceal();
       return;
     }
     // One logical Bark window owns profile-bound Chromium hosts. Never move a
     // WebContents to a different BrowserContext or copy profile storage.
-    auto previous_group = target->group_;
-    for (auto* host : Instances()) if (host->group_ == previous_group) {
-      host->group_ = group_;
-      if (host->tabs_) for (int i = 0; i < host->tabs_->count(); ++i)
-        host->PersistTab(host->tabs_->GetWebContentsAt(i));
+    if (auto previous_group = target->group_; previous_group != group_) {
+      for (auto* host : Instances()) if (host->group_ == previous_group) {
+        host->group_ = group_;
+        if (host->tabs_) for (int i = 0; i < host->tabs_->count(); ++i)
+          host->PersistTab(host->tabs_->GetWebContentsAt(i));
+      }
     }
     SettleReveals();
     std::vector<base::WeakPtr<Impl>> outgoing;
@@ -2628,13 +2815,18 @@ class SidebarMac::Impl : public TabStripModelObserver,
       browser->GetWindow()->Show();
       browser->GetWindow()->Activate();
       target->MatchWindowFrame(frame_source);
-      for (auto& host : outgoing) if (host) host->view_->browser()->GetWindow()->Hide();
+      for (auto& host : outgoing) if (host) {
+        host->view_->browser()->GetWindow()->Hide();
+        host->AwaitSpaceSwipeRelease();
+      }
       target->RememberActiveSpace();
+      target->ScheduleSpaceSwipe();
     }
     target->QueueSnapshot();
   }
   void CloseOtherHosts(BrowserWindowInterface*) {
     if (group_->closing) return;
+    group_->swipe_handoff.reset();
     if (IsProfileDirectoryScheduledForDeletion(view_->GetProfile()->GetPath())) {
       // Chromium closes all windows of the deleted profile. Keep the other
       // profiles in this logical window accessible, including hidden Spaces.
@@ -2749,6 +2941,7 @@ class SidebarMac::Impl : public TabStripModelObserver,
     auto* contents = tabs_->GetWebContentsAt(i);
     base::DictValue tab;
     tab.Set("id", sessions::SessionTabHelper::IdForTab(contents).id());
+    tab.Set("tabHandle", tabs_->GetTabAtIndex(i)->GetHandle().raw_value());
     tab.Set("title", base::UTF16ToUTF8(contents->GetTitle()));
     tab.Set("url", contents->GetVisibleURL().spec());
     tab.Set("active", active);
@@ -2760,8 +2953,19 @@ class SidebarMac::Impl : public TabStripModelObserver,
     tab.Set("muted", contents->IsAudioMuted());
     const auto meta = ReadTabMeta(contents);
     AddTabLabels(tab, meta, i);
+    auto* entry = contents->GetController().GetLastCommittedEntry();
+    auto favicon = FaviconPNG(entry, 262144);
     if (tabs_->IsTabPinned(i)) {
       const bool closed = IsDormantPin(contents);
+      const auto* page = CachedPinPage(meta, contents->GetVisibleURL());
+      if (page && (closed || contents->IsLoading())) {
+        if (closed || !entry || entry->GetTitle().empty()) {
+          if (const auto* title = page->FindString("title")) tab.Set("title", *title);
+        }
+        if (closed || favicon.empty()) {
+          if (const auto* icon = page->FindString("favicon")) favicon = *icon;
+        }
+      }
       tab.Set("sessionClosed", closed);
       if (closed && contents == just_closed_pin_.get()) tab.Set("keepVisibleAfterClose", true);
       if (const auto* pinned = meta.FindString("pinnedURL")) {
@@ -2776,16 +2980,8 @@ class SidebarMac::Impl : public TabStripModelObserver,
       const int current = tabs_->active_index();
       tab.Set("splitActive", tabs_->ContainsIndex(current) && tabs_->GetSplitForTab(current) == split);
     }
-    if (auto* driver = favicon::ContentFaviconDriver::FromWebContents(contents)) {
-      tab.Set("faviconValid", driver->FaviconIsValid());
-      gfx::Image icon = driver->GetFavicon();
-      if (!icon.IsEmpty()) {
-        auto png = icon.As1xPNGBytes();
-        if (png && png->size() <= 262144) {
-          tab.Set("favicon", base::Base64Encode(*png));
-        }
-      }
-    }
+    tab.Set("faviconValid", !favicon.empty());
+    if (!favicon.empty()) tab.Set("favicon", std::move(favicon));
     return tab;
   }
 
@@ -2889,46 +3085,33 @@ class SidebarMac::Impl : public TabStripModelObserver,
 
   // MARK: Address bar suggestions
 
-  // Hosts whose tabs this window can switch to: every space of this logical
-  // window, or only itself for a private window.
-  std::vector<Impl*> SwitchableHosts() {
-    std::vector<Impl*> hosts;
-    for (auto* host : Instances()) {
-      if (host == this || (!IsPrivate() && !host->IsPrivate() && host->group_ == group_))
-        hosts.push_back(host);
-    }
-    return hosts;
-  }
-
-  // Open tabs whose title or URL contains every typed word, most recently
-  // used first. An empty query lists recent tabs.
-  base::ListValue MatchOpenTabs(const std::string& query, size_t limit) {
+  // This strip contains the window's tabs for every Space in its current profile.
+  base::ListValue MatchOpenTabs(const std::string& query) const {
+    if (!tabs_ || tabs_->closing_all()) return {};
     const auto terms = base::SplitString(base::i18n::ToLower(base::UTF8ToUTF16(query)), u" ",
                                          base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY);
-    struct Candidate { raw_ptr<Impl> host; int index; base::TimeTicks last_active; };
+    const size_t limit = terms.empty() ? 5 : 3;
+    struct Candidate { int index; base::TimeTicks last_active; };
     std::vector<Candidate> candidates;
     auto* current = tabs_->GetActiveWebContents();
-    for (auto* host : SwitchableHosts()) {
-      if (!host->tabs_ || host->tabs_->closing_all()) continue;
-      for (int i = 0; i < host->tabs_->count(); ++i) {
-        auto* contents = host->tabs_->GetWebContentsAt(i);
-        const GURL& url = contents->GetVisibleURL();
-        if (contents == current || host->IsBlankPlaceholder(i) || url.IsAboutBlank() || url.SchemeIs("chrome")) continue;
-        const std::u16string haystack = base::i18n::ToLower(contents->GetTitle() + u" " + base::UTF8ToUTF16(url.spec()));
-        if (std::ranges::all_of(terms, [&](const auto& term) { return haystack.find(term) != std::u16string::npos; }))
-          candidates.push_back({host, i, contents->GetLastActiveTimeTicks()});
-      }
+    for (int i = 0; i < tabs_->count(); ++i) {
+      auto* contents = tabs_->GetWebContentsAt(i);
+      const GURL& url = contents->GetVisibleURL();
+      if (contents == current || IsBlankPlaceholder(i) || url.IsAboutBlank() || url.SchemeIs("chrome")) continue;
+      const std::u16string haystack = base::i18n::ToLower(contents->GetTitle() + u" " + base::UTF8ToUTF16(url.spec()));
+      if (std::ranges::all_of(terms, [&](const auto& term) { return haystack.find(term) != std::u16string::npos; }))
+        candidates.push_back({i, contents->GetLastActiveTimeTicks()});
     }
     std::ranges::sort(candidates, std::greater<>(), &Candidate::last_active);
     base::ListValue items;
     for (const auto& candidate : candidates) {
       if (items.size() >= limit) break;
-      auto item = candidate.host->TabValue(candidate.index, false);
+      auto item = TabValue(candidate.index, false);
       item.Set("kind", "tab");
       if (!IsPrivate()) {
-        auto* contents = candidate.host->tabs_->GetWebContentsAt(candidate.index);
+        auto* contents = tabs_->GetWebContentsAt(candidate.index);
         const auto* space = catalog_.Find(GetTabSpace(contents));
-        if (candidate.host->IsFavorite(contents)) item.Set("space", "Favorites");
+        if (IsFavorite(contents)) item.Set("space", "Favorites");
         else if (space && space->FindString("name")) item.Set("space", *space->FindString("name"));
       }
       items.Append(std::move(item));
@@ -3103,9 +3286,9 @@ class SidebarMac::Impl : public TabStripModelObserver,
       append_commands(kMaxSuggestions);
     } else if (!empty) {
       append_commands(3);
-      for (auto& tab : MatchOpenTabs(suggest_query_, 3)) items.Append(std::move(tab));
+      for (auto& tab : MatchOpenTabs(suggest_query_)) items.Append(std::move(tab));
     } else {
-      items = MatchOpenTabs(suggest_query_, 5);
+      items = MatchOpenTabs(suggest_query_);
       append_commands(kMaxSuggestions);
     }
     std::set<std::string> seen;
@@ -3128,40 +3311,6 @@ class SidebarMac::Impl : public TabStripModelObserver,
     message.Set("action", actions_only ? "command" : ResolveAddress(suggest_query_, view_->GetProfile()).is_search ? "search" : "navigate");
     message.Set("items", std::move(items));
     if (auto json = base::WriteJson(message)) BarkSwiftSidebarSuggestions(swift_, json->c_str());
-  }
-
-  // Activates an open tab from the address bar, switching space (and the
-  // profile window) when the tab lives in another space.
-  void SwitchToTab(int id) {
-    for (auto* host : SwitchableHosts()) {
-      if (!host->tabs_ || host->tabs_->closing_all()) continue;
-      for (int i = 0; i < host->tabs_->count(); ++i) {
-        auto* contents = host->tabs_->GetWebContentsAt(i);
-        if (sessions::SessionTabHelper::IdForTab(contents).id() != id) continue;
-        const std::string space = GetTabSpace(contents);
-        if (host->IsFavorite(contents)) {
-          // Favorites belong to no space: show the window's current space.
-          if (host == this) {
-            tabs_->ActivateTabAt(i);
-            contents->Focus();
-          } else {
-            host->pending_favorite_ = id;
-            SwitchSpace(host->active_space_);
-          }
-        } else if (host == this && (IsPrivate() || space == active_space_)) {
-          tabs_->ActivateTabAt(i);
-          contents->Focus();
-        } else if (host == this) {
-          selected_tabs_[space] = id;
-          SelectLocalSpace(space);
-          contents->Focus();
-        } else {
-          host->selected_tabs_[space] = id;
-          SwitchSpace(space);
-        }
-        return;
-      }
-    }
   }
 
   // A transition shows live tabs from this logical window when the profile is
@@ -3947,9 +4096,24 @@ class SidebarMac::Impl : public TabStripModelObserver,
       PerformNoticeAction(*message, active, index);
       return;  // A notice delegate can synchronously close this browser.
     }
-    if (*action == "select" && tabs_->ContainsIndex(index)) {
-      tabs_->ActivateTabAt(index);
+    if ((*action == "select" || *action == "switchToTab") && tabs_->ContainsIndex(index)) {
+      auto* target = tabs_->GetWebContentsAt(index);
+      if (*action == "switchToTab" && !InActiveSpace(index) && !IsFavorite(target)) {
+        const std::string space = GetTabSpace(target);
+        selected_tabs_[space] = sessions::SessionTabHelper::IdForTab(target).id();
+        SelectLocalSpace(space);
+      } else {
+        tabs_->ActivateTabAt(index);
+      }
       if (auto* contents = tabs_->GetActiveWebContents()) contents->Focus();
+    } else if (*action == "removeClosedPin") {
+      if (!tabs_->ContainsIndex(index) || !tabs_->IsTabPinned(index)) return;
+      auto* contents = tabs_->GetWebContentsAt(index);
+      // A queued click can arrive after the pin was reopened or moved.
+      if (contents == active || !IsDormantPin(contents) ||
+          (!InActiveSpace(index) && !IsFavorite(contents))) return;
+      tabs_->CloseWebContentsAt(index, CLOSE_USER_GESTURE);
+      return;
     } else if (*action == "closePinnedSession" || *action == "close") {
       if (!tabs_->ContainsIndex(index)) return;
       if (tabs_->IsTabPinned(index)) {
@@ -4008,8 +4172,6 @@ class SidebarMac::Impl : public TabStripModelObserver,
     } else if (*action == "suggest" && text) {
       Suggest(*text);
       return;  // Suggestions are not part of the sidebar snapshot.
-    } else if (*action == "switchToTab") {
-      SwitchToTab(message->FindInt("id").value_or(-1));
     } else if ((*action == "navigate" || *action == "navigateNew") && text) {
       const bool new_page = *action == "navigateNew";
       if (new_page && base::TrimWhitespaceASCII(*text, base::TRIM_ALL).empty()) return;
@@ -4079,11 +4241,12 @@ class SidebarMac::Impl : public TabStripModelObserver,
         if (tabs_->active_index() != index) tabs_->ActivateTabAt(index);
       }
     } else if (*action == "setPinURL" && tabs_->ContainsIndex(index) && tabs_->IsTabPinned(index)) {
-      const GURL url = PageURL(tabs_->GetWebContentsAt(index));
-      if (!IsBlankPage(url)) EditTabMeta(tabs_->GetWebContentsAt(index), [&](base::DictValue& meta) {
+      auto* contents = tabs_->GetWebContentsAt(index);
+      const GURL url = PageURL(contents);
+      if (!IsBlankPage(url) && EditTabMeta(contents, [&](base::DictValue& meta) {
         meta.Set("pinnedURL", url.spec());
         return true;
-      });
+      })) RememberPinnedPage(contents, true);
     } else if (*action == "newFolder" && !incognito) {
       std::string name = text ? std::string(base::TrimWhitespaceASCII(*text, base::TRIM_ALL)) : std::string();
       if (name.empty()) name = "New Folder";
@@ -4295,6 +4458,10 @@ class SidebarMac::Impl : public TabStripModelObserver,
         }
       }
       SwitchSpace(*text, slide_duration);
+    } else if ((*action == "trackSpaceSwipe" || *action == "queueSpaceSwipe") && !incognito) {
+      const auto* metadata = message->FindDict("metadata");
+      if (const auto* after = metadata ? metadata->FindString("after") : nullptr)
+        UpdateSpaceSwipe(*after, *action == "trackSpaceSwipe", text);
     } else if (*action == "prepareSpace" && text) {
       PrepareSpace(*text);
     } else if (*action == "createSpace" && text && !text->empty() && text->size() <= 128) {
@@ -4375,8 +4542,8 @@ class SidebarMac::Impl : public TabStripModelObserver,
   std::string active_space_;
   std::string switch_preview_space_;
   std::map<std::string, int> selected_tabs_;
-  int pending_favorite_ = -1;
   bool switching_space_ = false;
+  base::OneShotTimer swipe_release_timeout_;
   bool restored_group_attached_ = false;
   raw_ptr<views::NativeViewHost> host_;
   raw_ptr<views::NativeViewHost> page_frame_host_;
@@ -4429,6 +4596,7 @@ class SidebarMac::Impl : public TabStripModelObserver,
   base::RepeatingTimer fade_timer_;
   base::TimeTicks fade_start_;
   std::map<int, base::WeakPtr<content::WebContents>> pending_pin_closes_;
+  base::CancelableTaskTracker pin_history_tasks_;
   base::WeakPtr<content::WebContents> just_closed_pin_;
   // Tab IDs, most recently shown first, for Control-Tab.
   std::vector<int> recent_tabs_;

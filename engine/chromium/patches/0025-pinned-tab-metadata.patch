@@ -1,0 +1,113 @@
+diff --git a/chrome/browser/ui/startup/startup_tab.h b/chrome/browser/ui/startup/startup_tab.h
+--- a/chrome/browser/ui/startup/startup_tab.h
++++ b/chrome/browser/ui/startup/startup_tab.h
+@@ -5,8 +5,10 @@
+ #ifndef CHROME_BROWSER_UI_STARTUP_STARTUP_TAB_H_
+ #define CHROME_BROWSER_UI_STARTUP_STARTUP_TAB_H_
+ 
++#include <string>
+ #include <vector>
+ 
++#include "build/build_config.h"
+ #include "url/gurl.h"
+ 
+ // Represents tab data at startup.
+@@ -28,6 +30,11 @@
+ 
+   Type type = Type::kNormal;
+ 
++#if BUILDFLAG(IS_MAC)
++  // Per-pin sidebar metadata saved alongside the URL in the pinned-tabs pref.
++  std::string bark_tab_meta;
++#endif
++
+   // True if this tab was launched from an untrusted external custom protocol
+   // (e.g., google-chrome://) that was stripped on startup.
+   bool is_untrusted_launch = false;
+diff --git a/chrome/browser/ui/tabs/BUILD.gn b/chrome/browser/ui/tabs/BUILD.gn
+--- a/chrome/browser/ui/tabs/BUILD.gn
++++ b/chrome/browser/ui/tabs/BUILD.gn
+@@ -782,6 +782,10 @@
+       ]
+     }
+ 
++    if (is_mac) {
++      deps += [ "//bark:space_tab_data" ]
++    }
++
+     if (is_win) {
+       deps += [
+         "//chrome/browser:font_prewarmer_tab_helper",
+diff --git a/chrome/browser/ui/tabs/pinned_tab_codec.cc b/chrome/browser/ui/tabs/pinned_tab_codec.cc
+--- a/chrome/browser/ui/tabs/pinned_tab_codec.cc
++++ b/chrome/browser/ui/tabs/pinned_tab_codec.cc
+@@ -9,6 +9,10 @@
+ #include <utility>
+ 
+ #include "base/values.h"
++#include "build/build_config.h"
++#if BUILDFLAG(IS_MAC)
++#include "bark/space_tab_data.h"
++#endif
+ #include "chrome/browser/profiles/profile.h"
+ #include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+ #include "chrome/browser/ui/browser_window/public/browser_window_interface_iterator.h"
+@@ -29,9 +33,14 @@
+ const char kURL[] = "url";
+ 
+ // Returns a base::DictValue representing the supplied StartupTab.
+-base::DictValue EncodeTab(const GURL& url) {
++base::DictValue EncodeTab(const StartupTab& tab) {
+   base::DictValue dict;
+-  dict.Set(kURL, url.spec());
++  dict.Set(kURL, tab.url.spec());
++#if BUILDFLAG(IS_MAC)
++  if (!tab.bark_tab_meta.empty()) {
++    dict.Set(bark::kTabMetaKey, tab.bark_tab_meta);
++  }
++#endif
+   return dict;
+ }
+ 
+@@ -48,7 +57,11 @@
+     NavigationEntry* entry =
+         web_contents->GetController().GetLastCommittedEntry();
+     if (entry) {
+-      serialized_tabs.Append(EncodeTab(entry->GetURL()));
++      StartupTab pin(entry->GetURL(), StartupTab::Type::kPinned);
++#if BUILDFLAG(IS_MAC)
++      pin.bark_tab_meta = bark::GetTabMeta(web_contents);
++#endif
++      serialized_tabs.Append(EncodeTab(pin));
+     }
+   }
+ }
+@@ -57,9 +70,16 @@
+ // on success.
+ std::optional<StartupTab> DecodeTab(const base::DictValue& value) {
+   const std::string* const url_string = value.FindString(kURL);
+-  return url_string ? std::make_optional(StartupTab(GURL(*url_string),
+-                                                    StartupTab::Type::kPinned))
+-                    : std::nullopt;
++  if (!url_string) {
++    return std::nullopt;
++  }
++  StartupTab pin(GURL(*url_string), StartupTab::Type::kPinned);
++#if BUILDFLAG(IS_MAC)
++  if (const auto* meta = value.FindString(bark::kTabMetaKey)) {
++    pin.bark_tab_meta = *meta;
++  }
++#endif
++  return pin;
+ }
+ 
+ }  // namespace
+@@ -101,7 +121,7 @@
+   base::ListValue& values = update.Get();
+   values.clear();
+   for (const auto& tab : tabs) {
+-    values.Append(EncodeTab(tab.url));
++    values.Append(EncodeTab(tab));
+   }
+ }
+ 

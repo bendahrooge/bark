@@ -53,12 +53,23 @@ function editJSON(file, edit) {
   edit(value);
   fs.writeFileSync(file, JSON.stringify(value));
 }
+const iconColors = new Map([
+  ['/pin-a.svg', 'red'], ['/pin-b.svg', 'blue'], ['/favorite.svg', 'green'], ['/revised.svg', 'purple'],
+  ['/pending-a.svg', 'orange'], ['/pending-b.svg', 'yellow'],
+]);
 const server = http.createServer((request, response) => {
   const url = new URL(request.url, 'http://localhost');
   requests.set(url.pathname, (requests.get(url.pathname) ?? 0) + 1);
   if (url.pathname === '/slow-pin' && requests.get(url.pathname) === 1) return;
+  const color = iconColors.get(url.pathname);
+  if (color) {
+    response.writeHead(200, {'Content-Type': 'image/svg+xml', 'Cache-Control': 'no-store'});
+    response.end(`<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><rect width="16" height="16" fill="${color}"/></svg>`);
+    return;
+  }
   response.writeHead(200, {'Content-Type': 'text/html', 'Cache-Control': 'no-store'});
-  response.end(`<title>Saved ${url.pathname}</title><link rel="icon" href="data:,"><body>Pin loading check</body>`);
+  const icon = iconColors.has(url.pathname + '.svg') ? url.pathname + '.svg' : 'data:,';
+  response.end(`<title>Saved ${url.pathname}</title><link rel="icon" href="${icon}"><body>Pin loading check</body>`);
 });
 try {
   assert.equal(process.platform, 'darwin');
@@ -66,6 +77,23 @@ try {
   const base = `http://127.0.0.1:${server.address().port}`;
   const pins = ['/pin-a', '/pin-b', '/favorite'];
   const tabFor = (state, suffix) => visible(state)?.allTabs.find(tab => tab.url === base + suffix);
+  const rowFor = (state, suffix) => {
+    const window = visible(state);
+    return window && [...window.tabs, ...window.favorites].find(tab => tab.url === base + suffix);
+  };
+  const savedRows = new Map();
+  const assertCachedRows = state => {
+    for (const [suffix, saved] of savedRows) {
+      const row = rowFor(state, suffix);
+      assert.ok(row, `${suffix} appears in the sidebar`);
+      assert.equal(row.title, saved.title, `${suffix} shows its last page title`);
+      assert.notEqual(row.faviconValid, false, `${suffix} can display its restored favicon`);
+      assert.equal(row.favicon, saved.favicon, `${suffix} shows its last favicon`);
+    }
+    for (const icon of iconColors.keys()) {
+      assert.equal(requests.get(icon) ?? 0, 0, `Startup must not fetch ${icon}`);
+    }
+  };
   const attachPage = async url => {
     const {targetInfos} = await browser.send('Target.getTargets');
     const target = targetInfos.find(target => target.type === 'page' && target.url === url);
@@ -111,6 +139,17 @@ try {
   browser = launch('seed');
   await waitFor(state => !!visible(state)?.activeSpaceId, 'initial window');
   await setStartupPreference(1);  // Continue where you left off.
+  const pending = ['/pending-a', '/pending-b'];
+  const historyIcons = new Map();
+  for (const suffix of pending) {
+    const {targetId} = await browser.send('Target.createTarget', {url: base + suffix});
+    const visited = await waitFor(state => {
+      const row = rowFor(state, suffix);
+      return row?.title === 'Saved ' + suffix && row.faviconValid && row.favicon;
+    }, 'seed local history for ' + suffix);
+    historyIcons.set(suffix, rowFor(visited, suffix).favicon);
+    await browser.send('Target.closeTarget', {targetId});
+  }
   for (const suffix of [...pins, '/ordinary']) {
     await browser.send('Target.createTarget', {url: base + suffix});
     const state = await waitFor(state => visible(state)?.tabs.some(tab =>
@@ -119,6 +158,23 @@ try {
     if (suffix !== '/ordinary') {
       await command('moveTab', {windowId: visible(state).windowId, id: tabFor(state, suffix).id,
         metadata: {zone: suffix === '/favorite' ? 'favorites' : 'pinned', before: ''}});
+      let pinned = await waitFor(state => {
+        const row = rowFor(state, suffix);
+        return row?.pinned && row.faviconValid && row.favicon;
+      }, 'pinned page favicon for ' + suffix);
+      if (suffix === '/pin-b') {
+        const originalIcon = rowFor(pinned, suffix).favicon;
+        const session = await attachPage(base + suffix);
+        await browser.send('Runtime.evaluate', {
+          expression: `document.title = 'Updated page title'; document.querySelector('link[rel=icon]').href = '/revised.svg'`,
+        }, session);
+        pinned = await waitFor(state => {
+          const row = rowFor(state, suffix);
+          return row?.title === 'Updated page title' && row.faviconValid && row.favicon && row.favicon !== originalIcon;
+        }, 'updated title and favicon after pinning');
+      }
+      const {title, favicon} = rowFor(pinned, suffix);
+      savedRows.set(suffix, {title, favicon});
     }
   }
   await browser.send('Target.createTarget', {url: 'about:blank'});
@@ -126,13 +182,13 @@ try {
   requests.clear();
 
   browser = launch('session-restore');
-  await waitFor(state => pins.every(suffix => !!tabFor(state, suffix)) && requests.get('/ordinary') === 1,
+  let state = await waitFor(state => pins.every(suffix => !!rowFor(state, suffix)) && requests.get('/ordinary') === 1,
     'session restoration including an ordinary background tab');
+  assertCachedRows(state);
   await delay(1000);
-  let state = await command();
+  state = await command();
   assertDormant(state, pins);
   assert.equal(tabFor(state, '/favorite').space, 'bark.favorites');
-  assert.equal(visible(state).tabs.find(tab => tab.url === base + '/pin-a').title, 'Saved /pin-a');
   await select('/pin-a');
   await select('/favorite');
   assertDormant(await command(), ['/pin-b']);
@@ -153,7 +209,7 @@ try {
   // Browser imports and profile moves use this same pending-tab representation.
   editJSON(path.join(profile, 'Local State'), local => {
     local.bark.spaces.push({id: 'lazy-pending', name: 'Pending pins', profile: 'Default', theme: 'gray', emoji: '📚',
-      pendingTabs: ['/pending-a', '/pending-b'].map(suffix => ({url: base + suffix, title: 'Saved ' + suffix, pinned: true}))});
+      pendingTabs: pending.map(suffix => ({url: base + suffix, pinned: true}))});
   });
   browser = launch('pending-pins');
   state = await waitFor(state => {
@@ -169,23 +225,29 @@ try {
   const unopened = visible(state).tabs.find(tab => !tab.active && tab.url.startsWith(base + '/pending-'));
   assert.ok(unopened);
   const suffix = new URL(unopened.url).pathname;
+  state = await waitFor(state => {
+    const row = rowFor(state, suffix);
+    return row?.title === 'Saved ' + suffix && row.faviconValid && row.favicon === historyIcons.get(suffix);
+  }, 'URL-only dormant pin recovers its title and icon from local history');
+  assert.equal(requests.get(suffix + '.svg') ?? 0, 0, 'Recovering an old icon uses only local history');
   await delay(1000);
   assertDormant(await command(), [suffix]);
-  assert.equal(unopened.title, 'Saved ' + suffix);
   await select(suffix);
   report.checks.push('Opening a space with imported or moved pins loads only the selected pin; other pins wait for selection');
 
-  const pending = ['/pending-a', '/pending-b'];
   const initialOrder = visible(await command()).allTabs.filter(tab => pending.some(suffix => tab.url === base + suffix)).map(tab => tab.url);
   const closedPin = async (suffix, action = 'close') => {
     const before = await command();
     const count = requests.get(suffix) ?? 0;
     const tab = tabFor(before, suffix);
+    const rowHandle = rowFor(before, suffix).tabHandle;
+    assert.ok(Number.isInteger(rowHandle));
     await command(action, {windowId: visible(before).windowId, id: tab.id});
     const after = await waitFor(state => tabFor(state, suffix)?.needsReload &&
       tabFor(state, suffix).discarded, 'unload ' + suffix);
     assert.equal(tabFor(after, suffix).pinned, true);
     assert.equal(tabFor(after, suffix).space, tab.space);
+    assert.equal(rowFor(after, suffix).tabHandle, rowHandle, 'Closing keeps the hovered row in place for the next click');
     assert.equal(requests.get(suffix) ?? 0, count, 'Closing must not reload the pin');
     return after;
   };
@@ -320,14 +382,23 @@ try {
   await command('pin', {windowId: visible(state).windowId, id: tabFor(state, '/slow-pin').id});
   await closedPin('/slow-pin');
   await select('/slow-pin');
-  await closedPin('/slow-pin');
+  state = await command();
+  await command('removeClosedPin', {windowId: visible(state).windowId, id: tabFor(state, '/slow-pin').id});
+  assert.equal(tabFor(await command(), '/slow-pin')?.needsReload, false,
+    'A stale remove action preserves a pin that has reopened');
+  state = await closedPin('/slow-pin', 'closePinnedSession');
   report.checks.push('Closing a pin during its first page load preserves its destination and allows reopening');
+  const loadsBeforeRemoval = requests.get('/slow-pin');
+  await command('removeClosedPin', {windowId: visible(state).windowId, id: tabFor(state, '/slow-pin').id});
+  await waitFor(state => !tabFor(state, '/slow-pin'), 'remove the closed pin from the sidebar');
+  assert.equal(requests.get('/slow-pin'), loadsBeforeRemoval, 'Removing a closed pin keeps its page unloaded');
   await close();
   requests.clear();
   browser = launch('closed-pins-restart');
   state = await waitFor(state => !!tabFor(state, suffix) && !!tabFor(state, '/favorite'), 'closed pins after restart');
   assertDormant(state, [suffix, '/favorite']);
   assert.equal(tabFor(state, background), undefined);
+  assert.equal(tabFor(state, '/slow-pin'), undefined, 'A removed pin stays removed after session restore');
   assert.equal(tabFor(state, suffix).space, 'lazy-pending');
   assert.equal(tabFor(state, suffix).meta.title, 'Course home');
   assert.equal(tabFor(state, suffix).meta.folder, folder);
@@ -338,14 +409,20 @@ try {
   requests.clear();
 
   browser = launch('new-tab-startup');
-  await waitFor(state => pins.every(suffix => !!tabFor(state, suffix)), 'pins without session restoration');
+  state = await waitFor(state => pins.every(suffix => !!rowFor(state, suffix)), 'sidebar pins without session restoration');
+  assertCachedRows(state);
   await delay(1000);
   state = await command();
   assert.equal(tabFor(state, '/ordinary'), undefined, 'New-tab startup skips the old session');
+  assert.equal(tabFor(state, '/slow-pin'), undefined, 'A removed pin stays removed on new-tab startup');
   assertDormant(state, pins);
   await select('/pin-b');
+  await waitFor(state => {
+    const row = rowFor(state, '/pin-b');
+    return row?.title === 'Saved /pin-b' && row.faviconValid && row.favicon && row.favicon !== savedRows.get('/pin-b').favicon;
+  }, 'live title and favicon replace cached values after selection');
   assertDormant(await command(), ['/pin-a', '/favorite']);
-  report.checks.push('New-tab startup restores pinned destinations without loading them, and selecting one loads it');
+  report.checks.push('New-tab startup shows saved titles and favicons before selection, and removed pins stay removed');
   await close();
   report.passed = true;
   console.log(`${report.checks.length} focused pinned-tab checks passed`);

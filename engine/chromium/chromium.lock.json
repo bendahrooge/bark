@@ -46,7 +46,7 @@
     },
     {
       "file": "0010-lazy-pinned-tabs.patch",
-      "sha256": "f20a25ae53b8ab33cd94d1e1bde3e598502078a7b8deee07f10c6882d28be64a"
+      "sha256": "a57bc20dc053350cffbebd9ecca4841ac99f40268729455f71dbd49231520b25"
     },
     {
       "file": "0011-close-pins-without-removing.patch",
@@ -103,6 +103,10 @@
     {
       "file": "0024-factory-reset.patch",
       "sha256": "4ba791a4de6433a6a0a3f7b98235eddeabf081c624a8cfe01b2fc0eedb10a98b"
+    },
+    {
+      "file": "0025-pinned-tab-metadata.patch",
+      "sha256": "c3251590201940b1e7267874f6bc960db2355e355fc87fead1beebc46fb9346d"
     }
   ]
 }

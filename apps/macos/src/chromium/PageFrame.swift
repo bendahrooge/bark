@@ -10,12 +10,14 @@ private struct WindowSpaceBackground: View {
             SidebarBackground(theme: model.outgoingTheme,
                               style: model.isIncognito ? SpaceStyle() : model.outgoingSpace?.style ?? SpaceStyle(),
                               canvasSize: canvasSize)
-            ZStack {
-                if let neighbor = model.swipeNeighbor {
-                    SidebarBackground(theme: neighbor.themeValue, style: neighbor.style, canvasSize: canvasSize)
-                        .transition(.identity)
-                }
-            }.opacity(min(1, abs(model.spaceSwipeOffset) / max(1, model.snapshot.sidebarWidth ?? 260)))
+            ForEach([CGFloat(-1), 1], id: \.self) { direction in
+                ZStack {
+                    if let neighbor = model.swipePage(in: direction) {
+                        SidebarBackground(theme: neighbor.themeValue, style: neighbor.style, canvasSize: canvasSize)
+                            .transition(.identity)
+                    }
+                }.opacity(min(1, max(0, direction * model.spaceSwipeOffset / max(1, model.snapshot.sidebarWidth ?? 260))))
+            }
         }
     }
 }

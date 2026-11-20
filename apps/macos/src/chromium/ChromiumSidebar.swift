@@ -7,6 +7,10 @@ import BarkCore
 // database. Commands use session IDs, not indices that can change under us.
 struct ChromiumTab: Decodable, Identifiable {
     let id: Int
+    // The tab strip slot survives closing a pinned session. Its new contents
+    // receive a new command ID, but the hovered row stays under the pointer.
+    var tabHandle: Int? = nil
+    var rowID: Int { tabHandle ?? id }
     let title: String
     let url: String
     let pinned: Bool
@@ -29,7 +33,10 @@ struct ChromiumTab: Decodable, Identifiable {
     var sessionClosed: Bool? = nil
     var keepVisibleAfterClose: Bool? = nil
     var visibleWhenCollapsed: Bool { active || keepVisibleAfterClose == true }
-    var closeLabel: String { pinned ? "Close pinned tab session" : "Close tab" }
+    var closeLabel: String {
+        guard pinned else { return "Close tab" }
+        return sessionClosed == true ? "Remove pinned tab" : "Close pinned tab session"
+    }
     // The sidebar folder of a pinned tab.
     var folder: String? = nil
     // A JPEG of the page, in the Control-Tab switcher only.
@@ -216,6 +223,8 @@ enum AddressDisposition {
     let splitDrop = SplitDropController()
     // Incremented by the keyboard shortcut; the sidebar archives with undo.
     @Published private(set) var archiveRequests = 0
+    @Published private(set) var clearingTabs: [ChromiumTab] = []
+    static let clearFadeDuration: TimeInterval = 0.24
     @Published var browserImportRequests = 0
     /// A folder the sidebar should offer to rename as soon as it appears.
     @Published var renameNextFolder = false
@@ -295,10 +304,37 @@ enum AddressDisposition {
         let target: ChromiumSpace?
         let direction: CGFloat
         let committed: Bool
+        let opposite: ChromiumSpace?
+        let oppositeTabs: [ChromiumTab]
+        let spring: SpaceSpring?
     }
+
+    // A fresh drag can catch a running release spring between SwiftUI updates.
+    private struct SpaceSpring {
+        let start = ProcessInfo.processInfo.systemUptime
+        let from: CGFloat
+        let to: CGFloat
+        let velocity: CGFloat
+        let rate: CGFloat
+
+        var offset: CGFloat {
+            let t = CGFloat(ProcessInfo.processInfo.systemUptime - start)
+            let distance = from - to
+            return to + (distance + (velocity + rate * distance) * t) * exp(-rate * t)
+        }
+    }
+
+    private struct SpaceDrag {
+        let origin: String
+        var handoff: String?
+        var travel: CGFloat = 0
+        var initialOffset: CGFloat?
+    }
+
     @Published private var slide: SpaceSlide?
     @Published private(set) var spaceSwipeOffset: CGFloat = 0
-    private var rawSwipeOffset: CGFloat = 0
+    private var spaceDrag: SpaceDrag?
+    private var queuedHandoffSpace: String?
     private var swipeCommitTarget: String? { slide?.committed == true ? slide?.target?.id : nil }
     private var slideLanded = false
     private var swipeResetWork: DispatchWorkItem?
@@ -322,19 +358,55 @@ enum AddressDisposition {
             lastJSON = json
             changedProfile = decoded.profile != snapshot.profile || decoded.incognito != snapshot.incognito ||
                 decoded.activeSpaceId != snapshot.activeSpaceId
+            if changedProfile || decoded.archiveGeneration != snapshot.archiveGeneration {
+                // Keep the outgoing rows laid out while they fade, including
+                // when the scroll view is at the bottom of a long list.
+                let cleared = !changedProfile && decoded.archiveGeneration != nil &&
+                    decoded.sidebarTabs.allSatisfy(\.pinned)
+                clearingTabs = cleared ? snapshot.sidebarTabs.filter { !$0.pinned } : []
+                if !clearingTabs.isEmpty {
+                    let generation = decoded.archiveGeneration
+                    DispatchQueue.main.asyncAfter(deadline: .now() + Self.clearFadeDuration) { [weak self] in
+                        guard let self, self.snapshot.archiveGeneration == generation else { return }
+                        self.clearingTabs = []
+                    }
+                }
+            } else if !clearingTabs.isEmpty && decoded.sidebarTabs.contains(where: { !$0.pinned }) {
+                // Undo or opening a tab immediately returns the list to live rows.
+                clearingTabs = []
+            }
             snapshot = decoded
         }
+        if changedProfile || activeSpace?.theme != nil {
+            theme = isIncognito ? .gray : SpaceTheme(rawValue: activeSpace?.theme ?? UserDefaults.standard.string(forKey: settingsKey("theme")) ?? "gray") ?? .gray
+            let fallback = activeSpace?.displayName == "Personal" || activeSpace == nil ? "👤" : ""
+            emoji = isIncognito ? "" : Space.normalizedIcon(activeSpace?.emoji ?? UserDefaults.standard.string(forKey: settingsKey("emoji")) ?? fallback) ?? fallback
+        }
         let next = snapshot
-        if let slide {
+        if next.windowVisible == false || isIncognito {
+            queuedSpaceSelection = nil
+            queuedHandoffSpace = nil
+            // AppKit can deliver the last event to the outgoing profile's
+            // window after Chromium has already hidden it.
+            if isIncognito || spaceDrag?.handoff == nil { spaceDrag = nil }
+            if slide != nil || spaceSwipeOffset != 0 { resetSpaceSlide(to: 0) }
+        } else if let slide {
             let interrupted = next.activeSpaceId != slide.origin.id && next.activeSpaceId != swipeCommitTarget
             let missingTarget = slide.target.map { target in !next.spaces.contains { $0.id == target.id } } ?? false
-            if next.windowVisible == false || interrupted || missingTarget || isIncognito {
+            if interrupted || missingTarget {
                 queuedSpaceSelection = nil
+                queuedHandoffSpace = nil
+                spaceDrag = nil
                 finishSpaceSwipe()
-            } else if slideLanded, let target = swipeCommitTarget, next.activeSpaceId == target {
-                finishSpaceSwipe()
+            } else if let target = swipeCommitTarget, next.activeSpaceId == target {
+                if slideLanded {
+                    finishSpaceSwipe()
+                } else if queuedSpaceSelection?.velocity != nil, spaceDrag == nil, catchSpaceSpring(at: target) {
+                    continueQueuedSpaceSelection()
+                }
             }
-        } else if changedProfile, rawSwipeOffset != 0 {
+        } else if changedProfile, let drag = spaceDrag, drag.origin != next.activeSpaceId {
+            spaceDrag = nil
             finishSpaceSwipe()
         }
         let active = activeTab
@@ -342,11 +414,6 @@ enum AddressDisposition {
             address = active?.isBlank == true ? "" : active?.url ?? ""
         }
         previousActiveID = active?.id
-        if changedProfile || activeSpace?.theme != nil {
-            theme = isIncognito ? .gray : SpaceTheme(rawValue: activeSpace?.theme ?? UserDefaults.standard.string(forKey: settingsKey("theme")) ?? "gray") ?? .gray
-            let fallback = activeSpace?.displayName == "Personal" || activeSpace == nil ? "👤" : ""
-            emoji = isIncognito ? "" : Space.normalizedIcon(activeSpace?.emoji ?? UserDefaults.standard.string(forKey: settingsKey("emoji")) ?? fallback) ?? fallback
-        }
     }
 
     private func settingsKey(_ suffix: String) -> String { "BarkChromium.\(snapshot.profile).\(suffix)" }
@@ -397,8 +464,11 @@ enum AddressDisposition {
     }
 
     func close(_ tab: ChromiumTab) {
-        guard tab.sessionClosed != true else { return }
-        send(tab.pinned ? "closePinnedSession" : "close", id: tab.id)
+        if tab.pinned {
+            send(tab.sessionClosed == true ? "removeClosedPin" : "closePinnedSession", id: tab.id)
+        } else {
+            send("close", id: tab.id)
+        }
     }
 
     func send(_ action: String, id: Int? = nil, text: String? = nil, width: Double? = nil, metadata: [String: String]? = nil) {
@@ -567,7 +637,7 @@ enum AddressDisposition {
     func tint(for space: ChromiumSpace) -> Color { space.active ? theme.accent : space.themeValue.accent }
     var folders: [ChromiumFolder] { isIncognito ? [] : activeSpace?.folders ?? [] }
 
-    private var queuedSpaceSelection: String?
+    private var queuedSpaceSelection: (id: String, velocity: CGFloat?)?
 
     /// A different profile takes over this window when its slide finishes.
     var switchingSpaceProfile: Bool {
@@ -582,7 +652,7 @@ enum AddressDisposition {
               let destination = snapshot.spaces.firstIndex(where: { $0.id == space.id }) else { return }
         if let swipeCommitTarget {
             // Keep the latest click, including a click back to the outgoing Space.
-            queuedSpaceSelection = space.id == swipeCommitTarget ? nil : space.id
+            queuedSpaceSelection = space.id == swipeCommitTarget ? nil : (space.id, nil)
             return
         }
         guard let source = activeSpaceIndex else { send("space", text: space.id); return }
@@ -593,11 +663,18 @@ enum AddressDisposition {
                     width: pageWidth, velocity: 0, fromClick: true)
     }
 
-    func continueQueuedSpaceSelection() {
-        guard let id = queuedSpaceSelection else { return }
+    private func continueQueuedSpaceSelection() {
+        guard let queued = queuedSpaceSelection else { return }
         queuedSpaceSelection = nil
-        if snapshot.windowVisible != false, let space = snapshot.spaces.first(where: { $0.id == id }) {
-            requestSpaceSelection(space)
+        guard snapshot.windowVisible != false, let source = activeSpaceIndex,
+              let destination = snapshot.spaces.firstIndex(where: { $0.id == queued.id }), source != destination else { return }
+        let target = snapshot.spaces[destination]
+        if let velocity = queued.velocity {
+            let width = hostView?.bounds.width ?? CGFloat(snapshot.sidebarWidth ?? 260)
+            settleSpace(to: target, direction: destination > source ? -1 : 1, width: width,
+                        velocity: velocity, fromClick: false)
+        } else {
+            requestSpaceSelection(target)
         }
     }
 
@@ -616,58 +693,103 @@ enum AddressDisposition {
     var outgoingTabs: [ChromiumTab] { slide?.originTabs ?? snapshot.sidebarTabs }
     var outgoingTheme: SpaceTheme { slide?.theme ?? theme }
     var outgoingEmoji: String { slide?.emoji ?? emoji }
-    var spaceInMotion: Bool { slide != nil || spaceSwipeOffset != 0 }
+    var spaceInMotion: Bool { (slide != nil && !slideLanded) || spaceSwipeOffset != 0 }
     var swipeDirection: CGFloat { slide?.direction ?? (spaceSwipeOffset < 0 ? -1 : 1) }
     var swipeNeighbor: ChromiumSpace? {
         if let slide { return slide.target }
         return spaceSwipeOffset < 0 ? nextSpace : spaceSwipeOffset > 0 ? previousSpace : nil
     }
+    func swipePage(in direction: CGFloat) -> ChromiumSpace? {
+        if direction == swipeDirection { return swipeNeighbor }
+        return slide?.opposite
+    }
+
     func previewTabs(for space: ChromiumSpace) -> [ChromiumTab] {
         if snapshot.activeSpaceId == space.id { return snapshot.sidebarTabs }
+        if let slide, slide.opposite?.id == space.id { return slide.oppositeTabs }
         return snapshot.spacePreviews?[space.id]?.filter { !$0.isSidebarPlaceholder } ?? []
     }
     var canSwipeSpaces: Bool {
-        !isIncognito && snapshot.spaces.count > 1 && snapshot.switchingSpace != true && slide == nil
+        !isIncognito && snapshot.windowVisible != false && snapshot.spaces.count > 1 &&
+            (snapshot.switchingSpace != true || swipeCommitTarget != nil)
     }
 
     private var preparedSpaces: Set<String> = []
 
     func beginSpaceSwipe() {
-        rawSwipeOffset = 0
+        guard canSwipeSpaces,
+              let origin = queuedHandoffSpace ?? queuedSpaceSelection?.id ?? swipeCommitTarget ?? activeSpace?.id else { return }
+        spaceDrag = SpaceDrag(origin: origin)
+        if switchingSpaceProfile, let target = swipeCommitTarget { trackSpaceHandoff(after: target) }
         preparedSpaces = []
+    }
+
+    private func trackSpaceHandoff(after target: String) {
+        guard spaceDrag != nil else { return }
+        spaceDrag?.handoff = target
+        send("trackSpaceSwipe", metadata: ["after": target])
+    }
+
+    func discardUndecidedSpaceSwipe() {
+        if let handoff = spaceDrag?.handoff { send("queueSpaceSwipe", metadata: ["after": handoff]) }
+        spaceDrag = nil
+    }
+
+    private func neighbor(of id: String, direction: CGFloat) -> ChromiumSpace? {
+        guard let index = snapshot.spaces.firstIndex(where: { $0.id == id }) else { return nil }
+        let next = index + (direction < 0 ? 1 : -1)
+        return snapshot.spaces.indices.contains(next) ? snapshot.spaces[next] : nil
     }
 
     /// `fingerDelta` is positive when the fingers move right.
     func updateSpaceSwipe(by fingerDelta: CGFloat, width: CGFloat) {
-        guard slide == nil, width > 0 else { return }
-        rawSwipeOffset += fingerDelta
-        let target = rawSwipeOffset < 0 ? nextSpace : previousSpace
+        guard var drag = spaceDrag, width > 0 else { return }
+        if drag.initialOffset == nil, drag.handoff == nil, drag.origin == activeSpace?.id, queuedSpaceSelection == nil {
+            _ = catchSpaceSpring(at: drag.origin)
+            if slide == nil {
+                let atEdge = spaceSwipeOffset < 0 ? nextSpace == nil : previousSpace == nil
+                let offset = atEdge ? spaceSwipeOffset * 2 : spaceSwipeOffset
+                drag.initialOffset = offset - drag.travel * Self.spaceDragGain
+            }
+        }
+        drag.travel += fingerDelta
+        spaceDrag = drag
+        guard let initialOffset = drag.initialOffset else { return }
+        let offset = initialOffset + drag.travel * Self.spaceDragGain
+        let target = offset < 0 ? nextSpace : previousSpace
         if let target {
-            spaceSwipeOffset = min(width, max(-width, rawSwipeOffset * Self.spaceDragGain))
-            // Load another profile as soon as a swipe reveals its space, so a
-            // committed switch does not wait for the profile to load.
+            spaceSwipeOffset = min(width, max(-width, offset))
             if target.profile != nil, target.profile != snapshot.profileId, preparedSpaces.insert(target.id).inserted {
                 send("prepareSpace", text: target.id)
             }
         } else {
-            // Rubber-band at the first and last space.
-            let pull = rawSwipeOffset * 0.25
-            spaceSwipeOffset = min(48, max(-48, pull))
+            spaceSwipeOffset = min(48, max(-48, offset * 0.5))
         }
     }
 
     func endSpaceSwipe(velocity: CGFloat, width: CGFloat, cancelled: Bool) {
-        guard slide == nil, width > 0, rawSwipeOffset != 0 else { return }
-        let direction: CGFloat = rawSwipeOffset < 0 ? -1 : 1
-        let target = direction < 0 ? nextSpace : previousSpace
-        // Keep the physical travel required for a switch independent of drag gain.
-        let travel = abs(rawSwipeOffset)
+        guard let drag = spaceDrag, width > 0 else { return }
+        spaceDrag = nil
+        let direction: CGFloat = drag.travel < 0 ? -1 : 1
+        let travel = abs(drag.travel)
         let projected = travel + max(0, velocity * direction) * 0.16
-        if !cancelled, let target, travel > 12, projected > width * 0.35 {
-            settleSpace(to: target, direction: direction, width: width, velocity: velocity, fromClick: false)
-        } else {
-            animateSpaceSlide(target: target, direction: direction, destination: 0,
-                              velocity: velocity, committed: false, fromClick: false)
+        if !cancelled, travel > 12, projected > width * 0.35,
+           let target = neighbor(of: drag.origin, direction: direction) {
+            if let handoff = drag.handoff {
+                if snapshot.windowVisible != false { queuedHandoffSpace = target.id }
+                send("queueSpaceSwipe", text: target.id, metadata: ["after": handoff])
+            } else if slide != nil {
+                queuedSpaceSelection = target.id == swipeCommitTarget ? nil : (target.id, velocity)
+            } else {
+                settleSpace(to: target, direction: direction, width: width, velocity: velocity, fromClick: false)
+            }
+        } else if let handoff = drag.handoff {
+            send("queueSpaceSwipe", metadata: ["after": handoff])
+        } else if slide == nil, spaceSwipeOffset != 0 {
+            let visibleDirection: CGFloat = spaceSwipeOffset < 0 ? -1 : 1
+            animateSpaceSlide(target: neighbor(of: drag.origin, direction: visibleDirection),
+                              direction: visibleDirection, destination: 0, velocity: velocity,
+                              committed: false, fromClick: false)
         }
     }
 
@@ -682,16 +804,16 @@ enum AddressDisposition {
         guard let origin = activeSpace else { return }
         swipeResetWork?.cancel()
         slideLanded = false
-        if reduceSpaceMotion() {
-            finishSpaceSwipe()
-            if committed, let target { send("space", text: target.id) }
-            return
-        }
-
         let remaining = destination - spaceSwipeOffset
-        let animation: Animation
+        let animation: Animation?
         let duration: TimeInterval
-        if fromClick {
+        var spring: SpaceSpring?
+        if reduceSpaceMotion() {
+            // Keep the destination until Chromium acknowledges it, even when
+            // there is no visual transition to wait for.
+            animation = nil
+            duration = 0
+        } else if fromClick {
             // Dock selection has no finger velocity. Start promptly and taper
             // through the last few pixels.
             duration = 0.28
@@ -701,12 +823,15 @@ enum AddressDisposition {
             // release. initialVelocity is measured in remaining distances/sec.
             let relativeSpeed = abs(remaining) > 1 ? velocity * Self.spaceDragGain / remaining : 0
             let rate: CGFloat = committed ? 21 : 24
-            animation = .interpolatingSpring(mass: 1, stiffness: rate * rate, damping: 2 * rate,
-                                              initialVelocity: min(rate, max(-rate, relativeSpeed)))
+            let speed = min(rate, max(-rate, relativeSpeed))
+            spring = SpaceSpring(from: spaceSwipeOffset, to: destination, velocity: speed * remaining, rate: rate)
+            animation = .interpolatingSpring(mass: 1, stiffness: rate * rate, damping: 2 * rate, initialVelocity: speed)
             duration = committed ? 0.42 : 0.35
         }
+        let opposite = spaceSwipeOffset * direction < 0 ? neighbor(of: origin.id, direction: -direction) : nil
         slide = SpaceSlide(origin: origin, originTabs: snapshot.sidebarTabs, theme: theme, emoji: emoji,
-                           target: target, direction: direction, committed: committed)
+                           target: target, direction: direction, committed: committed, opposite: opposite,
+                           oppositeTabs: opposite.map(previewTabs(for:)) ?? [], spring: spring)
 
         // Prepare both the slide and its completion before the native switch:
         // the command can publish a new snapshot immediately.
@@ -717,42 +842,62 @@ enum AddressDisposition {
                 self.finishSpaceSwipe()
             } else {
                 // A different profile may still be drawing its window.
-                let timeout = DispatchWorkItem { [weak self] in self?.finishSpaceSwipe() }
+                let timeout = DispatchWorkItem { [weak self] in
+                    self?.spaceDrag = nil
+                    self?.queuedSpaceSelection = nil
+                    self?.queuedHandoffSpace = nil
+                    self?.finishSpaceSwipe()
+                }
                 self.swipeResetWork = timeout
                 DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: timeout)
             }
         }
         swipeResetWork = landed
-        let start = { [weak self] in
-            guard let self, !landed.isCancelled else { return }
-            withAnimation(animation) { self.spaceSwipeOffset = destination }
-            DispatchQueue.main.asyncAfter(deadline: .now() + duration, execute: landed)
-        }
-        if fromClick {
-            // Let Chromium activate the tab and mount the incoming page at
-            // its starting position before the animation clock starts.
-            DispatchQueue.main.async { start() }
+        if let animation {
+            let start = { [weak self] in
+                guard let self, !landed.isCancelled else { return }
+                withAnimation(animation) { self.spaceSwipeOffset = destination }
+                DispatchQueue.main.asyncAfter(deadline: .now() + duration, execute: landed)
+            }
+            if fromClick {
+                // Mount the incoming page before the animation clock starts.
+                DispatchQueue.main.async { start() }
+            } else {
+                start()
+            }
         } else {
-            start()
+            spaceSwipeOffset = 0
+            landed.perform()
         }
         if committed, let target {
             let crossProfile = target.profile != nil && target.profile != snapshot.profileId
             let metadata = crossProfile ? ["revealAfter": String(Int((duration * 1000).rounded()))] : [:]
             send("space", text: target.id, metadata: metadata)
+            if crossProfile { trackSpaceHandoff(after: target.id) }
         }
     }
 
-    func finishSpaceSwipe() {
+    // Rebase the pager on the newly active Space without moving either page.
+    private func catchSpaceSpring(at origin: String) -> Bool {
+        guard let slide, let spring = slide.spring, !slide.committed || swipeCommitTarget == origin else { return false }
+        resetSpaceSlide(to: spring.offset - (slide.committed ? spring.to : 0))
+        return true
+    }
+
+    private func resetSpaceSlide(to offset: CGFloat) {
         swipeResetWork?.cancel()
         swipeResetWork = nil
-        rawSwipeOffset = 0
         slideLanded = false
         var transaction = Transaction(animation: nil)
         transaction.disablesAnimations = true
         withTransaction(transaction) {
             slide = nil
-            spaceSwipeOffset = 0
+            spaceSwipeOffset = offset
         }
+    }
+
+    func finishSpaceSwipe() {
+        resetSpaceSlide(to: 0)
         continueQueuedSpaceSelection()
     }
 
@@ -1246,7 +1391,7 @@ private struct ChromiumTabRow: View {
                     }
                 }
                 Divider()
-                Button(tab.closeLabel) { model.close(tab) }.disabled(tab.sessionClosed == true)
+                Button(tab.closeLabel) { model.close(tab) }
                 // Pinned tabs are kept, as in Chromium's own tab menu.
                 Button("Close Other Tabs") { model.send("closeOthers", id: tab.id) }
                     .disabled(!model.snapshot.sidebarTabs.contains { !$0.pinned && $0.id != tab.id })
@@ -1258,7 +1403,7 @@ private struct ChromiumTabRow: View {
         Group {
             if drifted && faviconHovered {
                 Image(systemName: "arrow.uturn.backward").font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
-            } else if tab.loading { ProgressView().controlSize(.mini) }
+            } else if tab.loading && (!tab.pinned || favicon == nil) { ProgressView().controlSize(.mini) }
             else if !tab.isBlank, let favicon { Image(nsImage: favicon).resizable().scaledToFit() }
             else { Image(systemName: "square.fill").foregroundStyle(.secondary) }
         }.frame(width: 16, height: 16)
@@ -1319,14 +1464,12 @@ private struct ChromiumTabRow: View {
                     .frame(width: 24, height: 24).opacity(hovered ? 0 : 1)
                     .help("In a split view").accessibilityHidden(true)
             }
-            if tab.sessionClosed != true {
-                Button { model.close(tab) } label: {
-                    Image(systemName: "xmark").font(.system(size: 10, weight: .medium)).frame(width: 24, height: 24)
-                }.help(tab.closeLabel).accessibilityLabel(Text(tab.closeLabel))
-                    .buttonStyle(SidebarButtonStyle()).foregroundStyle(.secondary)
-                    .opacity(hovered ? 1 : 0)
-                    .disabled(!hovered).allowsHitTesting(hovered).accessibilityHidden(!hovered)
-            }
+            Button { model.close(tab) } label: {
+                Image(systemName: "xmark").font(.system(size: 10, weight: .medium)).frame(width: 24, height: 24)
+            }.help(tab.closeLabel).accessibilityLabel(Text(tab.closeLabel))
+                .buttonStyle(SidebarButtonStyle()).foregroundStyle(.secondary)
+                .opacity(hovered ? 1 : 0)
+                .disabled(!hovered).allowsHitTesting(hovered).accessibilityHidden(!hovered)
         }.frame(width: 24, height: 24)
             .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: hovered)
     }
@@ -1354,9 +1497,7 @@ private struct ChromiumTabRow: View {
             .accessibilityElement(children: .combine).accessibilityLabel(title)
             .accessibilityValue(accessibilityDescription)
             .accessibilityAction { model.send("select", id: tab.id) }
-            .accessibilityActions {
-                if tab.sessionClosed != true { Button(tab.closeLabel) { model.close(tab) } }
-            }
+            .accessibilityAction(named: Text(tab.closeLabel)) { model.close(tab) }
             .accessibilityAction(named: "Move to New Window") { model.send("detachTab", id: tab.id) }
             .accessibilityAction(named: tab.pinned ? "Unpin tab" : "Pin tab") { model.send("pin", id: tab.id) }
             .accessibilityAction(named: muteLabel) { model.send("mute", id: tab.id) }
@@ -1455,8 +1596,8 @@ private struct FavoriteTile: View {
                     .fill(Color.primary.opacity(hovered ? 0.09 : 0.055))
             }
             Group {
-                if tab.loading { ProgressView().controlSize(.small) }
-                else if !tab.isBlank, let icon = tab.faviconImage { Image(nsImage: icon).resizable().scaledToFit() }
+                if !tab.isBlank, let icon = tab.faviconImage { Image(nsImage: icon).resizable().scaledToFit() }
+                else if tab.loading { ProgressView().controlSize(.small) }
                 else { Image(systemName: "square.fill").foregroundStyle(.secondary) }
             }.frame(width: 18, height: 18)
         }.frame(height: 46)
@@ -1469,7 +1610,7 @@ private struct FavoriteTile: View {
                 Button(tab.muted == true ? "Unmute tab" : "Mute tab") { model.send("mute", id: tab.id) }
                 Button("Remove from Favorites") { model.send("moveTab", id: tab.id, metadata: ["zone": "unpinned", "before": ""]) }
                 Button("Move to New Window") { model.send("detachTab", id: tab.id) }
-                Button(tab.closeLabel) { model.close(tab) }.disabled(tab.sessionClosed == true)
+                Button(tab.closeLabel) { model.close(tab) }
             }
     }
 }
@@ -1736,11 +1877,13 @@ private struct ChromiumSidebar: View {
                 ZStack(alignment: .top) {
                     activePage
                         .allowsHitTesting(!model.spaceInMotion)
-                    if let neighbor = model.swipeNeighbor {
-                        previewPage(neighbor)
-                            .offset(x: -model.swipeDirection * geometry.size.width)
-                            .transition(.identity)
-                            .allowsHitTesting(false).accessibilityHidden(true)
+                    ForEach([CGFloat(-1), 1], id: \.self) { direction in
+                        if let neighbor = model.swipePage(in: direction) {
+                            previewPage(neighbor)
+                                .offset(x: -direction * geometry.size.width)
+                                .transition(.identity)
+                                .allowsHitTesting(false).accessibilityHidden(true)
+                        }
                     }
                 }
                 .offset(x: model.spaceSwipeOffset)
@@ -1911,6 +2054,8 @@ private struct ChromiumSidebar: View {
         let hasUnpinned = !unpinned.isEmpty
         let animation: Animation? = interactive && !reduceMotion && tabDrag == nil && !model.spaceInMotion
             ? .easeInOut(duration: 0.20) : nil
+        let fading = animation != nil && !hasUnpinned && !model.clearingTabs.isEmpty
+        let showClear = hasUnpinned || fading
         // Reuse the divider as the pin target so rows stay under the pointer.
         let pinZone = interactive && tabDrag?.dropped == false && pinned.isEmpty
         return VStack(spacing: 0) {
@@ -1931,10 +2076,10 @@ private struct ChromiumSidebar: View {
                 }
             }
             // The divider below the pins hosts the Clear button for unpinned tabs.
-            if !pinned.isEmpty || !folders.isEmpty || hasUnpinned || pinZone {
+            if !pinned.isEmpty || !folders.isEmpty || showClear || pinZone {
                 HStack(spacing: 8) {
                     Rectangle().fill(Color.primary.opacity(0.08)).frame(height: 1)
-                    if hasUnpinned {
+                    if showClear {
                         Button { if interactive { archiveTabs() } } label: {
                             HStack(spacing: 3) {
                                 Image(systemName: "arrow.down").font(.system(size: 9, weight: .semibold))
@@ -1942,8 +2087,9 @@ private struct ChromiumSidebar: View {
                             }.padding(.horizontal, 6).frame(height: 20).contentShape(Rectangle())
                         }.buttonStyle(SidebarButtonStyle()).foregroundStyle(.secondary)
                             .help("Archive unpinned tabs (⇧⌘K)").accessibilityLabel("Archive unpinned tabs")
+                            .opacity(fading ? 0 : 1).disabled(fading).accessibilityHidden(fading)
                     }
-                }.padding(.leading, 9).padding(.trailing, 2).padding(.vertical, hasUnpinned ? 6 : 12)
+                }.padding(.leading, 9).padding(.trailing, 2).padding(.vertical, showClear ? 6 : 12)
                     .frame(minHeight: pinZone ? 32 : nil)
                     .opacity(pinZone ? 0 : 1)
                     .overlay { if pinZone { dropHint("pin", "Drop here to pin", targeted: dropZone == .pinned) } }
@@ -1957,15 +2103,19 @@ private struct ChromiumSidebar: View {
                     .padding(.horizontal, 11).frame(maxWidth: .infinity, alignment: .leading)
                     .frame(height: 34).contentShape(Rectangle())
             }.buttonStyle(SidebarButtonStyle()).help("New tab (⌘T)")
-            SidebarFoldingRows(expanded: hasUnpinned) {
-                LazyVStack(spacing: 3) {
-                    ForEach(unpinned) { tabRow($0, interactive: interactive) }
-                }.padding(.top, 3)
+            LazyVStack(spacing: 3) {
+                ForEach(fading ? model.clearingTabs : unpinned) { tabRow($0, interactive: interactive) }
             }
+            .padding(.top, hasUnpinned || fading ? 3 : 0)
+            .opacity(fading ? 0 : 1)
+            .offset(y: fading ? -10 : 0)
+            .animation(fading ? .timingCurve(0.25, 0.1, 0.25, 1, duration: ChromiumSidebarModel.clearFadeDuration) : nil,
+                       value: fading)
+            .allowsHitTesting(!fading).accessibilityHidden(fading)
         }.frame(maxWidth: .infinity, alignment: .leading)
             .padding(.leading, 8).padding(.trailing, trailingInset).padding(.bottom, 12)
             .animation(animation, value: pinsCollapsed)
-            .animation(animation, value: model.snapshot.archiveGeneration)
+            .animation(animation, value: fading)
     }
 
     // MARK: Favorites and tab dragging
@@ -2022,7 +2172,11 @@ private struct ChromiumSidebar: View {
     @ViewBuilder private func tabRow(_ tab: ChromiumTab, interactive: Bool, indent: CGFloat = 0) -> some View {
         if interactive {
             ChromiumTabRow(model: model, tab: tab, indent: indent)
-                .overlay { MiddleClickCatcher { model.close(tab) }.accessibilityHidden(true) }
+                .overlay {
+                    MiddleClickCatcher {
+                        if tab.sessionClosed != true { model.close(tab) }
+                    }.accessibilityHidden(true)
+                }
                 .opacity(tabDrag?.id == tab.id ? 0 : 1)
                 .background(frameReporter(tab.id))
                 .simultaneousGesture(tabDragGesture(tab.id, fromFavorites: false))
@@ -2724,7 +2878,7 @@ struct SpaceSwipeVelocity {
 
 @MainActor private final class ChromiumHostingView: NSHostingView<ChromiumSidebar> {
     let model: ChromiumSidebarModel
-    private enum SwipeState { case idle, undecided(CGSize), horizontal, passthrough }
+    private enum SwipeState { case idle, mayBegin, undecided(CGSize), horizontal, passthrough }
     private var swipe: SwipeState = .idle
     private var swallowMomentum = false
     private weak var scrollingDock: NSScrollView?
@@ -2818,6 +2972,10 @@ struct SpaceSwipeVelocity {
             }
         }
         if let dock = scrollingDock {
+            if beginsGesture, case .mayBegin = swipe {
+                model.discardUndecidedSpaceSwipe()
+                swipe = .passthrough
+            }
             let dx = event.scrollingDeltaX, dy = event.scrollingDeltaY
             let delta = abs(dx) >= abs(dy) ? dx : dy
             let clip = dock.contentView
@@ -2828,7 +2986,7 @@ struct SpaceSwipeVelocity {
             return true
         }
         // Trailing momentum after a swipe must not scroll the tab list.
-        if !event.momentumPhase.isEmpty {
+        if !event.momentumPhase.isEmpty, event.phase.isEmpty {
             guard swallowMomentum else { return false }
             if event.momentumPhase.contains(.ended) || event.momentumPhase.contains(.cancelled) { swallowMomentum = false }
             return true
@@ -2840,14 +2998,29 @@ struct SpaceSwipeVelocity {
         let fingerY = event.isDirectionInvertedFromDevice ? event.scrollingDeltaY : -event.scrollingDeltaY
         if beginsGesture {
             swallowMomentum = false
-            let inside = !isHiddenOrHasHiddenAncestor && bounds.contains(convert(locationInWindow, from: nil))
-            swipe = inside && model.canSwipeSpaces ? .undecided(.zero) : .passthrough
+            if case .mayBegin = swipe, event.phase.contains(.began) {
+                swipe = .undecided(.zero)
+            } else {
+                let inside = !isHiddenOrHasHiddenAncestor && bounds.contains(convert(locationInWindow, from: nil))
+                if inside && model.canSwipeSpaces {
+                    // The profile window can change before the fingers have
+                    // travelled far enough to decide the gesture's axis.
+                    model.beginSpaceSwipe()
+                    swipe = event.phase.contains(.mayBegin) ? .mayBegin : .undecided(.zero)
+                } else {
+                    model.discardUndecidedSpaceSwipe()
+                    swipe = .passthrough
+                }
+            }
             swipeVelocity.begin(at: event.timestamp)
             if event.phase.contains(.mayBegin) { return false }
         }
         if event.phase.contains(.ended) || event.phase.contains(.cancelled) {
             defer { swipe = .idle }
-            guard case .horizontal = swipe else { return false }
+            guard case .horizontal = swipe else {
+                model.discardUndecidedSpaceSwipe()
+                return false
+            }
             if fingerX != 0 {
                 swipeVelocity.add(fingerX, at: event.timestamp)
                 model.updateSpaceSwipe(by: fingerX, width: bounds.width)
@@ -2857,22 +3030,26 @@ struct SpaceSwipeVelocity {
             swallowMomentum = true
             return true
         }
+        if case .mayBegin = swipe { swipe = .undecided(.zero) }
         switch swipe {
         case .undecided(var total):
             swipeVelocity.add(fingerX, at: event.timestamp)
             total.width += fingerX; total.height += fingerY
             guard hypot(total.width, total.height) >= 6 else { swipe = .undecided(total); return false }
             // Decide once per gesture; a mostly vertical start keeps scrolling tabs.
-            guard abs(total.width) > abs(total.height) * 1.3 else { swipe = .passthrough; return false }
+            guard abs(total.width) > abs(total.height) * 1.3 else {
+                model.discardUndecidedSpaceSwipe()
+                swipe = .passthrough
+                return false
+            }
             swipe = .horizontal
-            model.beginSpaceSwipe()
             model.updateSpaceSwipe(by: total.width, width: bounds.width)
             return true
         case .horizontal:
             swipeVelocity.add(fingerX, at: event.timestamp)
             model.updateSpaceSwipe(by: fingerX, width: bounds.width)
             return true
-        case .idle, .passthrough:
+        case .idle, .mayBegin, .passthrough:
             return false
         }
     }
@@ -3210,6 +3387,13 @@ private struct ShortcutGuideView: View {
 @_cdecl("BarkSwiftSidebarUpdate")
 @MainActor func barkSwiftSidebarUpdate(_ handle: UnsafeMutableRawPointer, _ json: UnsafePointer<CChar>) {
     Unmanaged<ChromiumHostingView>.fromOpaque(handle).takeUnretainedValue().model.update(String(cString: json))
+}
+
+@_cdecl("BarkSwiftSidebarSelectSpace")
+@MainActor func barkSwiftSidebarSelectSpace(_ handle: UnsafeMutableRawPointer, _ id: UnsafePointer<CChar>) {
+    let model = Unmanaged<ChromiumHostingView>.fromOpaque(handle).takeUnretainedValue().model
+    let spaceID = String(cString: id)
+    if let space = model.snapshot.spaces.first(where: { $0.id == spaceID }) { model.requestSpaceSelection(space) }
 }
 
 @_cdecl("BarkSwiftSidebarDestroy")

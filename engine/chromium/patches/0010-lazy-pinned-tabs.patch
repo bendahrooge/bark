@@ -37,18 +37,19 @@ diff --git a/chrome/browser/ui/startup/startup_browser_creator_impl.cc b/chrome/
 index 76fae29..00a0aad 100644
 --- a/chrome/browser/ui/startup/startup_browser_creator_impl.cc
 +++ b/chrome/browser/ui/startup/startup_browser_creator_impl.cc
-@@ -21,6 +21,10 @@
+@@ -21,6 +21,11 @@
  #include "base/time/time.h"
  #include "base/version.h"
  #include "build/build_config.h"
 +#if BUILDFLAG(IS_MAC)
 +#include "bark/lazy_tab.h"
 +#include "bark/native_ui_mac.h"
++#include "bark/space_tab_data.h"
 +#endif
  #include "chrome/browser/apps/platform_apps/install_chrome_app.h"
  #include "chrome/browser/browser_process.h"
  #include "chrome/browser/custom_handlers/protocol_handler_registry_factory.h"
-@@ -457,6 +461,12 @@ BrowserWindowInterface* StartupBrowserCreatorImpl::OpenTabsInBrowser(
+@@ -457,6 +462,13 @@ BrowserWindowInterface* StartupBrowserCreatorImpl::OpenTabsInBrowser(
              ? ui::mojom::WindowOpenDisposition::kNewForegroundTab
              : ui::mojom::WindowOpenDisposition::kNewBackgroundTab;
      params.tabstrip_add_types = add_types;
@@ -56,6 +57,7 @@ index 76fae29..00a0aad 100644
 +    // The new-tab/custom-startup path restores pins without a session restore.
 +    if (tab.type == StartupTab::Type::kPinned && bark::IsSwiftUIEnabled()) {
 +      params.contents_to_insert = bark::CreateLazyTab(profile_, tab.url);
++      bark::SetTabMeta(params.contents_to_insert.get(), tab.bark_tab_meta);
 +    }
 +#endif
  
@@ -64,12 +66,13 @@ index 76fae29..00a0aad 100644
 diff --git a/chrome/browser/ui/startup/BUILD.gn b/chrome/browser/ui/startup/BUILD.gn
 --- a/chrome/browser/ui/startup/BUILD.gn
 +++ b/chrome/browser/ui/startup/BUILD.gn
-@@ -293,6 +293,8 @@
+@@ -293,6 +293,9 @@
  
      if (is_mac) {
        deps += [
 +        "//bark:browser_hooks",
 +        "//bark:lazy_tab",
++        "//bark:space_tab_data",
          "//chrome/browser:app_controller_mac",
          "//chrome/browser/mac",
        ]

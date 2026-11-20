@@ -43,6 +43,10 @@ async function waitState(predicate, label) {
   throw new Error(`Timed out: ${label}`);
 }
 function visible(state) { return state.windows.filter(window => window.visible && !window.incognito); }
+async function openTabSuggestions(windowId, text) {
+  const state = await command('testOpenTabSuggestions', {windowId, text});
+  return state.windows.find(window => window.windowId === windowId).openTabSuggestions;
+}
 async function select(space, windowId) {
   await command('space', {text: space, windowId});
   const state = await waitState(state => visible(state).length === 1 && visible(state)[0].activeSpaceId === space, 'space selection');
@@ -217,6 +221,30 @@ try {
   await evaluate(browser, workPage.sessionId, "localStorage.setItem('bark-profile-test', 'work'); document.cookie = 'bark_profile_test=work; path=/; SameSite=Lax'");
   checks.push('Profile creation opens no extra window; a space assigned to another profile uses one visible window with isolated storage');
 
+  const workWindow = current.windowId;
+  for (const query of ['', 'Space page', urls.research]) {
+    const matches = await openTabSuggestions(workWindow, query);
+    assert.ok(!matches.some(tab => tab.url === urls.research || tab.url === urls.personal),
+      'Recent, title, and URL matches in Work must exclude tabs from the personal profile');
+  }
+  current = await select(personal, workWindow);
+  const matches = await openTabSuggestions(firstWindow, 'Space page');
+  const suggestion = matches.find(tab => tab.id === researchTab.id);
+  assert.equal(suggestion?.url, urls.research, 'A matching tab in another same-profile Space is available');
+  assert.ok(!matches.some(tab => tab.url === urls.work), 'A matching title in Work stays private');
+  await command('testOpenAddressSuggestion', {windowId: firstWindow, suggestion});
+  await waitState(state => visible(state)[0]?.activeSpaceId === research &&
+    visible(state)[0].tabs.some(tab => tab.id === researchTab.id && tab.active), 'switch to suggested research tab');
+
+  await select(personal, firstWindow);
+  current = await select(workSpace, firstWindow);
+  await command('testOpenAddressSuggestion', {windowId: workWindow, suggestion});
+  state = await command();
+  assert.deepEqual(visible(state).map(window => window.activeSpaceId), [workSpace]);
+  assert.equal(state.windows.find(window => window.windowId === firstWindow).activeSpaceId, personal,
+    'A stale suggestion from another profile cannot activate its tab or Space');
+  checks.push('Address-bar tab suggestions stay within the active profile and can switch between its Spaces');
+
   for (let round = 0; round < 3; round++) {
     current = await select(research, current.windowId);
     assert.equal(current.windowId, firstWindow, 'Returning to a profile reuses its original host');
@@ -231,6 +259,44 @@ try {
   }
   current = await select(personal, current.windowId);
   checks.push('Repeated switches reuse profile hosts, preserve pins/themes/emoji, and keep exactly one visible window');
+
+  const queueSwipe = next => command('queueSpaceSwipe', {
+    windowId: firstWindow, text: next, metadata: {after: workSpace},
+  });
+  const trackSwipe = () => command('trackSpaceSwipe', {windowId: firstWindow, metadata: {after: workSpace}});
+  await command('space', {windowId: firstWindow, text: workSpace, metadata: {revealAfter: '500'}});
+  await queueSwipe(personal);
+  await queueSwipe(research);
+  state = await waitState(state => visible(state).length === 1 &&
+    visible(state)[0].activeSpaceId === research, 'latest swipe during a cross-profile reveal');
+  assert.ok(visible(state)[0].tabs.some(tab => tab.id === researchTab.id && tab.active));
+
+  await command('space', {windowId: firstWindow, text: workSpace, metadata: {revealAfter: '500'}});
+  await queueSwipe(personal);
+  await queueSwipe(workSpace);
+  await waitState(state => visible(state).length === 1 &&
+    visible(state)[0].activeSpaceId === workSpace, 'reversed swipe stays on the landing Space');
+  await queueSwipe(research);
+  await waitState(state => visible(state).length === 1 &&
+    visible(state)[0].activeSpaceId === research, 'outgoing sidebar forwards a swipe after the reveal');
+
+  await command('space', {windowId: firstWindow, text: workSpace, metadata: {revealAfter: '500'}});
+  await queueSwipe(personal);
+  await trackSwipe();
+  await waitState(state => visible(state).length === 1 &&
+    visible(state)[0].activeSpaceId === workSpace, 'third swipe spans the profile handoff');
+  await queueSwipe(research);
+  await waitState(state => visible(state).length === 1 &&
+    visible(state)[0].activeSpaceId === research, 'third swipe replaces the pending destination after handoff');
+
+  await command('space', {windowId: firstWindow, text: workSpace, metadata: {revealAfter: '500'}});
+  await queueSwipe(personal);
+  await trackSwipe();
+  await waitState(state => visible(state).length === 1 &&
+    visible(state)[0].activeSpaceId === personal, 'lost gesture end releases the last committed swipe');
+  current = await select(personal, firstWindow);
+  checks.push('Rapid swipes across profiles select the latest Space, accept reversals, and finish on the visible host');
+
   await editSettings();
   fs.writeFileSync(path.join(reports, 'before-restart.json'), JSON.stringify(await command(), null, 2));
   await browser.close(); browser = null;

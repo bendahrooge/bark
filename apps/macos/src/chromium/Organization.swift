@@ -9,7 +9,7 @@ enum ChromiumFolderTree {
         let tab: ChromiumTab?
         let depth: Int
         let count: Int
-        var id: String { folder.map { "folder:" + $0.id } ?? "tab:\(tab!.id)" }
+        var id: String { folder.map { "folder:" + $0.id } ?? "tab:\(tab!.rowID)" }
     }
 
     static func descendants(of id: String, folders: [ChromiumFolder]) -> Set<String> {

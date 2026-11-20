@@ -127,6 +127,15 @@ private final class Commands {
                      "Catalog customization goes through the native bridge instead of profile preferences")
         let featureSnapshot = #"{"tabs":[{"id":7,"title":"Inbox","url":"https://mail.test/u/1","active":true,"pinned":true,"loading":false,"customTitle":"Mail","pinnedURL":"https://mail.test/","drifted":true,"folder":"f1"},{"id":8,"title":"","url":"about:blank","active":false,"pinned":false,"loading":false}],"spaces":[{"id":"s","name":"Work","active":true,"theme":"ocean","emoji":"","gradient":"rose","grain":0.4,"folders":[{"id":"f1","name":"Projects","collapsed":true}]}],"profile":"/temporary/bark-features","activeSpaceId":"s","canGoBack":false,"canGoForward":false,"media":{"id":9,"title":"Song page","url":"https://www.music.test/x","playing":true,"mediaTitle":"Song","artist":"Band"},"features":{"archiveAfterHours":24,"peek":true,"littleWindow":false,"autoPictureInPicture":true}}"#
         model.update(featureSnapshot)
+        var pin = model.snapshot.tabs[0]
+        model.close(pin)
+        precondition(pin.closeLabel == "Close pinned tab session" && commands.messages.last?["action"] as? String == "closePinnedSession")
+        pin.sessionClosed = true
+        model.close(pin)
+        precondition(pin.closeLabel == "Remove pinned tab" && commands.messages.last?["action"] as? String == "removeClosedPin" &&
+                     commands.messages.last?["id"] as? Int == pin.id)
+        model.close(model.snapshot.tabs[1])
+        precondition(commands.messages.last?["action"] as? String == "close")
         precondition(model.snapshot.tabs[0].displayTitle == "Mail" && model.snapshot.tabs[1].isSidebarPlaceholder &&
                      model.snapshot.tabs[0].drifted == true && model.folders.map(\.name) == ["Projects"] &&
                      model.folders[0].collapsed == true, "Custom titles, drifted pins and folders decode")
@@ -394,6 +403,12 @@ private final class DockWheelEvent: NSEvent {
     override var isDirectionInvertedFromDevice: Bool { true }
 }
 
+@MainActor private func waitForPager(_ message: String, until ready: () -> Bool) {
+    let deadline = Date(timeIntervalSinceNow: 1)
+    while !ready() && Date() < deadline { RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.01)) }
+    precondition(ready(), message)
+}
+
 @MainActor private func checkSpaceDockScrolling(_ handle: UnsafeMutableRawPointer, commands: Commands) {
     let host = Unmanaged<NSView>.fromOpaque(handle).takeUnretainedValue()
     let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 260, height: 480),
@@ -448,10 +463,30 @@ private final class DockWheelEvent: NSEvent {
     precondition(offset() < end, "An externally selected Space scrolls into view")
     show(19)
     precondition(offset() == end)
-    scroll(125, 0, at: tabList, phase: .began)
-    scroll(0, 0, at: tabList, phase: .ended)
-    precondition(commands.messages.last?["action"] as? String == "space" && commands.messages.last?["text"] as? String == "18",
-                 "Swiping above the dock still switches Spaces")
+    let beforeSwipes = commands.messages.count
+    func swipe(_ dx: CGFloat) {
+        scroll(dx, 0, at: tabList, phase: .began)
+        scroll(0, 0, at: tabList, phase: .ended)
+    }
+    func expectSwitches(_ expected: [String]) {
+        func destinations() -> [String] {
+            commands.messages.dropFirst(beforeSwipes).filter { $0["action"] as? String == "space" }
+                .compactMap { $0["text"] as? String }
+        }
+        waitForPager("Each swipe above the dock switches one Space in the finger's direction") {
+            destinations() == expected
+        }
+    }
+    swipe(125)
+    expectSwitches(["18"])
+    show(18)
+    scroll(160, 0, at: tabList, momentum: .began)
+    scroll(0, 0, at: tabList, momentum: .ended)
+    swipe(125)
+    expectSwitches(["18", "17"])
+    show(17)
+    swipe(-125)
+    expectSwitches(["18", "17", "18"])
 }
 
 @MainActor private func checkSpacePager(callback: ChromiumCommand) {
@@ -461,9 +496,10 @@ private final class DockWheelEvent: NSEvent {
                                     callback: callback, reduceSpaceMotion: { reduceMotion })
     defer { model.shutdown() }
 
-    func show(_ active: String, visible: Bool = true) {
+    func show(_ active: String, visible: Bool = true, otherProfile: String? = nil) {
         let spaces = ["a", "b", "c"].map { id in
-            #"{"id":"\#(id)","name":"\#(id)","active":\#(id == active),"profile":"Default"}"#
+            let profile = id == otherProfile ? "Work" : "Default"
+            return #"{"id":"\#(id)","name":"\#(id)","active":\#(id == active),"profile":"\#(profile)"}"#
         }.joined(separator: ",")
         model.update(#"""
         {"spaces":[\#(spaces)],"activeSpaceId":"\#(active)","profile":"Default","profileId":"Default",
@@ -536,6 +572,103 @@ private final class DockWheelEvent: NSEvent {
     reduceMotion = true
     model.requestSpaceSelection(spaces[2])
     precondition(selections() == ["b", "c"] && !model.spaceInMotion, "Reduce Motion selects the destination immediately")
+
+    func swipe(_ dx: CGFloat, cancelled: Bool = false) {
+        model.beginSpaceSwipe()
+        model.updateSpaceSwipe(by: dx, width: 260)
+        model.endSpaceSwipe(velocity: 0, width: 260, cancelled: cancelled)
+    }
+    show("c")
+    commands.messages.removeAll()
+    swipe(120)
+    swipe(120)
+    precondition(selections() == ["b"] && !model.spaceInMotion)
+    show("b")
+    precondition(selections() == ["b", "a"] && !model.spaceInMotion,
+                 "Reduce Motion preserves swipes made before the native selection acknowledgement")
+    show("a")
+
+    reduceMotion = false
+    commands.messages.removeAll()
+    show("a")
+    swipe(-120)
+    swipe(-120)
+    show("b")
+    waitForPager("A swipe completed before Chromium acknowledges the first advances from its destination") {
+        selections() == ["b", "c"]
+    }
+    swipe(120, cancelled: true)
+    show("c")
+    waitForPager("The pager settles after a cancelled follow-up swipe") { !model.spaceInMotion }
+    precondition(selections() == ["b", "c"] && model.outgoingSpace?.id == "c",
+                 "A cancelled swipe never replays after a delayed snapshot")
+
+    show("b")
+    swipe(-20)
+    swipe(120)
+    waitForPager("A reverse swipe during a short drag's rollback commits from the original Space") {
+        selections() == ["b", "c", "a"]
+    }
+    show("a")
+    model.finishSpaceSwipe()
+
+    // The third gesture starts while the first selection still awaits a snapshot
+    // and the second swipe is queued. Its direction is relative to the second destination.
+    for crossProfile in [false, true] {
+        let otherProfile = crossProfile ? "c" : nil
+        show("a", otherProfile: otherProfile)
+        commands.messages.removeAll()
+        swipe(-120)
+        swipe(-120)
+        model.beginSpaceSwipe()
+        model.updateSpaceSwipe(by: 55, width: 260)
+        show("b", otherProfile: otherProfile)
+        waitForPager("The queued second swipe commits while the third gesture is in progress") {
+            selections() == ["b", "c"]
+        }
+        if crossProfile {
+            let track = commands.messages.filter { $0["action"] as? String == "trackSpaceSwipe" }
+            precondition(track.count == 1 && (track[0]["metadata"] as? [String: String])?["after"] == "c",
+                         "The queued profile switch takes ownership of the third gesture before Hide")
+            show("b", visible: false, otherProfile: otherProfile)
+        } else {
+            show("c")
+        }
+        model.updateSpaceSwipe(by: 55, width: 260)
+        model.endSpaceSwipe(velocity: 0, width: 260, cancelled: false)
+        if crossProfile {
+            let queued = commands.messages.filter { $0["action"] as? String == "queueSpaceSwipe" }
+            precondition(queued.count == 1 && queued[0]["text"] as? String == "b" &&
+                         (queued[0]["metadata"] as? [String: String])?["after"] == "c" && selections() == ["b", "c"],
+                         "The old host forwards the third swipe with travel from both sides of Hide")
+        } else {
+            precondition(selections() == ["b", "c", "b"],
+                         "The third gesture keeps its travel and reverses from the queued swipe's destination")
+            show("b")
+            model.finishSpaceSwipe()
+        }
+    }
+
+    for wasHorizontal in [false, true] {
+        show("a", otherProfile: "b")
+        commands.messages.removeAll()
+        swipe(-120)
+        model.beginSpaceSwipe()
+        precondition(commands.messages.last?["action"] as? String == "trackSpaceSwipe" &&
+                     (commands.messages.last?["metadata"] as? [String: String])?["after"] == "b",
+                     "A gesture beginning during a profile switch registers immediately with the old host")
+        show("a", visible: false, otherProfile: "b")
+        if wasHorizontal {
+            model.updateSpaceSwipe(by: -120, width: 260)
+            model.endSpaceSwipe(velocity: -900, width: 260, cancelled: true)
+        } else {
+            model.discardUndecidedSpaceSwipe()
+        }
+        let queued = commands.messages.filter { $0["action"] as? String == "queueSpaceSwipe" }
+        precondition(queued.count == 1 && queued[0]["text"] == nil &&
+                     (queued[0]["metadata"] as? [String: String])?["after"] == "b" && selections() == ["b"],
+                     "Abandoning a gesture after Hide releases the old host's track without switching Spaces")
+    }
 }
 
 @MainActor private func checkSiteControls(_ model: ChromiumSidebarModel, snapshot: String, commands: Commands) {

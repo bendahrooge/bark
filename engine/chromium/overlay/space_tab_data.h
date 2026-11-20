@@ -11,9 +11,11 @@ namespace bark {
 inline constexpr char kTabSpaceKey[] = "bark.space_id";
 inline constexpr char kTabWindowGroupKey[] = "bark.window_group";
 // Bark's own per-tab state, as a JSON object saved with the session: a
-// custom title, the URL a pinned tab returns to, its sidebar folder, and when
-// it was last shown (for automatic archiving).
+// custom title, pin destination and cached page appearance, sidebar folder,
+// and when it was last shown (for automatic archiving).
 inline constexpr char kTabMetaKey[] = "bark.tab_meta";
+// Leave room in Chromium's 64 KiB session command for its header and keys.
+inline constexpr size_t kMaxTabMetaBytes = 48 * 1024;
 // Favorites appear in every space of their profile's window. Their shared
 // space ID is distinct from the UUIDs used by the space catalog.
 inline constexpr char kFavoritesSpace[] = "bark.favorites";
@@ -61,7 +63,7 @@ inline std::string GetTabMeta(content::WebContents* contents) {
 }
 // Private tabs never keep Bark metadata.
 inline void SetTabMeta(content::WebContents* contents, const std::string& meta) {
-  if (!contents || contents->GetBrowserContext()->IsOffTheRecord() || meta.size() > 8192) return;
+  if (!contents || contents->GetBrowserContext()->IsOffTheRecord() || meta.size() > kMaxTabMetaBytes) return;
   if (meta.empty()) { contents->RemoveUserData(kTabMetaKey); return; }
   auto* data = static_cast<TabMetaData*>(contents->GetUserData(kTabMetaKey));
   if (!data) {

@@ -1,6 +1,7 @@
 import Foundation
 
-func checkOrganization() throws {
+@MainActor func checkOrganization() throws {
+    checkArchiveFade()
     let folders = [ChromiumFolder(id: "root", name: "Research"),
                    ChromiumFolder(id: "child", name: "Reading", parent: "root"),
                    ChromiumFolder(id: "grandchild", name: "Later", parent: "child")]
@@ -35,4 +36,29 @@ func checkOrganization() throws {
     let results = ArchiveSearchResult.matching(archive, query: " SWIFT example ")
     precondition(results.count == 1 && results.first?.index == 2, "Search matches title/URL case-insensitively and keeps original archive indexes")
     precondition(ArchiveSearchResult.matching(archive, query: " ").count == 3)
+}
+
+@MainActor private func checkArchiveFade() {
+    let model = ChromiumSidebarModel(context: nil, callback: nil)
+    let pin = #"{"id":1,"title":"Pinned","url":"https://pin.test/","active":true,"pinned":true,"loading":false}"#
+    let tab = #"{"id":2,"title":"Reading","url":"https://reading.test/","active":false,"pinned":false,"loading":false}"#
+    let blank = #"{"id":3,"title":"","url":"about:blank","active":false,"pinned":false,"loading":false}"#
+    func update(_ tabs: [String], _ generation: Int, space: String = "work") {
+        model.update(#"{"tabs":[\#(tabs.joined(separator: ","))],"spaces":[],"activeSpaceId":"\#(space)","profile":"Default","archiveGeneration":\#(generation),"canGoBack":false,"canGoForward":false}"#)
+    }
+    update([pin, tab, blank], 0)
+    update([pin, blank], 0)
+    precondition(model.clearingTabs.isEmpty, "An ordinary tab close stays immediate")
+    update([pin, tab, blank], 0)
+    update([pin, blank], 1)
+    precondition(model.clearingTabs.map(\.id) == [2], "Clear retains only the outgoing visible unpinned rows")
+    update([pin, tab], 1)
+    precondition(model.clearingTabs.isEmpty, "Undo restores live rows during the fade")
+    update([pin], 2)
+    update([pin], 2, space: "read")
+    precondition(model.clearingTabs.isEmpty, "A fade stays in the space where Clear was used")
+    update([pin, tab], 2, space: "read")
+    update([pin], 3, space: "read")
+    RunLoop.main.run(until: Date(timeIntervalSinceNow: ChromiumSidebarModel.clearFadeDuration + 0.10))
+    precondition(model.clearingTabs.isEmpty, "The outgoing rows release their layout at the end of the fade")
 }
