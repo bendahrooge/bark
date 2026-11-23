@@ -14,11 +14,11 @@
     },
     {
       "file": "0002-mac-sidebar.patch",
-      "sha256": "2478083310ff4482d76b45659b4a60d27eaa579ee806feb1e662d7ac7d1a9b19"
+      "sha256": "74ff7ec5d275d0ef0e1ac52d82108363121e70887a0ab05d2833adb1f5a1d823"
     },
     {
       "file": "0003-branding.patch",
-      "sha256": "e6b3a134f2106a267e034dae3a13b034e6c06a8d9e4e8e2f3601fb0c34cec21a"
+      "sha256": "c56fd60211a98045bacb8d800905f11b53628b4eab683ad1f4014406520bbbaf"
     },
     {
       "file": "0004-spaces-sessions.patch",
@@ -58,7 +58,7 @@
     },
     {
       "file": "0013-bark-features.patch",
-      "sha256": "ec7a604cf7a076d91b4140586790506f9e737dee8afb6dce368b3cd672e1922f"
+      "sha256": "839e9c0cff06fba658d855eda9a822ea22ffd9db418cfbc683ec0e64acc178f7"
     },
     {
       "file": "0014-reuse-new-tab.patch",
@@ -70,7 +70,7 @@
     },
     {
       "file": "0016-page-frame.patch",
-      "sha256": "cfb9ef85ee2858abe2226e39ce9a3c1ba3da929bfb85281b7ddb949761b41a3d"
+      "sha256": "bd07d889763bcb48c3d604a58403209005a357ccb5ba5e471651f46a707ed5e0"
     },
     {
       "file": "0017-native-preferences.patch",
@@ -78,7 +78,7 @@
     },
     {
       "file": "0018-external-link-startup.patch",
-      "sha256": "8334370ee874f6804f58577b8c3e09d2aedd0e18aa352e46bfcd18cd9a3ceb7b"
+      "sha256": "af0884224b2705692dd627a370a145a128de258d367edaad47b56ef967fc7466"
     },
     {
       "file": "0019-remove-new-tab-promos.patch",
@@ -107,6 +107,18 @@
     {
       "file": "0025-pinned-tab-metadata.patch",
       "sha256": "c3251590201940b1e7267874f6bc960db2355e355fc87fead1beebc46fb9346d"
+    },
+    {
+      "file": "0026-little-window-hit-testing.patch",
+      "sha256": "0607078ca26e12165b56400ad6655d31e19e249e1862f27dedcf5878055099fc"
+    },
+    {
+      "file": "0027-standalone-little-launch.patch",
+      "sha256": "5f254226198a918a257be0f274ec1baa7b4530ad700df1cb9a3f3335d6fd21bd"
+    },
+    {
+      "file": "0028-sidebar-fullscreen.patch",
+      "sha256": "9560ffc0e681163fad21a917c29bef2520a184bd3c5de0fd0041736fd0786221"
     }
   ]
 }

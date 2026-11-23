@@ -1,8 +1,6 @@
 #ifndef BARK_BROWSER_HOOKS_H_
 #define BARK_BROWSER_HOOKS_H_
 
-#include <vector>
-
 class GURL;
 class BrowserWindowInterface;
 struct NavigateParams;
@@ -53,15 +51,15 @@ inline bool ShowNewContentsInPeek(NavigateParams& params) {
   return NewContentsPeek() && NewContentsPeek()(params);
 }
 
-// Links another app asked Bark to open. Returns true when Bark showed them
-// itself (in a Little window); otherwise Chromium opens them as tabs.
-using ExternalLinksHook = bool (*)(const std::vector<GURL>&);
-inline ExternalLinksHook& ExternalLinks() {
-  static ExternalLinksHook hook = nullptr;
+// Returns true when a Little window handled this external URL. Chromium
+// retains the original startup tab and its launch metadata on fallback.
+using ExternalLinkHook = bool (*)(const GURL&);
+inline ExternalLinkHook& ExternalLink() {
+  static ExternalLinkHook hook = nullptr;
   return hook;
 }
-inline bool OpenExternalLinks(const std::vector<GURL>& urls) {
-  return ExternalLinks() && ExternalLinks()(urls);
+inline bool OpenExternalLink(const GURL& url) {
+  return ExternalLink() && ExternalLink()(url);
 }
 
 // Chromium has selected the tabbed window that will receive an external URL.

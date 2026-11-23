@@ -1,0 +1,45 @@
+diff --git a/chrome/browser/ui/startup/startup_browser_creator.cc b/chrome/browser/ui/startup/startup_browser_creator.cc
+--- a/chrome/browser/ui/startup/startup_browser_creator.cc
++++ b/chrome/browser/ui/startup/startup_browser_creator.cc
+@@ -126,6 +126,7 @@
+ #endif
+ 
+ #if BUILDFLAG(IS_MAC)
++#include "bark/native_ui_mac.h"
+ #include "chrome/browser/web_applications/os_integration/mac/app_shim_registry.h"
+ #endif
+ 
+@@ -796,6 +797,33 @@
+     StartupProfileInfo profile_info,
+     const Profiles& last_opened_profiles,
+     bool restore_tabbed_browser) {
++#if BUILDFLAG(IS_MAC)
++  if (process_startup == chrome::startup::IsProcessStartup::kYes &&
++      command_line.GetArgs().empty() && bark::IsSwiftUIEnabled() &&
++      profile_info.mode == StartupProfileMode::kBrowserWindow &&
++      profile_info.profile && profile_info.profile->IsRegularProfile()) {
++    // StartupBrowserCreator is destroyed before AppKit finishes launching.
++    // Retain the launch options and resolve still-loaded profiles on delivery.
++    std::vector<base::WeakPtr<Profile>> profiles;
++    for (auto* profile : last_opened_profiles) profiles.push_back(profile->GetWeakPtr());
++    auto launch = base::BindOnce(
++        [](base::CommandLine command, base::FilePath dir, chrome::startup::IsFirstRun first_run,
++           bool restore, std::vector<GURL> first_tabs, base::WeakPtr<Profile> initial,
++           std::vector<base::WeakPtr<Profile>> profiles) {
++          if (!initial) return;
++          Profiles loaded;
++          for (const auto& profile : profiles) {
++            if (profile) loaded.push_back(profile.get());
++          }
++          StartupBrowserCreator creator;
++          creator.AddFirstRunTabs(first_tabs);
++          creator.LaunchBrowserForLastProfiles(command, dir, chrome::startup::IsProcessStartup::kYes,
++              first_run, {initial.get(), StartupProfileMode::kBrowserWindow}, loaded, restore);
++        }, command_line, cur_dir, is_first_run, restore_tabbed_browser, first_run_tabs_,
++        profile_info.profile->GetWeakPtr(), std::move(profiles));
++    if (bark::DeferStartupWindow(std::move(launch))) return;
++  }
++#endif
+   TRACE_EVENT0("ui", "StartupBrowserCreator::LaunchBrowserForLastProfiles");
+ #if !BUILDFLAG(IS_CHROMEOS)
+   // Start observing before launching profiles: primary-profile session restore

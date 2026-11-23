@@ -1,0 +1,33 @@
+diff --git a/components/remote_cocoa/app_shim/bridged_content_view.mm b/components/remote_cocoa/app_shim/bridged_content_view.mm
+--- a/components/remote_cocoa/app_shim/bridged_content_view.mm
++++ b/components/remote_cocoa/app_shim/bridged_content_view.mm
+@@ -3,6 +3,8 @@
+ // found in the LICENSE file.
+ 
+ #import "components/remote_cocoa/app_shim/bridged_content_view.h"
++
++#import <objc/runtime.h>
+ 
+ #include <algorithm>
+ #include <limits>
+@@ -420,6 +422,20 @@
+   remote_cocoa::mojom::HitTestResult hitTestResult;
+   _bridge->host()->GetHitTestResult(flippedPoint, &hitTestResult);
+ 
++  // The Little window's native address field and buttons occupy the space
++  // reserved above the page. Views sees only its root at this location.
++  if (hitTestResult != remote_cocoa::mojom::HitTestResult::kBlockedSubView &&
++      objc_getAssociatedObject(self.window, sel_registerName("barkLittleHeaderHeight"))) {
++    for (NSView* child in self.subviews) {
++      if ([child.identifier isEqualToString:@"BarkLittleHeader"] && !child.hidden) {
++        if (NSView* target = [child hitTest:pointInView]) {
++          return target;
++        }
++        break;
++      }
++    }
++  }
++
+   // If `point` is classified as a draggable background (HTCAPTION), return nil
+   // so that it can lead to a window drag or double-click in the title bar.
+   // Dragging could be optimized by telling the window server which regions

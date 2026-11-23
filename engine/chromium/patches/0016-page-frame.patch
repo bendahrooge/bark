@@ -1,7 +1,7 @@
 diff --git a/chrome/browser/ui/views/frame/multi_contents_view.cc b/chrome/browser/ui/views/frame/multi_contents_view.cc
 --- a/chrome/browser/ui/views/frame/multi_contents_view.cc
 +++ b/chrome/browser/ui/views/frame/multi_contents_view.cc
-@@ -54,6 +54,17 @@
+@@ -54,6 +54,18 @@
  
  namespace {
  constexpr int kSnapDistance = 15;
@@ -10,8 +10,9 @@ diff --git a/chrome/browser/ui/views/frame/multi_contents_view.cc b/chrome/brows
 +
 +bool HasBarkPageFrame(BrowserView* browser_view) {
 +#if BUILDFLAG(IS_MAC)
-+  // Bark's anchors exist only in normal sidebar windows outside fullscreen.
-+  return browser_view->GetBarkToolbarAnchor(false) != nullptr;
++  // Only normal sidebar windows need Bark's surrounding page frame.
++  return browser_view->GetIsNormalType() &&
++         browser_view->GetBarkToolbarAnchor(false) != nullptr;
 +#else
 +  return false;
 +#endif
@@ -19,7 +20,7 @@ diff --git a/chrome/browser/ui/views/frame/multi_contents_view.cc b/chrome/brows
  }
  
  void MultiContentsView::ContentsSeparators::Reset() {
-@@ -221,14 +232,20 @@
+@@ -221,14 +233,20 @@
  }
  
  void MultiContentsView::SetBackgroundRadii(const gfx::RoundedCornersF& radii) {
@@ -45,7 +46,7 @@ diff --git a/chrome/browser/ui/views/frame/multi_contents_view.cc b/chrome/brows
      GetInactiveContentsContainerView()->SetRoundedCorners(
          gfx::RoundedCornersF());
    }
-@@ -506,6 +523,12 @@
+@@ -506,6 +524,12 @@
    const int height = size_bounds.height().value();
  
    gfx::Rect available_space = gfx::Rect(width, height);
@@ -58,7 +59,7 @@ diff --git a/chrome/browser/ui/views/frame/multi_contents_view.cc b/chrome/brows
  
    const bool show_background =
        drop_target_view_->GetVisible() || IsInSplitView();
-@@ -520,7 +543,7 @@
+@@ -520,7 +544,7 @@
    available_space =
        CalculateSeparatorLayouts(available_space, layouts.child_layouts);
  
@@ -67,7 +68,7 @@ diff --git a/chrome/browser/ui/views/frame/multi_contents_view.cc b/chrome/brows
      available_space.Inset(split_view_insets_);
    }
    ViewSizes sizes = GetViewSizes(available_space);
-@@ -559,6 +582,15 @@
+@@ -559,6 +583,15 @@
  }
  
  void MultiContentsView::BeforeApplyLayout(const views::ProposedLayout& layout) {
@@ -83,7 +84,7 @@ diff --git a/chrome/browser/ui/views/frame/multi_contents_view.cc b/chrome/brows
    if (!target_content_bounds_) {
      for (auto& contents : contents_container_views_) {
        contents->SetTargetContentBounds(std::nullopt);
-@@ -800,9 +832,11 @@
+@@ -800,9 +833,11 @@
      const bool is_active =
          contents_container_view->contents_view() == GetActiveContentsView();
      contents_container_view->SetRoundedCorners(
@@ -114,7 +115,7 @@ diff --git a/chrome/browser/ui/views/frame/multi_contents_view.h b/chrome/browse
 diff --git a/chrome/browser/ui/views/frame/contents_container_view.cc b/chrome/browser/ui/views/frame/contents_container_view.cc
 --- a/chrome/browser/ui/views/frame/contents_container_view.cc
 +++ b/chrome/browser/ui/views/frame/contents_container_view.cc
-@@ -211,9 +211,16 @@
+@@ -211,9 +211,17 @@
        }
      }
    } else {
@@ -123,7 +124,8 @@ diff --git a/chrome/browser/ui/views/frame/contents_container_view.cc b/chrome/b
 -          kSplitViewContentPadding + ContentsContainerOutline::kThickness)));
 +    int padding = kSplitViewContentPadding + ContentsContainerOutline::kThickness;
 +#if BUILDFLAG(IS_MAC)
-+    if (browser_view_->GetBarkToolbarAnchor(false)) {
++    if (browser_view_->GetIsNormalType() &&
++        browser_view_->GetBarkToolbarAnchor(false)) {
 +      // Bark reserves its own surrounding gutter; keep only the focus outline.
 +      padding = ContentsContainerOutline::kThickness;
 +    }

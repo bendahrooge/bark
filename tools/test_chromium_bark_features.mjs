@@ -9,7 +9,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import {setTimeout as delay} from 'node:timers/promises';
-import {Browser} from './test_chromium_browser.mjs';
+import {Browser, uiDriver} from './test_chromium_browser.mjs';
 
 const resultRoot = path.resolve('test-results/chromium-bark-features');
 fs.mkdirSync(resultRoot, {recursive: true});
@@ -18,31 +18,10 @@ const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'bark-features-test-'));
 const driver = path.join(profile, '.bark-ui-driver');
 fs.mkdirSync(driver);
 const report = {passed: false, checks: []};
-let sequence = 0, browser;
+let browser;
 const visible = state => state.windows.find(window => window.visible && !window.incognito);
-async function command(action = 'snapshot', fields = {}) {
-  const requestId = ++sequence;
-  fs.writeFileSync(path.join(driver, 'request.tmp'), JSON.stringify({action, requestId, ...fields}));
-  fs.renameSync(path.join(driver, 'request.tmp'), path.join(driver, 'request.json'));
-  for (let i = 0; i < 400; i++) {
-    try {
-      const state = JSON.parse(fs.readFileSync(path.join(driver, 'response.json')));
-      if (state.requestId === requestId) return state;
-    } catch (error) { if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error; }
-    await delay(50);
-  }
-  throw Error('Timed out: ' + action);
-}
-async function waitFor(predicate, label) {
-  let state;
-  for (let i = 0; i < 150; i++) {
-    state = await command();
-    if (predicate(state)) return state;
-    await delay(100);
-  }
-  fs.writeFileSync(path.join(reports, 'last-state.json'), JSON.stringify(state, null, 2));
-  throw Error('Timed out: ' + label);
-}
+const ui = uiDriver({directory: () => driver, browser: () => browser, reports});
+const {command, waitFor} = ui;
 function launch(name) {
   for (const file of ['request.json', 'response.json']) fs.rmSync(path.join(driver, file), {force: true});
   return new Browser(profile, path.join(reports, name + '.log'), {
@@ -112,7 +91,12 @@ try {
   let state = await waitFor(state => !!visible(state)?.activeSpaceId, 'initial window');
   const windowId = visible(state).windowId;
   const features = visible(state).features;
-  assert.deepEqual(features, {archiveAfterHours: 12, peek: true, littleWindow: true, autoPictureInPicture: true});
+  assert.deepEqual(features, {archiveAfterHours: 12, peek: true, littleWindow: true, globalLittleShortcut: false, autoPictureInPicture: true});
+  const registration = await command('testLittleShortcutRegistration', {windowId});
+  for (const check of ['reserved', 'conflict', 'retrySucceeded', 'released']) {
+    assert.equal(registration[check], true, 'Global Little shortcut registration: ' + check);
+  }
+  report.checks.push('The macOS global shortcut detects a conflict, registers on retry, and releases the combination when disabled');
   assert.equal(visible(state).autoPictureInPictureDefault, 'allow');
   assert.equal(visible(state).autoPictureInPictureFeature, true);
   report.checks.push('Bark defaults: 12-hour archiving, Peek, Little windows, and automatic picture-in-picture allowed and enabled');
@@ -149,8 +133,13 @@ try {
     assert.deepEqual(visible(state).allTabs.map(tab => tab.id), beforePeek, 'Peek leaves the window tab strip intact');
   };
   await clickNewTarget(pinPage, '/peek-close');
-  state = await peekOpens('/peek-close');
+  state = await waitFor(state => visible(state)?.popups.some(popup =>
+    popup.kind === 'peek' && popup.url === base + '/peek-close' && popup.contentBounds?.height > 0 &&
+    Math.abs(popup.contentBounds.y - popup.bounds.y) <= 1), 'pinned link preview page reaches the top edge');
+  const preview = visible(state).popups.find(popup => popup.kind === 'peek');
+  assert.equal(preview.chromiumToolbarVisible, false, 'The pinned link preview hides the Chromium address bar');
   checkOpener(state);
+  report.checks.push('A pinned target=_blank link opens a preview with web content at its top edge and no address bar');
   const {copyPasteboardName} = await command('testUsePrivateCopyPasteboard', {windowId});
   assert.match(copyPasteboardName, /^BarkUITest\.CopyLink\.[0-9a-f-]{36}$/);
   const copiedPath = '/peek-close?view=details#section';
@@ -326,7 +315,25 @@ try {
     !tabWith(state, '/folder-new').folder && !metaOf(state, loose).pinnedURL, 'unpinning leaves the folder');
   report.checks.push('Pinned tabs go into folders that can be closed and renamed; unpinning takes a tab out');
 
-  // Restart: titles, pinned pages and folders are saved with the session.
+  // Save a Little window with navigation history and a popup opened by a page.
+  const littleStart = base + '/little-before-restart';
+  const littleSaved = base + '/little-restored';
+  const webPopup = base + '/ordinary-popup';
+  await command('testExternalLinks', {windowId, urls: [littleStart], littleWindow: true});
+  await page(littleStart);
+  await command('testPopupCommand', {windowId, kind: 'little', text: 'navigate:' + littleSaved});
+  const littleSession = await page(littleSaved);
+  const beforeRestart = await browser.send('Page.getNavigationHistory', {}, littleSession);
+  await browser.send('Runtime.evaluate', {
+    expression: `void window.open(${JSON.stringify(webPopup)}, '_blank', 'popup,width=480,height=360')`,
+    userGesture: true,
+  }, await page(base + '/folder-new'));
+  const popupSession = await page(webPopup);
+  await waitFor(state => visible(state).popups.some(p => p.kind === 'little' && p.hasControls && p.url === webPopup),
+    'page popup gets Little controls');
+  const popupOpener = await browser.send('Runtime.evaluate', {expression: 'window.opener !== null', returnByValue: true}, popupSession);
+  assert.equal(popupOpener.result.value, true, 'A page popup keeps its opener under the Little header');
+
   await browser.close();
   browser = launch('restart');
   state = await waitFor(state => tabWith(state, '/rename') && tabWith(state, '/pin') &&
@@ -337,6 +344,20 @@ try {
   report.checks.push('Custom titles, pinned pages and folders survive a restart');
   const restoredWindow = visible(state).windowId;
   const restoredPin = tabWith(state, '/pin').id;
+  state = await waitFor(state => [littleSaved, webPopup].every(url => visible(state).popups.some(p =>
+    p.kind === 'little' && p.hasControls && p.url === url)), 'restored Little controls');
+  assert.equal(visible(state).popups.length, 2, 'Every restored popup gets the Little header');
+  const afterRestart = await browser.send('Page.getNavigationHistory', {}, await page(littleSaved));
+  assert.deepEqual(afterRestart.entries.map(entry => entry.url), beforeRestart.entries.map(entry => entry.url));
+  assert.equal(afterRestart.currentIndex, beforeRestart.currentIndex);
+  await page(webPopup);
+  const ordinary = (await browser.send('Target.getTargets')).targetInfos.find(target => target.url === webPopup);
+  await browser.send('Target.closeTarget', {targetId: ordinary.targetId});
+  await waitFor(state => visible(state).popups.length === 1, 'close restored page popup');
+  await command('testPopupControl', {windowId: restoredWindow, kind: 'little', text: 'expand'});
+  await waitFor(state => tabWith(state, '/little-restored')?.active && !visible(state).popups.length,
+    'promote restored Little window');
+  report.checks.push('Little windows reattach to their restored pages and history. Popups opened by pages use the same Little header.');
 
   await command('deleteFolder', {windowId: restoredWindow, metadata: {folder: tabWith(state, '/pin').folder}});
   state = await waitFor(state => !visible(state).spaces.find(space => space.active).folders && tabWith(state, '/pin')?.pinned &&
@@ -389,16 +410,110 @@ try {
   }, 'gradient cleared');
   report.checks.push('Spaces keep a gradient and grain, and return to a single color');
 
-  // Little window for links from other apps.
-  await command('testExternalLinks', {windowId: restoredWindow, urls: [base + '/little']});
-  state = await waitFor(state => visible(state)?.popups.some(popup => popup.kind === 'little' && popup.url === base + '/little'), 'little window');
-  assert.ok(!tabWith(state, '/little'), 'The link is not added as a tab');
-  await command('testPopupCommand', {windowId: restoredWindow, kind: 'little', text: 'expand'});
-  state = await waitFor(state => visible(state)?.popups.length === 0 && tabWith(state, '/little')?.active, 'little becomes tab');
+  // Deliver real external-link events and invoke the same controls as the Little window toolbar.
+  const external = (...paths) => command('testExternalLinks', {windowId: restoredWindow,
+    urls: paths.map(suffix => base + suffix), littleWindow: true});
+  const littleWindows = state => visible(state).popups.filter(popup => popup.kind === 'little');
+  const littleControl = text => command('testPopupControl', {windowId: restoredWindow, kind: 'little', text});
+  const originalSpace = visible(state).activeSpaceId;
+  const beforeLittle = visible(state).allTabs.map(tab => tab.id);
+  await command('newLittleWindow', {windowId: restoredWindow});
+  state = await waitFor(state => littleWindows(state).some(p => p.url === 'about:blank' && p.addressEditor),
+    'fresh Little window opens its address editor');
+  assert.deepEqual(visible(state).allTabs.map(tab => tab.id), beforeLittle);
+  assert.equal(visible(state).addressPanelVisible, false);
+  await littleControl('close');
+  await waitFor(state => littleWindows(state).length === 0, 'close blank Little window');
+  const firstLink = '/little?story=1#first';
+  const currentLink = '/little?story=1#details';
+  const secondLink = '/little?story=1#second';
+  await external('/little-start', '/little-start');
+  state = await waitFor(state => littleWindows(state).length === 1 &&
+    littleWindows(state)[0].url === base + '/little-start' && littleWindows(state)[0].keyWindow &&
+    littleWindows(state)[0].site === new URL(base).host,
+    'duplicate links share a single Little window');
+  const lookup = littleWindows(state)[0];
+  assert.equal(lookup.chromiumToolbarVisible, false);
+  assert.ok(Math.abs(lookup.contentBounds.y - lookup.bounds.y - 46) <= 1,
+    'The single 46-point Little title bar ends where the web page begins');
+  const header = await command('testLittleHeaderImage', {windowId: restoredWindow, windowNumber: lookup.windowNumber});
+  assert.equal(header.headerHeight, 46);
+  assert.equal(header.addressHit, true, 'AppKit routes a hit on the site label to the native address button');
+  assert.ok(Math.abs(header.headerWidth - lookup.bounds.width) <= 1);
+  const png = Buffer.from(header.headerPNG, 'base64');
+  assert.equal(png.toString('ascii', 12, 16), 'IHDR');
+  assert.ok(png.readUInt32BE(16) >= header.headerWidth && png.readUInt32BE(20) >= header.headerHeight);
+  const otherOrigin = new URL('/other-origin', base);
+  otherOrigin.hostname = 'localhost';
+  await browser.send('Page.navigate', {url: otherOrigin.href}, await page(base + '/little-start'));
+  await waitFor(state => littleWindows(state).some(p => p.url === otherOrigin.href && p.site === otherOrigin.host),
+    'the displayed site follows navigation to a different host');
+  await command('testPopupCommand', {windowId: restoredWindow, kind: 'little', text: 'navigate:' + base + firstLink});
+  await waitFor(state => littleWindows(state).length === 1 && littleWindows(state)[0].url === base + firstLink &&
+    littleWindows(state)[0].site === new URL(base).host,
+    'address submission stays in its Little window');
+  report.checks.push('Little windows display one title bar, and its site label follows cross-origin navigation and address edits.');
+  const littlePage = await page(base + firstLink);
+  const token = await browser.send('Runtime.evaluate', {
+    expression: `history.pushState({step: 1}, '', ${JSON.stringify(currentLink)}); window.littleToken = crypto.randomUUID()`,
+    returnByValue: true,
+  }, littlePage);
+  const littleHistory = await browser.send('Page.getNavigationHistory', {}, littlePage);
+  await external(secondLink);
+  state = await waitFor(state => littleWindows(state).length === 2 &&
+    littleWindows(state).some(p => p.url === base + secondLink && p.keyWindow), 'independent Little windows');
+  await external(currentLink);
+  state = await waitFor(state => littleWindows(state).length === 2 &&
+    littleWindows(state).some(p => p.url === base + currentLink && p.keyWindow), 'existing Little window regains focus');
+  assert.deepEqual(visible(state).allTabs.map(tab => tab.id), beforeLittle);
+  report.checks.push('Distinct external links open separate Little windows. Reopening the current URL focuses the existing page.');
+
+  await command('createSpace', {windowId: restoredWindow, text: 'Reading'});
+  state = await waitFor(state => visible(state).spaces.some(s => s.active && s.name === 'Reading') &&
+    littleWindows(state).every(p => p.defaultSpace === visible(state).activeSpaceId), 'Little windows update their default Space to Reading');
+  const reading = visible(state).activeSpaceId;
+  await littleControl('expand');
+  state = await waitFor(state => tabWith(state, currentLink)?.active && littleWindows(state).length === 1, 'default promotion to Reading');
+  assert.equal(visible(state).allTabs.find(tab => tab.url === base + currentLink).space, reading);
+  assert.equal(littleWindows(state)[0].url, base + secondLink);
+  const promotedToken = await browser.send('Runtime.evaluate', {expression: 'window.littleToken', returnByValue: true}, littlePage);
+  assert.equal(promotedToken.result.value, token.result.value);
+  const promotedHistory = await browser.send('Page.getNavigationHistory', {}, littlePage);
+  assert.deepEqual(promotedHistory.entries.map(entry => entry.url), littleHistory.entries.map(entry => entry.url));
+  assert.equal(promotedHistory.currentIndex, littleHistory.currentIndex);
+
+  await littleControl('expand:missing-space');
+  assert.equal(littleWindows(await command())[0].url, base + secondLink);
+  await littleControl('expand:' + originalSpace);
+  state = await waitFor(state => visible(state).activeSpaceId === originalSpace && tabWith(state, secondLink)?.active &&
+    littleWindows(state).length === 0, 'promote Little window to the chosen Space');
+  assert.equal(visible(state).allTabs.find(tab => tab.url === base + secondLink).space, originalSpace);
+  assert.equal(visible(state).allTabs.find(tab => tab.url === base + currentLink).space, reading);
+  report.checks.push('Little windows move intact into the currently selected or explicitly chosen Space, retaining JavaScript and history.');
+  const mixedLink = base + '/little-mixed';
+  await command('testExternalLinks', {windowId: restoredWindow, urls: [mixedLink, 'chrome://version/'], littleWindow: true});
+  state = await waitFor(state => littleWindows(state).some(p => p.url === mixedLink) &&
+    visible(state).tabs.some(tab => tab.url === 'chrome://version/'), 'mixed external link batch');
+  assert.ok(!visible(state).allTabs.some(tab => tab.url === mixedLink));
+  await littleControl('close');
+  await waitFor(state => littleWindows(state).length === 0, 'close Little window from mixed batch');
+  report.checks.push('A mixed external-link batch routes each link once. Web links open in Little windows and browser pages open as tabs.');
   await command('setLittleWindow', {windowId: restoredWindow, text: 'off'});
   state = await waitFor(state => visible(state)?.features.littleWindow === false, 'little window off');
   await command('setLittleWindow', {windowId: restoredWindow, text: 'on'});
-  report.checks.push('Links from other apps open in a Little window that can move into the space');
+
+  await external('/little-after-close');
+  await waitFor(state => littleWindows(state).some(p => p.url === base + '/little-after-close'), 'Little window before owner closes');
+  const survivingPage = await page(base + '/little-after-close');
+  await command('testCloseWindow', {windowId: restoredWindow});
+  await waitFor(state => state.windows.length === 0, 'last sidebar closes independently');
+  const survivingURL = await browser.send('Runtime.evaluate', {expression: 'location.href', returnByValue: true}, survivingPage);
+  assert.equal(survivingURL.result.value, base + '/little-after-close');
+  await command('testPopupControl', {text: 'expand:' + reading});
+  state = await waitFor(state => visible(state)?.activeSpaceId === reading && tabWith(state, '/little-after-close')?.active,
+    'surviving Little window promotes into a new sidebar');
+  assert.equal(littleWindows(state).length, 0);
+  report.checks.push('Closing the last sidebar keeps a Little window usable and its page can still move into a Space.');
 
   await browser.close(); browser = null;
   report.passed = true;

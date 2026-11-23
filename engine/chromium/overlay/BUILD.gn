@@ -17,8 +17,12 @@ source_set("pinned_tab_close") {
 source_set("browser_hooks") {
   sources = [ "browser_hooks.h" ]
   if (is_mac) {
-    sources += [ "native_ui_mac.h", "native_ui_mac.mm" ]
-    deps = [ "//base" ]
+    sources += [ "mac/sidebar_mac.h", "native_ui_mac.h", "native_ui_mac.mm" ]
+    deps = [
+      "//base",
+      "//chrome/browser/profiles:profile",
+      "//chrome/browser/ui/browser_window",
+    ]
     frameworks = [ "Foundation.framework" ]
   }
 }
@@ -108,7 +112,17 @@ if (is_mac) {
     script = "compile_swift.py"
     sources = [
       "mac/ChromiumSidebar.swift",
+      "mac/ChromiumSnapshot.swift",
+      "mac/SidebarModel.swift",
+      "mac/AddressBar.swift",
+      "mac/SidebarRows.swift",
+      "mac/SplitDrop.swift",
+      "mac/Shortcuts.swift",
       "mac/BarkFeatures.swift",
+      "mac/Toast.swift",
+      "mac/TabSwitcher.swift",
+      "mac/PopupChrome.swift",
+      "mac/MediaPlayer.swift",
       "mac/SiteControls.swift",
       "mac/PageFrame.swift",
       "mac/Organization.swift",
@@ -173,7 +187,7 @@ if (is_mac) {
   }
 
   source_set("sidebar") {
-    sources = [ "mac/bark_importer.h", "mac/bark_importer.cc", "mac/sidebar_mac.h", "mac/sidebar_mac.mm", "mac/space_test_driver.h", "mac/space_test_driver.cc" ]
+    sources = [ "mac/bark_importer.h", "mac/bark_importer.cc", "mac/sidebar_mac.mm", "mac/space_test_driver.h", "mac/space_test_driver.cc" ]
     deps = [
       ":browser_hooks",
       ":lazy_tab",
@@ -204,12 +218,14 @@ if (is_mac) {
       "//chrome/browser/themes",
       "//chrome/browser/ui:browser_commands",
       "//chrome/browser/ui:chrome_pages",
+      "//chrome/browser/ui:fullscreen_util_mac",
       "//chrome/browser/ui/browser_window",
       "//chrome/browser/ui/browser_window:create_browser_window",
       "//chrome/browser/ui:bubble_anchor_util",
       "//chrome/browser/ui/extensions",
       "//chrome/browser/ui/page_info",
       "//chrome/browser/ui/startup/default_browser_prompt",
+      "//chrome/browser/ui/views/extensions:extensions_toolbar_desktop",
       "//chrome/browser/ui/views/infobars",
       "//chrome/browser/ui/webui:profile_helper",
       "//chrome/browser/ui:recently_audible_helper",
@@ -220,6 +236,7 @@ if (is_mac) {
       "//chrome/browser/ui/toolbar",
       "//chrome/browser/ui/views/frame:browser_view_header",
       "//chrome/browser/ui/views/frame:browser_frame_view",
+      "//chrome/common:constants",
       "//components/content_settings/core/browser",
       "//components/content_settings/core/common",
       "//components/download/content/public",
@@ -244,6 +261,7 @@ if (is_mac) {
       "//third_party/blink/public/common",
       "//third_party/metrics_proto",
       "//ui/base",
+      "//ui/base/accelerators/global_accelerator_listener",
       "//ui/compositor",
       "//ui/gfx",
       "//ui/views",

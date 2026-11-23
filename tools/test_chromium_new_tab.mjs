@@ -7,7 +7,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import {setTimeout as delay} from 'node:timers/promises';
-import {Browser, bundleEnablesSwiftUI} from './test_chromium_browser.mjs';
+import {Browser, uiDriver, bundleEnablesSwiftUI, expectTitle} from './test_chromium_browser.mjs';
 
 const root = path.resolve('test-results/chromium-new-tab');
 fs.mkdirSync(root, {recursive: true});
@@ -19,33 +19,13 @@ const needsDevelopmentSwitch = !bundleEnablesSwiftUI();
 let driver = path.join(profile, '.bark-ui-driver');
 fs.mkdirSync(driver, {recursive: true});
 const report = {passed: false, checks: []};
-let browser, latest, sequence = 0, pendingResponse;
+let browser, pendingResponse;
 let coldFocusReport;
 const visible = state => state.windows.find(window => window.visible && !window.incognito);
 const active = window => window?.tabs.find(tab => tab.active);
 const blanks = window => window.tabs.filter(tab => ['about:blank', 'chrome://newtab/'].includes(tab.url));
-async function command(action = 'snapshot', fields = {}) {
-  const requestId = ++sequence;
-  fs.writeFileSync(path.join(driver, 'request.tmp'), JSON.stringify({action, requestId, ...fields}));
-  fs.renameSync(path.join(driver, 'request.tmp'), path.join(driver, 'request.json'));
-  for (let i = 0; i < 400; i++) {
-    if (browser.exited) throw Error('Test browser exited');
-    try {
-      const state = JSON.parse(fs.readFileSync(path.join(driver, 'response.json')));
-      if (state.requestId === requestId) { latest = state; return state; }
-    } catch (error) { if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error; }
-    await delay(50);
-  }
-  throw Error('Timed out: ' + action);
-}
-async function waitFor(predicate, label) {
-  for (let i = 0; i < 150; i++) {
-    const state = await command();
-    if (predicate(state)) return state;
-    await delay(100);
-  }
-  throw Error('Timed out: ' + label);
-}
+const ui = uiDriver({directory: () => driver, browser: () => browser});
+const {command, waitFor} = ui;
 async function expectPageFocus(url) {
   const {targetInfos} = await browser.send('Target.getTargets');
   const target = targetInfos.find(target => target.type === 'page' && target.url === url);
@@ -67,14 +47,47 @@ async function checkColdExternalLink(executable, url) {
   assert.equal(path.join(bundle, 'Contents/MacOS', path.basename(executable)), executable);
   const coldProfile = fs.mkdtempSync(path.join(profiles, 'launch-services-'));
   const profileFlag = '--user-data-dir=' + coldProfile;
+  const savedURL = new URL('/saved-before-quit', url).href;
+  const options = {nativeWindow: true, nativeUI: needsDevelopmentSwitch, loadFixture: false};
+  async function expectSavedTab(instance) {
+    for (let i = 0; i < 100; i++) {
+      const {targetInfos} = await instance.send('Target.getTargets');
+      const target = targetInfos.find(target => target.type === 'page' && target.url === savedURL);
+      if (target) {
+        const {sessionId} = await instance.send('Target.attachToTarget', {targetId: target.targetId, flatten: true});
+        await expectTitle(instance, sessionId, 'New tab test page');
+        return;
+      }
+      await delay(100);
+    }
+    assert.fail('Expected the main browser session to contain ' + savedURL);
+  }
+  const seed = new Browser(coldProfile, path.join(reports, 'seed.log'), {...options, initialURL: savedURL});
+  try { await expectSavedTab(seed); } finally { await seed.close(); }
   try {
     // Deliver a Get URL event at launch. A URL supplied on argv takes a different startup path.
     execFileSync('/usr/bin/open', ['-n', '-a', bundle, '-u', url, '--args', profileFlag,
       ...(needsDevelopmentSwitch ? ['--bark-swift-ui'] : []),
-      '--no-first-run', '--no-default-browser-check', '--use-mock-keychain',
-      '--disable-background-networking', '--disable-component-update', '--disable-sync'], {timeout: 15000});
+      '--remote-debugging-port=0', '--no-first-run', '--no-default-browser-check', '--use-mock-keychain',
+      '--disable-background-networking', '--disable-component-update', '--disable-sync',
+      '--disable-features=DialMediaRouteProvider'], {timeout: 15000});
     for (let i = 0; !coldFocusReport && i < 250; i++) await delay(100);
+    assert.ok(coldFocusReport, 'The external page must load during startup');
+    const port = fs.readFileSync(path.join(coldProfile, 'DevToolsActivePort'), 'utf8').split('\n')[0];
+    const debug = 'http://127.0.0.1:' + port;
+    const pages = async () => (await (await fetch(debug + '/json/list')).json()).filter(target => target.type === 'page');
+    const initial = await pages();
+    assert.deepEqual(initial.map(target => target.url), [url], 'A cold external launch opens only Little Bark');
     assert.deepEqual(coldFocusReport, [true, true], 'The externally delivered page must keep keyboard focus as startup finishes');
+    await fetch(debug + '/json/close/' + initial[0].id);
+    for (let i = 0; i < 100 && (await pages()).length; i++) await delay(50);
+    assert.deepEqual(await pages(), [], 'The app is running with all browser windows closed');
+    const next = url + '?second';
+    coldFocusReport = undefined;
+    execFileSync('/usr/bin/open', ['-a', bundle, '-u', next], {timeout: 15000});
+    for (let i = 0; !coldFocusReport && i < 250; i++) await delay(100);
+    assert.deepEqual(coldFocusReport, [true, true]);
+    assert.deepEqual((await pages()).map(target => target.url), [next], 'A windowless app also opens only Little Bark');
   } finally {
     // LaunchServices owns the child. Identify it independently by the disposable
     // profile lock and its command line before sending it a termination signal.
@@ -85,7 +98,7 @@ async function checkColdExternalLink(executable, url) {
       const line = execFileSync('/bin/ps', ['-ww', '-p', String(pid), '-o', 'command='], {encoding: 'utf8'}).trim();
       assert.ok(line.startsWith(executable + ' ') && (' ' + line + ' ').includes(' ' + profileFlag + ' '),
         'The process must own this executable and disposable profile');
-      process.kill(pid, 'SIGTERM');
+      process.kill(pid, 'SIGINT'); // Let Chromium finish saving the disposable session.
       for (let i = 0; ; i++) {
         try { process.kill(pid, 0); } catch (error) {
           if (error.code === 'ESRCH') break;
@@ -96,6 +109,8 @@ async function checkColdExternalLink(executable, url) {
       }
     }
   }
+  const restored = new Browser(coldProfile, path.join(reports, 'restored.log'), {...options, initialURL: null});
+  try { await expectSavedTab(restored); } finally { await restored.close(); }
 }
 const server = http.createServer((request, response) => {
   if (request.url === '/pending') { pendingResponse = response; return; }
@@ -212,7 +227,8 @@ try {
   state = await command('testNewTab', {windowId, count: 5});
   assert.equal(active(visible(state)).id, otherBlank);
   assert.equal(visible(state).tabs.length, 1);
-  assert.equal(active(visible(state)).blankPlaceholder, true);
+  assert.equal(active(visible(state)).blankPlaceholder, false, 'A pending destination is visible before it commits');
+  assert.ok(visible(state).switcher.some(tab => tab.id === otherBlank), 'The loading tab appears in the sidebar');
   await command('navigateNew', {windowId, text: base + '/while-pending'});
   state = await page(base + '/while-pending');
   assert.notEqual(active(visible(state)).id, otherBlank);
@@ -317,12 +333,12 @@ try {
   const executable = browser.child.spawnfile;
   await browser.close(); browser = null;
   await checkColdExternalLink(executable, base + '/mac-external-link');
-  report.checks.push('A real macOS URL event that launches Bark leaves keyboard focus on the delivered page');
+  report.checks.push('External macOS links open a single focused Little Bark window on cold launch and after closing the last window');
   report.passed = true;
   console.log(`${report.checks.length} focused New Tab checks passed`);
 } catch (error) {
   report.error = error.stack || String(error);
-  report.lastState = latest;
+  report.lastState = ui.latest;
   report.preservedProfiles = profiles;
   console.error(error);
   process.exitCode = 1;

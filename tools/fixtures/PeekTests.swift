@@ -10,6 +10,11 @@ import QuartzCore
     }
     precondition(command("o", 31, .command) == "expand" && command("o", 31, .command, kind: "little") == "expand",
                  "Peek and Little windows share the same expand shortcut")
+    precondition(command("O", 31, [.command, .shift], kind: "little") == "chooseSpace" &&
+                 command("l", 37, .command, kind: "little") == "editAddress" &&
+                 command("n", 45, [.command, .option], kind: "little") == "newLittleWindow" &&
+                 command("l", 37, .command) == nil,
+                 "Little windows can choose a Space, edit the address and open another lookup from the keyboard")
     for kind in ["peek", "little"] {
         precondition(command("C", 8, [.command, .shift], kind: kind) == "copyURL" &&
                      command("c", 8, .command, kind: kind) == nil,
@@ -80,7 +85,128 @@ private func checkPeekLayout() {
     init(window: NSWindow) { self.window = window }
 }
 
+@MainActor private func checkLittleWindowControls() {
+    // The command-line fixture cannot become the frontmost application.
+    // Exercise focus gating locally; the browser suite opens a real key popup.
+    final class FixtureWindow: NSWindow {
+        var hasKeyboardFocus = false
+        override var isKeyWindow: Bool { hasKeyboardFocus }
+    }
+    let popup = FixtureWindow(contentRect: NSRect(x: 0, y: 0, width: 940, height: 480),
+                              styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                              backing: .buffered, defer: false)
+    let recorder = PromotionRecorder(window: popup)
+    let pointer = Unmanaged.passUnretained(popup).toOpaque()
+    let config = #"{"kind":"little","activeSpace":"work","spaces":[{"id":"work","name":"Work"},{"id":"home","name":"Home","emoji":"🌿"}],"site":"example.test","security":"secure","canShowSiteInfo":true}"#
+    let handle = barkSwiftPopupAttach(pointer, nil, nil, config, Unmanaged.passUnretained(recorder).toOpaque(), { pointer, message in
+        guard let pointer, let message else { return }
+        MainActor.assumeIsolated {
+            Unmanaged<PromotionRecorder>.fromOpaque(pointer).takeUnretainedValue().commands.append(String(cString: message))
+        }
+    })!
+    func find(_ identifier: String, in view: NSView?) -> NSView? {
+        guard let view else { return nil }
+        if view.identifier?.rawValue == identifier { return view }
+        return view.subviews.lazy.compactMap { find(identifier, in: $0) }.first
+    }
+    guard let header = find("BarkLittleHeader", in: popup.contentView),
+          let address = find("BarkLittleAddress", in: header) as? NSButton,
+          let siteInfo = find("BarkLittleSiteInfo", in: header) as? NSButton,
+          let extensions = find("BarkLittleExtensions", in: header) as? NSButton,
+          let copy = find("BarkLittleCopyURL", in: header) as? NSButton,
+          let open = find("BarkLittleOpen", in: header) as? NSButton,
+          let chooser = find("BarkLittleChooseSpace", in: header) as? NSButton,
+          let menu = chooser.menu else {
+        preconditionFailure("Little windows expose address, site, page tools and Space controls in their header")
+    }
+    precondition(popup.titleVisibility == .hidden && popup.styleMask.contains(.fullSizeContentView))
+    popup.contentView?.superview?.layoutSubtreeIfNeeded()
+    header.layoutSubtreeIfNeeded()
+    precondition(address.title == "example.test" && siteInfo.title.contains("Work") && open.title.contains("Open in Work"))
+    func frame(_ view: NSView) -> NSRect { view.convert(view.bounds, to: header) }
+    for width: CGFloat in [940, 600, 360, 940] {
+        popup.setContentSize(NSSize(width: width, height: 480))
+        popup.contentView?.superview?.layoutSubtreeIfNeeded()
+        header.layoutSubtreeIfNeeded()
+        precondition(abs(header.bounds.width - width) <= 1 && abs(header.bounds.height - 46) <= 1,
+                     "The full-width header stays one row high as the window resizes")
+        for control in [address, siteInfo, open, chooser] {
+            precondition(!control.isHiddenOrHasHiddenAncestor && frame(control).width >= 16 &&
+                         header.bounds.insetBy(dx: -1, dy: -1).contains(frame(control)),
+                         "The address, site information, Open button and chooser remain reachable")
+        }
+        if width == 940 {
+            precondition(!extensions.isHiddenOrHasHiddenAncestor && !copy.isHiddenOrHasHiddenAncestor &&
+                         frame(copy).midX < frame(open).midX && frame(open).midX < frame(chooser).midX,
+                         "At normal sizes, page tools lead into the two Space actions at the right")
+        }
+    }
+    address.performClick(nil)
+    copy.performClick(nil)
+    precondition(recorder.commands == ["editAddress", "copyURL"], "A page-link click copies while the address click edits")
+    open.performClick(nil)
+    menu.performActionForItem(at: menu.indexOfItem(withTitle: "🌿 Home"))
+    precondition(Array(recorder.commands.suffix(2)) == ["expand:work", "expand:home"], "Both actions promote to the indicated Space")
+    let refreshed = #"{"activeSpace":"home","spaces":[{"id":"home","name":"Personal"}]}"#
+    barkSwiftPopupSetSpaces(handle, refreshed)
+    header.layoutSubtreeIfNeeded()
+    precondition(open.title.contains("Open in Personal") && siteInfo.title.contains("Personal") &&
+                 chooser.menu?.indexOfItem(withTitle: "Work") == -1,
+                 "The visible title and picker follow the current Space and drop deleted destinations")
+    barkSwiftPopupPerformControl(handle, "expand")
+    precondition(recorder.commands.last == "expand:home")
+
+    func visibleField() -> NSTextField? {
+        guard let field = find("BarkLittleEditor", in: header) as? NSTextField,
+              !field.isHiddenOrHasHiddenAncestor, field.window === popup else { return nil }
+        return field
+    }
+    popup.makeKeyAndOrderFront(nil)
+    defer { popup.orderOut(nil) }
+    let currentURL = "https://example.test/story?view=one#section"
+    barkSwiftPopupEditAddress(handle, currentURL)
+    precondition(!barkSwiftPopupAddressVisible(handle))
+    barkSwiftPopupEditAddress(handle, "", true)
+    NotificationCenter.default.post(name: NSWindow.didBecomeKeyNotification, object: nil)
+    RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+    popup.hasKeyboardFocus = true
+    NotificationCenter.default.post(name: NSWindow.didBecomeKeyNotification, object: popup)
+    RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+    precondition(!barkSwiftPopupAddressVisible(handle), "Switching to another window cancels the waiting editor")
+    popup.hasKeyboardFocus = false
+    barkSwiftPopupEditAddress(handle, currentURL, true)
+    popup.hasKeyboardFocus = true
+    NotificationCenter.default.post(name: NSWindow.didBecomeKeyNotification, object: popup)
+    RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+    guard let field = visibleField() else { preconditionFailure("The Little window shows its own address editor") }
+    precondition(field.stringValue == currentURL)
+    barkSwiftPopupUpdateSite(handle, #"{"site":"next.test","security":"secure","canShowSiteInfo":true}"#)
+    precondition(field.stringValue == currentURL, "A page update preserves an address being edited")
+    let editor = field.currentEditor() as! NSTextView
+    precondition(editor.selectedRange() == NSRange(location: 0, length: currentURL.utf16.count))
+    let previousCommands = recorder.commands
+    editor.doCommand(by: #selector(NSResponder.cancelOperation(_:)))
+    header.layoutSubtreeIfNeeded()
+    precondition(visibleField() == nil && recorder.commands == previousCommands + ["focusPage"] && address.title == "next.test",
+                 "Escape restores the current site without submitting the edited URL")
+    popup.makeKeyAndOrderFront(nil)
+    barkSwiftPopupEditAddress(handle, currentURL)
+    guard let input = visibleField() else { preconditionFailure("The dismissed editor can reopen") }
+    input.stringValue = "  local search terms  "
+    input.sendAction(input.action, to: input.target)
+    precondition(recorder.commands == previousCommands + ["focusPage", "navigate:local search terms"] && visibleField() == nil)
+    popup.makeKeyAndOrderFront(nil)
+    barkSwiftPopupEditAddress(handle, currentURL)
+    guard let stale = visibleField() else { preconditionFailure("The editor can reopen after a submission") }
+    barkSwiftPopupDetach(handle)
+    let sent = recorder.commands
+    if let action = stale.action, let target = stale.target { stale.sendAction(action, to: target) }
+    precondition(visibleField() == nil && recorder.commands == sent && header.superview == nil,
+                 "Detaching the popup retires its title band and address actions")
+}
+
 @MainActor func checkPeekPromotion() {
+    checkLittleWindowControls()
     enum Scenario { case settled, reduced, earlyExpand, earlyClose }
     for scenario in [Scenario.settled, .reduced, .earlyExpand, .earlyClose] {
         let reduced = scenario == .reduced
@@ -97,8 +223,8 @@ private func checkPeekLayout() {
         owner.orderBack(nil)
         popup.orderBack(nil)
         let recorder = PromotionRecorder(window: popup)
-        let chrome = PopupChrome(window: popup, owner: owner, viewport: viewport, kind: "peek", space: "Testing",
-                                 emoji: "", canSplit: true, context: Unmanaged.passUnretained(recorder).toOpaque(),
+        let chrome = PopupChrome(window: popup, owner: owner, viewport: viewport, kind: "peek",
+                                 canSplit: true, context: Unmanaged.passUnretained(recorder).toOpaque(),
                                  callback: { pointer, message in
             guard let pointer, let message else { return }
             MainActor.assumeIsolated {

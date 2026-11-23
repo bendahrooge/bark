@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {setTimeout as delay} from 'node:timers/promises';
-import {Browser} from './test_chromium_browser.mjs';
+import {Browser, uiDriver} from './test_chromium_browser.mjs';
 
 const root = path.resolve('test-results/chromium-sidebar-hover');
 fs.mkdirSync(root, {recursive: true});
@@ -14,22 +14,10 @@ const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'bark-sidebar-hover-'));
 const driver = path.join(profile, '.bark-ui-driver');
 fs.mkdirSync(driver);
 const report = {passed: false, checks: []};
-let browser, latest, sequence = 0;
+let browser;
 const visible = state => state.windows.find(window => window.visible && window.incognito);
-async function command(action = 'snapshot', fields = {}) {
-  const requestId = ++sequence;
-  fs.writeFileSync(path.join(driver, 'request.tmp'), JSON.stringify({action, requestId, ...fields}));
-  fs.renameSync(path.join(driver, 'request.tmp'), path.join(driver, 'request.json'));
-  for (let i = 0; i < 400; i++) {
-    if (browser.exited) throw Error('Test browser exited');
-    try {
-      const state = JSON.parse(fs.readFileSync(path.join(driver, 'response.json')));
-      if (state.requestId === requestId) { latest = state; return state; }
-    } catch (error) { if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error; }
-    await delay(30);
-  }
-  throw Error('Timed out: ' + action);
-}
+const ui = uiDriver({directory: () => driver, browser: () => browser, poll: 30});
+const {command} = ui;
 async function waitFor(predicate, label) {
   for (let i = 0; i < 100; i++) {
     const state = await command();
@@ -81,8 +69,21 @@ try {
   await waitFor(window => window?.tabs.some(tab => tab.active && tab.title === 'Sidebar hover test' && !tab.loading), 'loaded test page');
   await activate();
   await pointer(600);
-  await send('resize', {width: 260});
   if (window.sidebarCollapsed) await send('toggleSidebar');
+  await waitFor(shown, 'docked sidebar');
+  const sidebarWidth = 380;
+  await send('resize', {width: sidebarWidth});
+  for (const width of [960, 780, 960]) {
+    await browser.send('Browser.setWindowBounds', {windowId, bounds: {width}});
+    window = await waitFor(window => window?.bounds.width === width, `window width ${width}`);
+    assert.equal(window.sidebarWidth, sidebarWidth, 'Window resizing keeps the manually selected sidebar width');
+    checkBackdrop(window);
+    assert.equal(window.sidebarPresentation.pageAreaBounds.width, width - sidebarWidth,
+      'The page takes the remaining window width');
+  }
+  report.checks.push('Narrowing and widening the window keeps the docked sidebar at its manually selected width');
+
+  await send('resize', {width: 260});
   const docked = await waitFor(shown, 'docked sidebar');
   const dockedLights = docked.sidebarPresentation.trafficLights;
   await send('toggleSidebar');
@@ -190,7 +191,7 @@ try {
   console.log(`${report.checks.length} focused sidebar-hover checks passed`);
 } catch (error) {
   report.error = error.stack || String(error);
-  report.lastState = latest;
+  report.lastState = ui.latest;
   report.preservedProfile = profile;
   console.error(error);
   process.exitCode = 1;

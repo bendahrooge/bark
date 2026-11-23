@@ -7,35 +7,17 @@ import os from 'node:os';
 import path from 'node:path';
 import {execFileSync} from 'node:child_process';
 import {setTimeout as delay} from 'node:timers/promises';
-import {Browser} from './test_chromium_browser.mjs';
+import {Browser, uiDriver} from './test_chromium_browser.mjs';
 
 const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'bark-import-test-'));
 const driver = path.join(profile, '.bark-ui-driver');
 fs.mkdirSync(driver);
 const reports = path.resolve('test-results/chromium-bark-import');
 fs.mkdirSync(reports, {recursive: true});
-let sequence = 0, browser, passed = false;
-async function command(action = 'snapshot', fields = {}) {
-  const requestId = ++sequence;
-  fs.writeFileSync(path.join(driver, 'request.tmp'), JSON.stringify({action, requestId, ...fields}));
-  fs.renameSync(path.join(driver, 'request.tmp'), path.join(driver, 'request.json'));
-  for (let i = 0; i < 400; i++) {
-    try {
-      const state = JSON.parse(fs.readFileSync(path.join(driver, 'response.json')));
-      if (state.requestId === requestId) return state;
-    } catch (error) { if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error; }
-    await delay(50);
-  }
-  throw Error('Timed out: ' + action);
-}
-async function waitFor(predicate, label) {
-  for (let i = 0; i < 300; i++) {
-    const state = await command();
-    if (predicate(state)) return state;
-    await delay(100);
-  }
-  throw Error('Timed out: ' + label);
-}
+let browser, passed = false;
+const ui = uiDriver({directory: () => driver, browser: () => browser});
+const {command} = ui;
+const waitFor = (predicate, label) => ui.waitFor(predicate, label, 300);
 function visible(state) { return state.windows.find(window => window.visible && !window.incognito); }
 function launch(name) {
   for (const name of ['request.json', 'response.json']) fs.rmSync(path.join(driver, name), {force: true});

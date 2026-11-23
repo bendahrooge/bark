@@ -321,6 +321,7 @@ struct BarkPreferencesView: View {
         Section("Link previews · All profiles") {
             Toggle("Preview links from pinned tabs in Peek", isOn: Binding(get: { features.peek }, set: { model.send("setPeek", text: $0 ? "on" : "off") }))
             Toggle("Open links from other apps in a Little window", isOn: Binding(get: { features.littleWindow }, set: { model.send("setLittleWindow", text: $0 ? "on" : "off") }))
+            GlobalLittleShortcutSetting(features: features) { model.send("setGlobalLittleShortcut", text: $0 ? "on" : "off") }
         }
         Section("Profile: \(model.activeProfileName)") {
             Toggle("Picture in Picture when switching tabs", isOn: Binding(get: { features.autoPictureInPicture }, set: { model.send("setAutoPictureInPicture", text: $0 ? "on" : "off") }))

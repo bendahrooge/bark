@@ -5,8 +5,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
-import {setTimeout as delay} from 'node:timers/promises';
-import {Browser} from './test_chromium_browser.mjs';
+import {Browser, uiDriver} from './test_chromium_browser.mjs';
 
 const root = path.resolve('test-results/chromium-tab-detach');
 fs.mkdirSync(root, {recursive: true});
@@ -14,30 +13,10 @@ const reports = fs.mkdtempSync(path.join(root, 'run-'));
 const profiles = fs.mkdtempSync(path.join(os.tmpdir(), 'bark-tab-detach-'));
 let profile, driver;
 const report = {passed: false, checks: []};
-let browser, latest, sequence = 0;
+let browser;
 const visible = state => state.windows.find(window => window.visible && !window.incognito);
-async function command(action = 'snapshot', fields = {}) {
-  const requestId = ++sequence;
-  fs.writeFileSync(path.join(driver, 'request.tmp'), JSON.stringify({action, requestId, ...fields}));
-  fs.renameSync(path.join(driver, 'request.tmp'), path.join(driver, 'request.json'));
-  for (let i = 0; i < 400; i++) {
-    if (browser.exited) throw Error('Test browser exited');
-    try {
-      const state = JSON.parse(fs.readFileSync(path.join(driver, 'response.json')));
-      if (state.requestId === requestId) { latest = state; return state; }
-    } catch (error) { if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error; }
-    await delay(50);
-  }
-  throw Error('Timed out: ' + action);
-}
-async function waitFor(predicate, label) {
-  for (let i = 0; i < 150; i++) {
-    const state = await command();
-    if (predicate(state)) return state;
-    await delay(100);
-  }
-  throw Error('Timed out: ' + label);
-}
+const ui = uiDriver({directory: () => driver, browser: () => browser});
+const {command, waitFor} = ui;
 function launch(name, profileName = 'regular', initialURL = base + '/anchor') {
   profile = path.join(profiles, profileName);
   driver = path.join(profile, '.bark-ui-driver');
@@ -202,13 +181,13 @@ try {
 
   await command('testCloseWindow', {windowId: pinnedDestination.windowId});
   await waitFor(state => !windowById(state, pinnedDestination.windowId), 'close detached window');
-  assert.ok(windowById(latest, source)?.visible && tabIn(windowById(latest, source), 'keep-pin').pinned);
+  assert.ok(windowById(ui.latest, source)?.visible && tabIn(windowById(ui.latest, source), 'keep-pin').pinned);
   report.checks.push('Closing a detached window leaves the original workspace open');
 
   const independentGroups = Object.fromEntries(['live-state', 'move-favorite', 'split-b']
-    .map(name => [name, owner(latest, name).windowGroup]));
+    .map(name => [name, owner(ui.latest, name).windowGroup]));
   assert.equal(new Set([originalGroup, detached.windowGroup, ...Object.values(independentGroups)]).size, 5);
-  report.beforeRestart = latest.windows.map(window => ({windowId: window.windowId,
+  report.beforeRestart = ui.latest.windows.map(window => ({windowId: window.windowId,
     group: window.windowGroup, urls: window.allTabs.map(tab => tab.url)}));
   await close();
   browser = launch('restore');
@@ -229,7 +208,7 @@ try {
   console.log(`${report.checks.length} focused tab-detach checks passed`);
 } catch (error) {
   report.error = error.stack || String(error);
-  report.lastState = latest;
+  report.lastState = ui.latest;
   report.preservedProfile = profile;
   console.error(error);
   process.exitCode = 1;

@@ -6,7 +6,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import {setTimeout as delay} from 'node:timers/promises';
-import {Browser, expectTitle} from './test_chromium_browser.mjs';
+import {Browser, uiDriver, expectTitle} from './test_chromium_browser.mjs';
 
 const root = path.resolve('test-results/chromium-command-bar');
 fs.mkdirSync(root, {recursive: true});
@@ -15,32 +15,12 @@ const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'bark-command-bar-'));
 const driver = path.join(profile, '.bark-ui-driver');
 fs.mkdirSync(driver);
 const report = {passed: false, checks: []};
-let browser, latest, sequence = 0;
+let browser;
 const visible = state => state.windows.find(window => window.visible && !window.incognito);
 const active = state => visible(state)?.tabs.find(tab => tab.active) ?? visible(state)?.favorites?.find(tab => tab.active);
 const blanks = state => visible(state).tabs.filter(tab => !tab.pinned && !tab.split && ['about:blank', 'chrome://newtab/'].includes(tab.url));
-async function command(action = 'snapshot', fields = {}) {
-  const requestId = ++sequence;
-  fs.writeFileSync(path.join(driver, 'request.tmp'), JSON.stringify({action, requestId, ...fields}));
-  fs.renameSync(path.join(driver, 'request.tmp'), path.join(driver, 'request.json'));
-  for (let i = 0; i < 400; i++) {
-    if (browser.exited) throw Error('Test browser exited');
-    try {
-      const state = JSON.parse(fs.readFileSync(path.join(driver, 'response.json')));
-      if (state.requestId === requestId) { latest = state; return state; }
-    } catch (error) { if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error; }
-    await delay(50);
-  }
-  throw Error('Timed out: ' + action);
-}
-async function waitFor(predicate, label) {
-  for (let i = 0; i < 150; i++) {
-    const state = await command();
-    if (predicate(state)) return state;
-    await delay(100);
-  }
-  throw Error('Timed out: ' + label);
-}
+const ui = uiDriver({directory: () => driver, browser: () => browser});
+const {command, waitFor} = ui;
 async function suggestions(windowId, text) {
   return visible(await command('testCommandSuggestions', {windowId, text})).commandSuggestions;
 }
@@ -159,7 +139,7 @@ try {
   report.passed = true;
   console.log(`${report.checks.length} command-bar checks passed`);
 } catch (error) {
-  report.error = error.stack || String(error); report.lastState = latest; report.preservedProfile = profile;
+  report.error = error.stack || String(error); report.lastState = ui.latest; report.preservedProfile = profile;
   if (browser && !browser.exited) {
     try {
       const {targetInfos} = await browser.send('Target.getTargets');

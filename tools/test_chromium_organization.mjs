@@ -5,8 +5,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
-import {setTimeout as delay} from 'node:timers/promises';
-import {Browser} from './test_chromium_browser.mjs';
+import {Browser, uiDriver} from './test_chromium_browser.mjs';
 
 const resultRoot = path.resolve('test-results/chromium-organization');
 fs.mkdirSync(resultRoot, {recursive: true});
@@ -15,31 +14,10 @@ const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'bark-organization-test-')
 const driver = path.join(profile, '.bark-ui-driver');
 fs.mkdirSync(driver);
 const report = {passed: false, checks: []};
-let sequence = 0, browser;
+let browser;
 const visible = state => state.windows.find(window => window.visible && !window.incognito);
-async function command(action = 'snapshot', fields = {}) {
-  const requestId = ++sequence;
-  fs.writeFileSync(path.join(driver, 'request.tmp'), JSON.stringify({action, requestId, ...fields}));
-  fs.renameSync(path.join(driver, 'request.tmp'), path.join(driver, 'request.json'));
-  for (let i = 0; i < 400; i++) {
-    try {
-      const state = JSON.parse(fs.readFileSync(path.join(driver, 'response.json')));
-      if (state.requestId === requestId) return state;
-    } catch (error) { if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error; }
-    await delay(50);
-  }
-  throw Error('Timed out: ' + action);
-}
-async function waitFor(predicate, label) {
-  let state;
-  for (let i = 0; i < 150; i++) {
-    state = await command();
-    if (predicate(state)) return state;
-    await delay(100);
-  }
-  fs.writeFileSync(path.join(reports, 'last-state.json'), JSON.stringify(state, null, 2));
-  throw Error('Timed out: ' + label);
-}
+const ui = uiDriver({directory: () => driver, browser: () => browser, reports});
+const {command, waitFor} = ui;
 function launch(name) {
   for (const file of ['request.json', 'response.json']) fs.rmSync(path.join(driver, file), {force: true});
   return new Browser(profile, path.join(reports, name + '.log'), {

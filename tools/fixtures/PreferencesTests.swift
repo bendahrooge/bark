@@ -22,6 +22,14 @@ import Foundation
     }
     try update(snapshot)
     precondition(model.snapshot.preferences?.searchEngines.count == 2 && model.snapshot.preferences?.downloadPath == "/tmp")
+    let features: [String: Any] = ["archiveAfterHours": 12, "peek": true, "littleWindow": true, "autoPictureInPicture": true]
+    snapshot["features"] = features
+    try update(snapshot)
+    precondition(model.snapshot.features != nil && model.snapshot.features?.globalLittleShortcut != true)
+    snapshot["features"] = features.merging(["globalLittleShortcut": true, "globalLittleShortcutUnavailable": true]) { _, new in new }
+    try update(snapshot)
+    precondition(model.snapshot.features?.globalLittleShortcut == true && model.snapshot.features?.globalLittleShortcutUnavailable == true,
+                 "A requested shortcut with a registration conflict offers a retry")
     model.setPreference("searchEngine", value: "2")
     precondition(recorder.messages.last?["action"] as? String == "setPreference" &&
                  recorder.messages.last?["text"] as? String == "2" &&

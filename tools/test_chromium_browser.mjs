@@ -155,6 +155,43 @@ export class Browser {
   }
 }
 
+// Talks to the native UI test driver through request/response files.
+// `directory` and `browser` are getters because suites relaunch the browser
+// and some move to a second profile. `reports` saves the last state when a
+// wait times out.
+export function uiDriver({directory, browser = () => null, attempts = 400, poll = 50, reports}) {
+  let sequence = 0;
+  const ui = {
+    latest: undefined,
+    async command(action = 'snapshot', fields = {}) {
+      const requestId = ++sequence;
+      const file = name => path.join(directory(), name);
+      fs.writeFileSync(file('request.tmp'), JSON.stringify({action, requestId, ...fields}));
+      fs.renameSync(file('request.tmp'), file('request.json'));
+      for (let i = 0; i < attempts; i++) {
+        if (browser()?.exited) throw Error('Test browser exited');
+        try {
+          const state = JSON.parse(fs.readFileSync(file('response.json')));
+          if (state.requestId === requestId) { ui.latest = state; return state; }
+        } catch (error) { if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error; }
+        await delay(poll);
+      }
+      throw Error('Timed out: ' + action);
+    },
+    async waitFor(predicate, label, tries = 150) {
+      let state;
+      for (let i = 0; i < tries; i++) {
+        state = await ui.command();
+        if (predicate(state)) return state;
+        await delay(100);
+      }
+      if (reports) fs.writeFileSync(path.join(reports, 'last-state.json'), JSON.stringify(state, null, 2));
+      throw Error('Timed out: ' + label);
+    },
+  };
+  return ui;
+}
+
 export async function expectTitle(browser, sessionId, expected) {
   const deadline = Date.now() + 30000;
   let title;

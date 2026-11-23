@@ -6,7 +6,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import {setTimeout as delay} from 'node:timers/promises';
-import {Browser, expectTitle} from './test_chromium_browser.mjs';
+import {Browser, uiDriver, expectTitle} from './test_chromium_browser.mjs';
 
 const root = path.resolve('test-results/chromium-extensions-menu');
 fs.mkdirSync(root, {recursive: true});
@@ -15,30 +15,10 @@ const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'bark-extensions-menu-'));
 const driver = path.join(profile, '.bark-ui-driver');
 fs.mkdirSync(driver);
 const report = {passed: false, checks: []};
-let browser, latest, sequence = 0;
+let browser;
 const visible = state => state.windows.find(window => window.visible && !window.incognito);
-async function command(action = 'snapshot', fields = {}) {
-  const requestId = ++sequence;
-  fs.writeFileSync(path.join(driver, 'request.tmp'), JSON.stringify({action, requestId, ...fields}));
-  fs.renameSync(path.join(driver, 'request.tmp'), path.join(driver, 'request.json'));
-  for (let i = 0; i < 400; i++) {
-    if (browser.exited) throw Error('Test browser exited');
-    try {
-      const state = JSON.parse(fs.readFileSync(path.join(driver, 'response.json')));
-      if (state.requestId === requestId) { latest = state; return state; }
-    } catch (error) { if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error; }
-    await delay(50);
-  }
-  throw Error('Timed out: ' + action);
-}
-async function waitFor(predicate, label) {
-  for (let i = 0; i < 150; i++) {
-    const state = await command();
-    if (predicate(state)) return state;
-    await delay(100);
-  }
-  throw Error('Timed out: ' + label);
-}
+const ui = uiDriver({directory: () => driver, browser: () => browser});
+const {command, waitFor} = ui;
 async function menu(windowId, text) {
   return (await command('testExtensionsMenu', {windowId, ...(text ? {text} : {})})).extensionsMenu;
 }
@@ -192,6 +172,30 @@ try {
   assert.equal(visible(state).siteControls, undefined, 'Closed popovers stop serializing extension icons');
   report.checks.push('Site-control extension actions work for the current page and reject missing, stale, or wrong-tab context');
 
+  const littleURL = url + '?little-window';
+  const littleFields = {windowId: original.windowId, kind: 'little'};
+  await command('testExternalLinks', {windowId: original.windowId, urls: [littleURL], littleWindow: true});
+  await waitFor(state => visible(state)?.popups.some(p => p.url === littleURL && p.keyWindow), 'Little window for extension action');
+  const littleTarget = (await browser.send('Target.getTargets')).targetInfos.find(target => target.type === 'page' && target.url === littleURL);
+  assert.ok(littleTarget);
+  const {sessionId: littleSession} = await browser.send('Target.attachToTarget', {targetId: littleTarget.targetId, flatten: true});
+  await browser.send('Page.enable', {}, littleSession);
+  await expectTitle(browser, littleSession, 'Waiting for extension');
+  await evaluate(pageSession, "document.title = 'Sidebar page'");
+  await command('testPopupControl', {...littleFields, text: 'extensions'});
+  let pressed = false;
+  for (let attempt = 0; attempt < 50 && !pressed; ++attempt) {
+    pressed = (await command('testLittleExtensionMenuItem', {windowId: original.windowId, text: 'Click Action Test'})).pressed;
+    if (!pressed) await delay(100);
+  }
+  assert.ok(pressed, 'The puzzle button opens a menu with an enabled extension action attached to the Little window');
+  await expectTitle(browser, littleSession, 'Menu click action passed');
+  await expectTitle(browser, pageSession, 'Sidebar page');
+  await command('testPopupControl', {...littleFields, text: 'close'});
+  await waitFor(state => !visible(state)?.popups.length, 'close Little window after using its extension');
+  await command('testActivateWindow', {windowId: original.windowId});
+  report.checks.push('The Little window puzzle button opens its extensions menu and its action operates on the Little page.');
+
   await command('createProfile', {windowId: original.windowId, text: 'Other profile'});
   state = await waitFor(state => visible(state)?.spaces.some(space => space.name === 'Other profile'), 'second profile');
   const otherSpace = visible(state).spaces.find(space => space.name === 'Other profile').id;
@@ -245,7 +249,7 @@ try {
   console.log(`${report.checks.length} focused Extensions menu checks passed`);
 } catch (error) {
   report.error = error.stack || String(error);
-  report.lastState = latest;
+  report.lastState = ui.latest;
   report.preservedProfile = profile;
   console.error(error);
   process.exitCode = 1;

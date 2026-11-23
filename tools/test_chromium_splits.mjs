@@ -6,7 +6,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import {setTimeout as delay} from 'node:timers/promises';
-import {Browser} from './test_chromium_browser.mjs';
+import {Browser, uiDriver} from './test_chromium_browser.mjs';
 
 const root = path.resolve('test-results/chromium-splits');
 fs.mkdirSync(root, {recursive: true});
@@ -15,30 +15,10 @@ const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'bark-splits-'));
 const driver = path.join(profile, '.bark-ui-driver');
 fs.mkdirSync(driver);
 const report = {passed: false, checks: []};
-let browser, latest, sequence = 0;
+let browser;
 const visible = state => state.windows.find(window => window.visible && !window.incognito);
-async function command(action = 'snapshot', fields = {}) {
-  const requestId = ++sequence;
-  fs.writeFileSync(path.join(driver, 'request.tmp'), JSON.stringify({action, requestId, ...fields}));
-  fs.renameSync(path.join(driver, 'request.tmp'), path.join(driver, 'request.json'));
-  for (let i = 0; i < 400; i++) {
-    if (browser.exited) throw Error('Test browser exited');
-    try {
-      const state = JSON.parse(fs.readFileSync(path.join(driver, 'response.json')));
-      if (state.requestId === requestId) { latest = state; return state; }
-    } catch (error) { if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error; }
-    await delay(50);
-  }
-  throw Error('Timed out: ' + action);
-}
-async function waitFor(predicate, label) {
-  for (let i = 0; i < 150; i++) {
-    const state = await command();
-    if (predicate(state)) return state;
-    await delay(100);
-  }
-  throw Error('Timed out: ' + label);
-}
+const ui = uiDriver({directory: () => driver, browser: () => browser});
+const {command, waitFor} = ui;
 function launch(name) {
   for (const file of ['request.json', 'response.json']) fs.rmSync(path.join(driver, file), {force: true});
   return new Browser(profile, path.join(reports, name + '.log'), {
@@ -110,7 +90,7 @@ try {
     report.checks.push(`A ${side} drop places the dragged page on the correct half and separates cleanly`);
   }
   await action('select', 'a');
-  await command('toggleSidebar', {windowId: visible(latest).windowId});
+  await command('toggleSidebar', {windowId: visible(ui.latest).windowId});
   const collapsedState = await waitFor(state => visible(state)?.sidebarCollapsed &&
     !visible(state).sidebarPresentation.animating, 'collapsed frame');
   checkPageFrame(collapsedState, ['a']);
@@ -120,16 +100,81 @@ try {
   checkPageFrame(expandedState, ['a']);
   report.checks.push('The real page frame stays aligned through sidebar collapse and expansion');
   const fullscreenTarget = (await browser.send('Target.getTargets')).targetInfos.find(target => target.url === base + '/a');
-  const fullscreenWindow = await browser.send('Browser.getWindowForTarget', {targetId: fullscreenTarget.targetId});
-  await browser.send('Browser.setWindowBounds', {windowId: fullscreenWindow.windowId, bounds: {windowState: 'fullscreen'}});
-  await waitFor(state => visible(state)?.sidebarPresentation.pageFrameVisible === false, 'native fullscreen without Bark frame');
-  // macOS completes its Space transition asynchronously before accepting exit.
+  const {windowId} = await browser.send('Browser.getWindowForTarget', {targetId: fullscreenTarget.targetId});
+  const checkDockedWindow = async (fullscreen, label) => {
+    const state = await waitFor(state => {
+      const window = visible(state);
+      const presentation = window?.sidebarPresentation;
+      return presentation?.windowFullscreen === fullscreen && !presentation.animating && presentation.sidebarVisible &&
+        presentation.headerVisible && presentation.pageFrameVisible && nativeTab(state, 'a')?.nativeCornerRadius === 10 &&
+        presentation.pageAreaBounds.x - window.bounds.x === window.sidebarWidth;
+    }, label);
+    const window = visible(state);
+    const ui = window.sidebarPresentation;
+    assert.equal(ui.chromiumTabStripVisible, false, 'The horizontal tab strip stays hidden');
+    assert.equal(ui.chromiumToolbarVisible, false, 'The stock toolbar stays hidden');
+    assert.equal(ui.opacity, 1);
+    assert.equal(ui.sidebarX, 0);
+    checkPageFrame(state, ['a']);
+  };
+  await command('testActivateWindow', {windowId});
+  await command('testClickZoomButton', {windowId});
+  await checkDockedWindow(true, 'green button enters browser fullscreen with the docked sidebar');
+  // Allow AppKit to finish moving the window into its fullscreen Space.
   await delay(1200);
-  await browser.send('Browser.setWindowBounds', {windowId: fullscreenWindow.windowId, bounds: {windowState: 'normal'}});
-  const restoredFrame = await waitFor(state => visible(state)?.sidebarPresentation.pageFrameVisible === true &&
-    nativeTab(state, 'a')?.nativeCornerRadius === 10, 'frame restored after fullscreen');
-  checkPageFrame(restoredFrame, ['a']);
-  report.checks.push('Fullscreen retains Chromium layout and restores the Bark frame on exit');
+  const {sessionId} = await browser.send('Target.attachToTarget', {targetId: fullscreenTarget.targetId, flatten: true});
+  await browser.send('Page.bringToFront', {}, sessionId);
+  await command('testActivateWindow', {windowId});
+  await waitFor(state => visible(state)?.sidebarPresentation.keyWindow, 'focused fullscreen browser window');
+  const evaluate = async expression => {
+    const result = await browser.send('Runtime.evaluate', {expression, awaitPromise: true}, sessionId);
+    assert.ok(!result.exceptionDetails, result.exceptionDetails?.exception?.description);
+  };
+  await evaluate(`document.addEventListener('click', () => {
+    window.fullscreenRequest = document.documentElement.requestFullscreen();
+  }, {once: true})`);
+  for (const type of ['mousePressed', 'mouseReleased']) {
+    await browser.send('Input.dispatchMouseEvent', {type, x: 40, y: 40, button: 'left', clickCount: 1}, sessionId);
+  }
+  await evaluate('window.fullscreenRequest');
+  const contentState = await waitFor(state => {
+    const ui = visible(state)?.sidebarPresentation;
+    return ui?.windowFullscreen && !ui.sidebarVisible && !ui.headerVisible && !ui.pageFrameVisible;
+  }, 'page fullscreen hides the browser sidebar');
+  assert.equal(nativeTab(contentState, 'a').contentBounds.width, visible(contentState).bounds.width,
+    'The fullscreen page uses the width previously occupied by the sidebar');
+  await evaluate('document.exitFullscreen()');
+  await checkDockedWindow(true, 'leaving page fullscreen restores the sidebar inside browser fullscreen');
+  const checkCollapsedWindow = async fullscreen => {
+    const state = await waitFor(state => {
+      const window = visible(state);
+      const ui = window?.sidebarPresentation;
+      return ui?.windowFullscreen === fullscreen && window.sidebarCollapsed &&
+        !ui.animating && !ui.sidebarVisible && ui.edgeVisible;
+    }, 'collapsed sidebar with its reveal target');
+    const window = visible(state);
+    assert.equal(window.sidebarPresentation.pageAreaBounds.width, window.bounds.width,
+      'Collapsing the sidebar gives its width back to the page');
+    assert.equal(window.sidebarPresentation.chromiumTabStripVisible, false);
+  };
+  await command('toggleSidebar', {windowId});
+  await checkCollapsedWindow(true);
+  await command('testSidebarPointer', {windowId, x: 5, y: 300});
+  const floatingState = await waitFor(state => {
+    const window = visible(state);
+    return window?.sidebarRevealed && window.sidebarPresentation.sidebarVisible &&
+      !window.sidebarPresentation.animating;
+  }, 'hover reveals the collapsed sidebar in browser fullscreen');
+  assert.equal(visible(floatingState).sidebarPresentation.pageAreaBounds.width, visible(floatingState).bounds.width);
+  await command('testSidebarPointer', {windowId, x: 600, y: 300});
+  await checkCollapsedWindow(true);
+  await browser.send('Browser.setWindowBounds', {windowId, bounds: {windowState: 'normal'}});
+  await checkCollapsedWindow(false);
+  await command('toggleSidebar', {windowId});
+  await checkDockedWindow(false, 'restored window with the docked sidebar');
+  report.checks.push('The green fullscreen button preserves the left sidebar and keeps the horizontal tab strip hidden');
+  report.checks.push('A fullscreen page uses the full window and restores the docked sidebar on exit');
+  report.checks.push('The collapsed sidebar reveals on hover in browser fullscreen and stays collapsed on exit');
   await action('select', 'a');
   await action('splitTab', 'b', 'left');
   await waitFor(state => layoutMatches(state, 'left'), 'existing side-by-side split');
@@ -146,14 +191,14 @@ try {
   // the restored pair before checking its rendered bounds.
   await action('select', 'a');
   await waitFor(state => layoutMatches(state, 'top', 'c'), 'restored stacked split');
-  assert.ok(tab(latest, 'b') && !tab(latest, 'b').split, 'The previous partner remains a separate tab');
+  assert.ok(tab(ui.latest, 'b') && !tab(ui.latest, 'b').split, 'The previous partner remains a separate tab');
   report.checks.push('A stacked split and its top/bottom order survive a normal browser restart');
   await close();
   report.passed = true;
   console.log(`${report.checks.length} focused split-view checks passed`);
 } catch (error) {
   report.error = error.stack || String(error);
-  report.lastState = latest;
+  report.lastState = ui.latest;
   report.preservedProfile = profile;
   console.error(error);
   process.exitCode = 1;

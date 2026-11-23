@@ -1,0 +1,92 @@
+diff --git a/chrome/browser/ui/fullscreen/BUILD.gn b/chrome/browser/ui/fullscreen/BUILD.gn
+--- a/chrome/browser/ui/fullscreen/BUILD.gn
++++ b/chrome/browser/ui/fullscreen/BUILD.gn
+@@ -30,4 +30,7 @@
+     "//chrome/browser/ui/views/interaction",
+     "//ui/views",
+   ]
++  if (is_mac) {
++    deps += [ "//bark:browser_hooks" ]
++  }
+ }
+diff --git a/chrome/browser/ui/fullscreen/browser_window_fullscreen_controller.cc b/chrome/browser/ui/fullscreen/browser_window_fullscreen_controller.cc
+--- a/chrome/browser/ui/fullscreen/browser_window_fullscreen_controller.cc
++++ b/chrome/browser/ui/fullscreen/browser_window_fullscreen_controller.cc
+@@ -14,6 +14,10 @@
+ #include "ui/views/interaction/element_tracker_views.h"
+ #include "ui/views/view_utils.h"
+ #include "ui/views/widget/widget.h"
++
++#if BUILDFLAG(IS_MAC)
++#include "bark/native_ui_mac.h"
++#endif
+ 
+ DEFINE_USER_DATA(BrowserWindowFullscreenController);
+ 
+@@ -46,6 +50,9 @@
+ BrowserWindowFullscreenController::BrowserWindowFullscreenController(
+     BrowserWindowInterface& browser)
+     : browser_(browser),
++#if BUILDFLAG(IS_MAC)
++      uses_bark_sidebar_(bark::UsesSidebar(browser)),
++#endif
+       scoped_data_holder_(browser.GetUnownedUserDataHost(), *this) {}
+ 
+ BrowserWindowFullscreenController::~BrowserWindowFullscreenController() =
+diff --git a/chrome/browser/ui/fullscreen/browser_window_fullscreen_controller.h b/chrome/browser/ui/fullscreen/browser_window_fullscreen_controller.h
+--- a/chrome/browser/ui/fullscreen/browser_window_fullscreen_controller.h
++++ b/chrome/browser/ui/fullscreen/browser_window_fullscreen_controller.h
+@@ -8,6 +8,7 @@
+ #include <optional>
+ 
+ #include "base/memory/raw_ref.h"
++#include "build/build_config.h"
+ #include "ui/base/unowned_user_data/scoped_unowned_user_data.h"
+ 
+ class BrowserWindowInterface;
+@@ -38,12 +39,19 @@
+ 
+   void SetForceFullscreen(bool force_fullscreen);
+ 
++#if BUILDFLAG(IS_MAC)
++  bool uses_bark_sidebar() const { return uses_bark_sidebar_; }
++#endif
++
+   void set_should_hide_ui_for_fullscreen_for_testing(bool should_hide_ui) {
+     should_hide_ui_for_fullscreen_for_testing_ = should_hide_ui;
+   }
+ 
+  private:
+   const raw_ref<BrowserWindowInterface> browser_;
++#if BUILDFLAG(IS_MAC)
++  const bool uses_bark_sidebar_;
++#endif
+   bool force_fullscreen_ = false;
+ 
+   std::optional<bool> should_hide_ui_for_fullscreen_for_testing_;
+diff --git a/chrome/browser/ui/window_feature_controller/window_feature_controller.cc b/chrome/browser/ui/window_feature_controller/window_feature_controller.cc
+--- a/chrome/browser/ui/window_feature_controller/window_feature_controller.cc
++++ b/chrome/browser/ui/window_feature_controller/window_feature_controller.cc
+@@ -61,17 +61,14 @@
+ 
+ #if BUILDFLAG(IS_MAC)
+ bool WindowFeatureController::UsesImmersiveFullscreenMode() const {
+-  const bool is_pwa = app_controller_ != nullptr;
+-  const bool is_tabbed_window =
+-      CanSupportWindowFeature(WindowFeature::kFeatureTabStrip);
+-  return is_pwa || is_tabbed_window;
++  return app_controller_ || UsesImmersiveFullscreenTabbedMode();
+ }
+ 
+ bool WindowFeatureController::UsesImmersiveFullscreenTabbedMode() const {
+-  const bool is_pwa = app_controller_ != nullptr;
+-  const bool is_tabbed_window =
+-      CanSupportWindowFeature(WindowFeature::kFeatureTabStrip);
+-  return is_tabbed_window && !is_pwa;
++  // Bark hosts its tabs in the browser window, including in fullscreen.
++  // AppKit's tab overlay would reparent the hidden horizontal tab strip.
++  return !fullscreen_controller_->uses_bark_sidebar() && !app_controller_ &&
++         CanSupportWindowFeature(WindowFeature::kFeatureTabStrip);
+ }
+ #endif
+ 

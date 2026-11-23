@@ -6,7 +6,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import {setTimeout as delay} from 'node:timers/promises';
-import {Browser, bundleEnablesSwiftUI} from './test_chromium_browser.mjs';
+import {Browser, uiDriver, bundleEnablesSwiftUI} from './test_chromium_browser.mjs';
 
 const resultRoot = path.resolve('test-results/chromium-pinned');
 fs.mkdirSync(resultRoot, {recursive: true});
@@ -17,29 +17,10 @@ fs.mkdirSync(driver);
 const report = {passed: false, checks: []};
 const requests = new Map();
 const needsDevelopmentSwitch = !bundleEnablesSwiftUI();
-let sequence = 0, browser, latest;
+let browser;
 const visible = state => state.windows.find(window => window.visible && !window.incognito);
-async function command(action = 'snapshot', fields = {}) {
-  const requestId = ++sequence;
-  fs.writeFileSync(path.join(driver, 'request.tmp'), JSON.stringify({action, requestId, ...fields}));
-  fs.renameSync(path.join(driver, 'request.tmp'), path.join(driver, 'request.json'));
-  for (let i = 0; i < 400; i++) {
-    try {
-      const state = JSON.parse(fs.readFileSync(path.join(driver, 'response.json')));
-      if (state.requestId === requestId) { latest = state; return state; }
-    } catch (error) { if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error; }
-    await delay(50);
-  }
-  throw Error('Timed out: ' + action);
-}
-async function waitFor(predicate, label) {
-  for (let i = 0; i < 150; i++) {
-    const state = await command();
-    if (predicate(state)) return state;
-    await delay(100);
-  }
-  throw Error('Timed out: ' + label);
-}
+const ui = uiDriver({directory: () => driver, browser: () => browser});
+const {command, waitFor} = ui;
 function launch(name) {
   for (const file of ['request.json', 'response.json']) fs.rmSync(path.join(driver, file), {force: true});
   return new Browser(profile, path.join(reports, name + '.log'), {
@@ -64,7 +45,7 @@ const server = http.createServer((request, response) => {
   const color = iconColors.get(url.pathname);
   if (color) {
     response.writeHead(200, {'Content-Type': 'image/svg+xml', 'Cache-Control': 'no-store'});
-    response.end(`<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><rect width="16" height="16" fill="${color}"/></svg>`);
+    response.end(`<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><rect width="32" height="32" fill="${color}"/></svg>`);
     return;
   }
   response.writeHead(200, {'Content-Type': 'text/html', 'Cache-Control': 'no-store'});
@@ -174,6 +155,9 @@ try {
         }, 'updated title and favicon after pinning');
       }
       const {title, favicon} = rowFor(pinned, suffix);
+      const png = Buffer.from(favicon, 'base64');
+      assert.deepEqual([png.readUInt32BE(16), png.readUInt32BE(20)], [32, 32],
+        `${suffix} exports the Retina favicon dimensions in the PNG header`);
       savedRows.set(suffix, {title, favicon});
     }
   }
@@ -428,7 +412,7 @@ try {
   console.log(`${report.checks.length} focused pinned-tab checks passed`);
 } catch (error) {
   report.error = error.stack || String(error);
-  report.lastState = latest;
+  report.lastState = ui.latest;
   report.requests = Object.fromEntries(requests);
   report.preservedProfile = profile;
   console.error(error);

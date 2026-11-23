@@ -228,6 +228,7 @@ private final class Commands {
         precondition(commands.messages.count == beforeEdge, "Space shortcuts do nothing at the first space or for the current one")
         model.perform(.closeSplit)
         precondition(commands.messages.last?["action"] as? String == "unsplit")
+        checkTabReorderPreview()
         let windowFrame = NSRect(x: 100, y: 100, width: 1000, height: 700)
         for point in [NSPoint(x: 99, y: 400), NSPoint(x: 1101, y: 400),
                       NSPoint(x: 600, y: 99), NSPoint(x: 600, y: 801)] {
@@ -281,7 +282,7 @@ private final class Commands {
         let handle = barkSwiftSidebarCreate(context, callback)
         first.withCString { barkSwiftSidebarUpdate(handle, $0) }
         precondition(Unmanaged<AnyObject>.fromOpaque(handle).takeUnretainedValue() is NSView)
-        checkNewTabButton(handle, commands: commands)
+        checkSidebarControls(handle, commands: commands)
         let header = barkSwiftSidebarHeaderCreate(handle)
         checkHeaderHoverExit(Unmanaged<NSView>.fromOpaque(header).takeUnretainedValue())
         barkSwiftSidebarHeaderDestroy(header)
@@ -295,7 +296,64 @@ private final class Commands {
     }
 }
 
-@MainActor private func checkNewTabButton(_ handle: UnsafeMutableRawPointer, commands: Commands) {
+private func checkTabReorderPreview() {
+    let order = [10, 20, 30, 40]
+    var rows: [Int: CGRect] = [:]
+    for (index, id) in order.enumerated() {
+        rows[id] = CGRect(x: 8, y: CGFloat(index * 39), width: 240, height: 36)
+    }
+    func moveRow(to y: CGFloat) -> TabReorderPreview {
+        TabReorderPreview(id: 20, order: order, frames: rows, center: CGPoint(x: 100, y: y), grid: false)!
+    }
+    // Row centers are at 18, 57, 96 and 135. Cross and recross the
+    // midpoint of the two middle slots using the original layout throughout.
+    let down = moveRow(to: 77)
+    precondition(down.changed && down.before == 40 && down.landing == rows[30] &&
+                 down.offsets == [30: CGSize(width: 0, height: -39)],
+                 "Moving down one row opens its slot and commits before the next tab")
+    let back = moveRow(to: 76)
+    precondition(!back.changed && back.before == 30 && back.landing == rows[20] && back.offsets.isEmpty,
+                 "Reversing across the midpoint restores the original slot and produces a no-op drop")
+    let up = moveRow(to: 37)
+    precondition(up.changed && up.before == 10 && up.landing == rows[10] &&
+                 up.offsets == [10: CGSize(width: 0, height: 39)],
+                 "Moving up one row lands before the tab that gave up its slot")
+    let last = moveRow(to: 150)
+    let shift = CGSize(width: 0, height: -39)
+    precondition(last.changed && last.before == nil && last.landing == rows[40] &&
+                 last.offsets == [30: shift, 40: shift],
+                 "Dropping below the last tab appends and shifts every crossed row")
+
+    // A LazyVStack can report only a slice of the full order.
+    let visible = rows.filter { [20, 30].contains($0.key) }
+    let scrolled = TabReorderPreview(id: 20, order: order, frames: visible,
+                                     center: CGPoint(x: 100, y: 150), grid: false)!
+    precondition(scrolled.landing == rows[30] && scrolled.before == 40 && scrolled.offsets == [30: shift],
+                 "The last measured row still inserts before its offscreen successor")
+    let collapsed = TabReorderPreview(id: 10, order: order, frames: [10: rows[10]!, 30: rows[20]!],
+                                      center: CGPoint(x: 100, y: 57), grid: false)!
+    precondition(collapsed.before == 40 && collapsed.offsets == [30: shift],
+                 "Visible pins exchange slots even when a collapsed folder hides an intervening sibling")
+    precondition(TabReorderPreview(id: 20, order: order, frames: [:], center: .zero, grid: false) == nil,
+                 "There is no preview until at least one slot is measured")
+
+    let favorites = [1, 2, 3, 4, 5, 6]
+    var tiles: [Int: CGRect] = [:]
+    for (index, id) in favorites.enumerated() {
+        tiles[id] = CGRect(x: CGFloat(index % 4 * 54), y: CGFloat(index / 4 * 54), width: 46, height: 46)
+    }
+    let wrap = TabReorderPreview(id: 4, order: favorites, frames: tiles,
+                                 center: CGPoint(x: 23, y: 77), grid: true)!
+    precondition(wrap.landing == tiles[5] && wrap.before == 6 && wrap.offsets == [5: CGSize(width: 162, height: -54)],
+                 "A Favorite wrapping across rows sends its neighbor to the previous row's last column")
+    let partialRow = TabReorderPreview(id: 4, order: favorites, frames: tiles,
+                                       center: CGPoint(x: 185, y: 52), grid: true)!
+    precondition(partialRow.landing == tiles[6] && partialRow.before == nil &&
+                 partialRow.offsets == [5: CGSize(width: 162, height: -54), 6: CGSize(width: -54, height: 0)],
+                 "The empty columns of a partial Favorites row land in its last occupied slot")
+}
+
+@MainActor private func checkSidebarControls(_ handle: UnsafeMutableRawPointer, commands: Commands) {
     let host = Unmanaged<NSView>.fromOpaque(handle).takeUnretainedValue()
     let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 260, height: 480),
                           styleMask: .borderless, backing: .buffered, defer: false)
@@ -322,6 +380,131 @@ private final class Commands {
         precondition(buttons[0].accessibilityPerformPress?() == true)
         precondition(commands.messages.count == count + 1 && commands.messages.last?["action"] as? String == "new",
                      "Pressing the sidebar button must dispatch the native New Tab command once")
+    }
+    checkLoadingIndicators(handle, host: host, window: window)
+    checkFavoriteLayout(handle, host: host, window: window)
+    checkSpaceDockWidths(handle, host: host, window: window)
+}
+
+@MainActor private func checkSpaceDockWidths(_ handle: UnsafeMutableRawPointer, host: NSView, window: NSWindow) {
+    let spaces = (1...7).map {
+        #"{"id":"\#($0)","name":"Dock \#($0)","emoji":"🥑","active":\#($0 == 1)}"#
+    }.joined(separator: ",")
+    let state = #"{"tabs":[],"spaces":[\#(spaces)],"activeSpaceId":"1","profile":"Default","canGoBack":false,"canGoForward":false}"#
+    state.withCString { barkSwiftSidebarUpdate(handle, $0) }
+    func buttonWidths(at width: CGFloat) -> [CGFloat] {
+        window.setContentSize(NSSize(width: width, height: 480))
+        host.layoutSubtreeIfNeeded()
+        window.displayIfNeeded()
+        var nodes = host.accessibilityChildren() ?? []
+        var widths: [String: CGFloat] = [:]
+        while let item = nodes.popLast() {
+            let node = item as AnyObject
+            nodes += node.accessibilityChildren?() ?? []
+            if let label = node.accessibilityLabel?(), label.hasPrefix("Space Dock "),
+               let frame = node.accessibilityFrame?() {
+                widths[label] = frame.width
+            }
+        }
+        precondition(widths.count == 7, "All seven space buttons stay accessible as the pane narrows")
+        return (1...7).map { widths["Space Dock \($0)"]! }
+    }
+    let wide = buttonWidths(at: 312)
+    let medium = buttonWidths(at: 253)
+    let narrow = buttonWidths(at: 217)
+    precondition(wide[1] > medium[1] && medium[1] > narrow[1], "Space buttons share the resizing pane")
+    precondition(abs(medium[0] - medium[1]) <= 1 && narrow[0] > narrow[1] + 2,
+                 "The selected icon retains its width when neighboring icons collapse to dots")
+}
+
+@MainActor private func checkFavoriteLayout(_ handle: UnsafeMutableRawPointer, host: NSView, window: NSWindow) {
+    let favicon = testFavicon()
+    for count in 1...5 {
+        let tiles = (1...count).map { id in
+            #"{"id":\#(id),"title":"Tile \#(id)","url":"https://example.test/\#(id)","active":false,"pinned":true,"loading":false,"favicon":"\#(favicon)","faviconValid":true}"#
+        }.joined(separator: ",")
+        let snapshot = #"{"tabs":[],"favorites":[\#(tiles)],"spaces":[],"profile":"Default","canGoBack":false,"canGoForward":false}"#
+        snapshot.withCString { barkSwiftSidebarUpdate(handle, $0) }
+        host.layoutSubtreeIfNeeded()
+        window.displayIfNeeded()
+        var nodes = host.accessibilityChildren() ?? []
+        var frames: [String: NSRect] = [:]
+        while let item = nodes.popLast() {
+            let node = item as AnyObject
+            nodes += node.accessibilityChildren?() ?? []
+            if let label = node.accessibilityLabel?(), label.hasPrefix("Tile "), let screenFrame = node.accessibilityFrame?() {
+                frames[label] = host.convert(window.convertFromScreen(screenFrame), from: nil)
+            }
+        }
+        precondition(frames.count == count)
+        let first = frames["Tile 1"]!
+        let columns = min(count, 4)
+        let last = frames["Tile \(columns)"]!
+        precondition(first.minX < 12 && host.bounds.maxX - last.maxX < 12, "Favorites fill the first row")
+        for id in 1...columns {
+            let tile = frames["Tile \(id)"]!
+            precondition(abs(tile.width - first.width) <= 1 && abs(tile.midY - first.midY) <= 1,
+                         "Favorites share the width evenly up to four across")
+        }
+        if let fifth = frames["Tile 5"] {
+            precondition(abs(fifth.minX - first.minX) <= 1 && abs(fifth.midY - first.midY) >= first.height,
+                         "The fifth Favorite starts a second row")
+        }
+        if count == 1 {
+            let rect = first.integral
+            let image = host.bitmapImageRepForCachingDisplay(in: rect)!
+            host.cacheDisplay(in: rect, to: image)
+            let iconPixels = (0..<image.pixelsWide).filter { x in
+                guard let color = image.colorAt(x: x, y: image.pixelsHigh / 2)?.usingColorSpace(.sRGB) else { return false }
+                return color.blueComponent - color.redComponent > 0.35 && color.alphaComponent > 0.8
+            }.count
+            let iconWidth = CGFloat(iconPixels) * rect.width / CGFloat(image.pixelsWide)
+            precondition(abs(iconWidth - 14) <= 1, "The Favorite favicon renders at 14 points")
+        }
+    }
+}
+
+@MainActor private func checkLoadingIndicators(_ handle: UnsafeMutableRawPointer, host: NSView, window: NSWindow) {
+    let labels = ["Current page", "Saved page", "Mail"]
+    let favicon = testFavicon()
+    var resting: [String: (leading: Data, trailing: Data)] = [:]
+    func pixels(in rect: NSRect) -> Data {
+        let image = host.bitmapImageRepForCachingDisplay(in: rect)!
+        host.cacheDisplay(in: rect, to: image)
+        return image.representation(using: .png, properties: [:])!
+    }
+    for loading in [false, true, false] {
+        let state = #"""
+        {"tabs":[{"id":1,"title":"Current page","url":"https://example.test/a","active":true,"pinned":false,"loading":\#(loading),"favicon":"\#(favicon)","faviconValid":true},
+                 {"id":2,"title":"Saved page","url":"https://example.test/b","active":false,"pinned":true,"loading":\#(loading)}],
+         "favorites":[{"id":3,"title":"Mail","url":"https://example.test/mail","active":false,"pinned":true,"loading":\#(loading),"favicon":"\#(favicon)","faviconValid":true}],
+         "spaces":[],"profile":"Default","canGoBack":false,"canGoForward":false}
+        """#
+        state.withCString { barkSwiftSidebarUpdate(handle, $0) }
+        host.layoutSubtreeIfNeeded()
+        window.displayIfNeeded()
+        var nodes = host.accessibilityChildren() ?? []
+        var seen = Set<String>()
+        while let item = nodes.popLast() {
+            let node = item as AnyObject
+            nodes += node.accessibilityChildren?() ?? []
+            guard let label = node.accessibilityLabel?(), labels.contains(label),
+                  let screenFrame = node.accessibilityFrame?() else { continue }
+            seen.insert(label)
+            let value: String? = node.accessibilityValue?()
+            precondition((value ?? "").localizedCaseInsensitiveContains("Loading") == loading, "Loading state for \(label)")
+            let frame = host.convert(window.convertFromScreen(screenFrame), from: nil)
+            let (left, right) = frame.integral.divided(atDistance: floor(frame.width * 0.66), from: .minXEdge)
+            let leading = pixels(in: left)
+            let trailing = pixels(in: right)
+            if let baseline = resting[label] {
+                precondition(leading == baseline.leading, "Loading preserves the icon and title for \(label)")
+                precondition((trailing != baseline.trailing) == loading, "A trailing indicator is visible only while \(label) loads")
+            } else {
+                resting[label] = (leading, trailing)
+            }
+        }
+        precondition(seen == Set(labels), "The loading fixture must exercise a regular tab, a pin, and a Favorite")
     }
 }
 
@@ -729,14 +912,18 @@ private final class DockWheelEvent: NSEvent {
     print("Site controls dismiss and reject stale page actions correctly")
 }
 
-@MainActor private func checkAddressBarIcons(_ model: ChromiumSidebarModel, snapshot: String) throws {
-    precondition(model.addressBarIcon == .globe, "An existing URL without a site icon shows a globe")
+@MainActor private func testFavicon() -> String {
     let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 2, pixelsHigh: 2, bitsPerSample: 8,
                                   samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
                                   colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
     let color = NSColor(deviceRed: 0.2, green: 0.4, blue: 0.8, alpha: 1)
     for x in 0..<2 { for y in 0..<2 { bitmap.setColor(color, atX: x, y: y) } }
-    let favicon = bitmap.representation(using: .png, properties: [:])!.base64EncodedString()
+    return bitmap.representation(using: .png, properties: [:])!.base64EncodedString()
+}
+
+@MainActor private func checkAddressBarIcons(_ model: ChromiumSidebarModel, snapshot: String) throws {
+    precondition(model.addressBarIcon == .globe, "An existing URL without a site icon shows a globe")
+    let favicon = testFavicon()
     let withIcon = snapshot.replacingOccurrences(of: #""loading":false"#,
         with: #""loading":false,"faviconValid":true,"favicon":""# + favicon + #"""#)
     model.update(withIcon)
@@ -747,20 +934,32 @@ private final class DockWheelEvent: NSEvent {
     precondition(model.addressBarIcon == .globe, "Undecodable icons fall back to a globe")
     model.update(withIcon)
     model.editingAddress = true
-    func results(_ query: String, action: String, items: [[String: Any]] = []) throws {
-        let data = try JSONSerialization.data(withJSONObject: ["query": query, "action": action, "items": items])
+    func results(_ query: String, action: String, items: [[String: Any]] = [], engine: String? = nil) throws {
+        var message: [String: Any] = ["query": query, "action": action, "items": items]
+        if let engine { message["searchEngine"] = engine }
+        let data = try JSONSerialization.data(withJSONObject: message)
         model.updateSuggestions(String(decoding: data, as: UTF8.self))
     }
     model.address = "another.example/path"
     model.requestSuggestions(for: model.address)
     try results(model.address, action: "navigate")
     precondition(model.addressBarIcon == .globe, "A different destination never keeps the old site's favicon")
+    precondition(model.addressSearchHint == nil, "Navigating to an address does not name a search engine")
+    try results(model.address, action: "navigate", items: [
+        ["kind": "url", "title": "another.example/path", "url": "https://another.example/path", "favicon": favicon, "faviconValid": true],
+    ])
+    precondition(model.addressBarIcon == .favicon(favicon), "A typed address shows its history favicon")
+    model.selectedSuggestion = 0
+    precondition(model.addressBarIcon == .favicon(favicon), "Highlighting the typed address keeps its favicon")
+    model.selectedSuggestion = nil
     model.address = "how .env files work"
     model.requestSuggestions(for: model.address)
-    try results(model.address, action: "search")
+    try results(model.address, action: "search", engine: "Google")
     precondition(model.addressBarIcon == .search, "The native action decides the icon, even for queries containing dots")
+    precondition(model.addressSearchHint == "Search with Google", "A typed search names the engine Return will use")
     try results("another.example/path", action: "navigate")
     precondition(model.addressBarIcon == .search, "Late results for previous input cannot change the current action icon")
+    precondition(model.addressSearchHint == "Search with Google", "Late results for previous input keep the engine hint")
     try results(model.address, action: "search", items: [
         ["kind": "tab", "id": 7, "title": "Example", "url": "https://example.test/", "favicon": favicon],
         ["kind": "history", "title": "History", "url": "https://history.test/"],
@@ -769,8 +968,11 @@ private final class DockWheelEvent: NSEvent {
     precondition(model.addressBarIcon == .favicon(favicon), "Highlighting an open tab shows its destination icon")
     model.moveSuggestionSelection(by: 1)
     precondition(model.addressBarIcon == .globe, "Highlighting a history URL changes the search icon to a globe")
+    precondition(model.addressSearchHint == nil, "A highlighted row replaces the search engine hint")
     model.selectedSuggestion = nil
     precondition(model.addressBarIcon == .search, "Clearing the highlighted suggestion restores the typed action")
+    try results(model.address, action: "search")
+    precondition(model.addressSearchHint == nil, "No hint is shown when search is unavailable")
     model.clearSuggestions()
     model.address = ""
     precondition(model.addressBarIcon == .search, "A fresh empty field invites a search")

@@ -10,6 +10,7 @@
 #include "bark/mac/updater_mac.h"
 
 #import <AppKit/AppKit.h>
+#import <objc/runtime.h>
 
 #include <algorithm>
 #include <cmath>
@@ -23,7 +24,9 @@
 #include <vector>
 
 #include "base/apple/foundation_util.h"
+#include "base/auto_reset.h"
 #include "base/base64.h"
+#include "base/command_line.h"
 #include "base/feature_list.h"
 #include "base/functional/bind.h"
 #include "base/json/json_reader.h"
@@ -57,6 +60,7 @@
 #include "chrome/browser/history/history_service_factory.h"
 #include "chrome/browser/infobars/confirm_infobar_creation_allowlist.h"
 #include "chrome/browser/search_engines/template_url_service_factory.h"
+#include "chrome/common/chrome_switches.h"
 #include "chrome/common/pref_names.h"
 #include "chrome/browser/permissions/permission_actions_history_factory.h"
 #include "chrome/browser/permissions/permission_decision_auto_blocker_factory.h"
@@ -77,9 +81,11 @@
 #include "chrome/browser/ui/browser_window/public/browser_collection_observer.h"
 #include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "chrome/browser/ui/browser_window/public/create_browser_window.h"
+#include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
 #include "chrome/browser/ui/browser_window/public/profile_browser_collection.h"
 #include "chrome/browser/ui/bubble_anchor_util.h"
 #include "chrome/browser/ui/extensions/extensions_container.h"
+#include "chrome/browser/ui/fullscreen_util_mac.h"
 #include "chrome/browser/ui/webui/profile_helper.h"
 #include "chrome/browser/ui/page_info/page_info_dialog.h"
 #include "chrome/browser/ui/startup/default_browser_prompt/default_browser_infobar_delegate.h"
@@ -99,6 +105,7 @@
 #include "chrome/browser/ui/views/frame/browser_widget.h"
 #include "chrome/browser/ui/views/frame/contents_container_view.h"
 #include "chrome/browser/ui/views/frame/contents_web_view.h"
+#include "chrome/browser/ui/views/extensions/extensions_toolbar_desktop.h"
 #include "chrome/browser/ui/views/infobars/infobar_container_view.h"
 #include "base/i18n/case_conversion.h"
 #include "base/strings/string_split.h"
@@ -136,6 +143,7 @@
 #include "components/split_tabs/split_tab_visual_data.h"
 #include "components/tabs/public/split_tab_data.h"
 #include "components/tabs/public/tab_interface.h"
+#include "components/url_formatter/elide_url.h"
 #include "components/url_formatter/url_fixer.h"
 #include "components/viz/common/frame_sinks/copy_output_result.h"
 #include "content/public/browser/favicon_status.h"
@@ -150,17 +158,27 @@
 #include "services/media_session/public/mojom/media_session.mojom.h"
 #include "services/network/public/cpp/is_potentially_trustworthy.h"
 #include "third_party/blink/public/common/features.h"
+#include "ui/base/accelerators/accelerator.h"
+#include "ui/base/accelerators/global_accelerator_listener/global_accelerator_listener.h"
+#include "ui/base/metadata/metadata_impl_macros.h"
 #include "ui/base/page_transition_types.h"
 #include "ui/gfx/geometry/insets.h"
 #include "ui/gfx/geometry/size.h"
 #include "content/public/browser/render_frame_host.h"
 #include "content/public/browser/render_widget_host_view.h"
 #include "content/public/browser/web_contents.h"
+#include "content/public/browser/web_contents_observer.h"
 #include "ui/base/window_open_disposition.h"
 #include "ui/base/base_window.h"
 #include "ui/compositor/compositor.h"
+#include "ui/gfx/codec/png_codec.h"
 #include "ui/gfx/image/image.h"
+#include "ui/gfx/image/image_skia.h"
+#include "ui/gfx/image/image_skia_rep.h"
+#include "ui/views/controls/button/label_button.h"
 #include "ui/views/controls/native/native_view_host.h"
+#include "ui/views/view_class_properties.h"
+#include "ui/views/view_utils.h"
 #include "ui/views/widget/widget.h"
 #include "third_party/metrics_proto/omnibox_event.pb.h"
 
@@ -191,6 +209,11 @@ void* BarkSwiftPopupAttach(void*, void*, void*, const char*, void*, void (*)(voi
 void BarkSwiftPopupBeginEntrance(void*);
 void BarkSwiftPopupPerformControl(void*, const char*);
 void BarkSwiftPopupSetCanSplit(void*, bool);
+void BarkSwiftPopupSetSpaces(void*, const char*);
+void BarkSwiftPopupUpdateSite(void*, const char*);
+double BarkSwiftPopupAnchorX(void*, bool extensions);
+void BarkSwiftPopupEditAddress(void*, const char*, bool when_key);
+bool BarkSwiftPopupAddressVisible(void*);
 void BarkSwiftPopupCopyURL(void*, const char*);
 void BarkSwiftUseCopyPasteboardForTesting(const char*);
 void* BarkSwiftPopupCover(void*, void*);
@@ -234,6 +257,10 @@ using BarkExtensionsMenuInvoke = void (*)(NSMenuItem*);
 
 namespace bark {
 namespace {
+DEFINE_UI_CLASS_PROPERTY_KEY(bool, kBarkPeek, false)
+DEFINE_UI_CLASS_PROPERTY_KEY(views::View*, kLittleSiteAnchor, nullptr)
+DEFINE_UI_CLASS_PROPERTY_KEY(views::View*, kLittleExtensionsAnchor, nullptr)
+constexpr int kLittleHeaderHeight = 46;
 constexpr NSString* kSidebarWidth = @"BarkChromium.SidebarWidth";
 constexpr NSString* kSidebarCollapsed = @"BarkChromium.SidebarCollapsed";
 constexpr char kSavedSessionTitle[] = "bark.saved_session_title";
@@ -277,6 +304,8 @@ constexpr double kSpaceFadeSeconds = 0.18;
 struct AddressDestination {
   GURL url;
   bool is_search = false;
+  // The default search provider's display name (e.g. "Google") for searches.
+  std::u16string engine_name;
 };
 
 AddressDestination ResolveAddress(const std::string& input, Profile* profile) {
@@ -291,7 +320,7 @@ AddressDestination ResolveAddress(const std::string& input, Profile* profile) {
     if (const auto* engine = service->GetDefaultSearchProvider()) {
       const GURL search(engine->url_ref().ReplaceSearchTerms(
           TemplateURLRef::SearchTermsArgs(base::UTF8ToUTF16(input)), service->search_terms_data()));
-      if (search.is_valid()) return {search, true};
+      if (search.is_valid()) return {search, true, engine->short_name()};
     }
   }
   // A policy may disable search entirely. Do not bypass that choice with a
@@ -299,11 +328,11 @@ AddressDestination ResolveAddress(const std::string& input, Profile* profile) {
   return {GURL(), true};
 }
 
-// Feature switches the sidebar's Library menu changes. Each is on unless
-// the person turned it off.
+// Feature preferences shared by the Library menu and Settings.
 constexpr NSString* kArchiveAfterHours = @"BarkChromium.ArchiveAfterHours";
 constexpr NSString* kPeekDisabled = @"BarkChromium.PeekDisabled";
 constexpr NSString* kLittleWindowDisabled = @"BarkChromium.LittleWindowDisabled";
+constexpr NSString* kGlobalLittleShortcut = @"BarkChromium.GlobalLittleShortcut";
 // Unpinned tabs not shown for this long move to their space's archive.
 // Bark archives tabs after 12 hours by default. Zero disables automatic archiving.
 int ArchiveAfterHours() {
@@ -312,7 +341,8 @@ int ArchiveAfterHours() {
   return static_cast<int>(std::clamp<NSInteger>([defaults integerForKey:kArchiveAfterHours], 0, 24 * 365));
 }
 bool PeekEnabled() { return ![NSUserDefaults.standardUserDefaults boolForKey:kPeekDisabled]; }
-bool LittleWindowEnabled() { return ![NSUserDefaults.standardUserDefaults boolForKey:kLittleWindowDisabled]; }
+
+bool GlobalLittleShortcutEnabled() { return [NSUserDefaults.standardUserDefaults boolForKey:kGlobalLittleShortcut]; }
 
 base::DictValue ReadTabMeta(content::WebContents* contents) {
   auto meta = base::JSONReader::ReadDict(GetTabMeta(contents), base::JSON_PARSE_RFC);
@@ -357,11 +387,45 @@ bool IsBlankPage(const GURL& url) {
   return !url.is_valid() || url.IsAboutBlank() || (url.SchemeIs("chrome") && url.host() == "newtab");
 }
 
+// Chromium caches its 1x PNG bytes. Cache the 2x encoding as well, since a
+// sidebar snapshot reads every tab even when only one tab has changed.
+struct SidebarFavicon : base::SupportsUserData::Data {
+  explicit SidebarFavicon(const gfx::Image& image) : source(image) {
+    const auto& rep = image.ToImageSkia()->GetRepresentation(2.0f);
+    if (!rep.is_null() && rep.scale() == 2.0f)
+      png = gfx::PNGCodec::EncodeBGRASkBitmap(rep.GetBitmap(), /*discard_transparency=*/false);
+  }
+  gfx::Image source;
+  std::optional<std::vector<uint8_t>> png;
+};
+
 std::string FaviconPNG(content::NavigationEntry* entry, size_t max_bytes) {
   if (!entry) return {};
   const auto& icon = entry->GetFavicon();
   if (!icon.valid || icon.image.IsEmpty()) return {};
+  static constexpr char kSidebarFavicon[] = "bark.sidebar_favicon";
+  auto* cached = static_cast<SidebarFavicon*>(entry->GetUserData(kSidebarFavicon));
+  if (!cached || cached->source != icon.image) {
+    auto replacement = std::make_unique<SidebarFavicon>(icon.image);
+    cached = replacement.get();
+    entry->SetUserData(kSidebarFavicon, std::move(replacement));
+  }
+  if (cached->png && cached->png->size() <= max_bytes) return base::Base64Encode(*cached->png);
   auto png = icon.image.As1xPNGBytes();
+  return png && png->size() <= max_bytes ? base::Base64Encode(*png) : std::string();
+}
+
+// Encodes a favicon from the history database for the address bar, preferring
+// the 2x representation so it stays sharp on Retina displays.
+std::string SuggestionFaviconPNG(const gfx::Image& image, size_t max_bytes) {
+  if (image.IsEmpty()) return {};
+  const auto& rep = image.ToImageSkia()->GetRepresentation(2.0f);
+  if (!rep.is_null() && rep.scale() == 2.0f) {
+    if (auto png = gfx::PNGCodec::EncodeBGRASkBitmap(rep.GetBitmap(), /*discard_transparency=*/false);
+        png && png->size() <= max_bytes)
+      return base::Base64Encode(*png);
+  }
+  auto png = image.As1xPNGBytes();
   return png && png->size() <= max_bytes ? base::Base64Encode(*png) : std::string();
 }
 
@@ -400,6 +464,8 @@ class ScopedPeekCreation : public BrowserCollectionObserver {
 };
 }  // namespace
 
+bool LittleWindowEnabled() { return ![NSUserDefaults.standardUserDefaults boolForKey:kLittleWindowDisabled]; }
+
 class SidebarMac::Impl : public TabStripModelObserver,
                          public ProfileAttributesStorageObserver,
                          public ThemeServiceObserver,
@@ -417,7 +483,7 @@ class SidebarMac::Impl : public TabStripModelObserver,
     PreferencesPresenter() = &ShowNativePreferences;
     NavigationThrottles() = &AddPeekThrottle;
     NewContentsPeek() = &PeekNewContents;
-    ExternalLinks() = &OpenExternalLinks;
+    ExternalLink() = &OpenExternalLink;
     ExternalTabDestination() = &DismissAddressForExternalTab;
     InstallExtensionsMenu();
     if (!IsPrivate()) {
@@ -470,6 +536,8 @@ class SidebarMac::Impl : public TabStripModelObserver,
     if (auto* downloads = view_->GetProfile()->GetDownloadManager())
       download_notifier_ = std::make_unique<download::AllDownloadItemNotifier>(downloads, this);
     AdoptPendingPresentation();
+    AdoptOwnerlessLittleWindows();
+    SyncGlobalLittleShortcut();
     StartSpaceTestDriver(base::BindRepeating(&Impl::TestRequest));
     QueueSnapshot();
   }
@@ -481,6 +549,16 @@ class SidebarMac::Impl : public TabStripModelObserver,
       group_->swipe_handoff.reset();
     std::erase(Instances(), this);
     ClearPromotionCover();
+    // A Little window belongs to the person browsing it, independently of
+    // whether its original sidebar window is still open.
+    for (auto it = popups_.begin(); it != popups_.end();) {
+      if ((*it)->kind != "little") { ++it; continue; }
+      (*it)->owner = nullptr;
+      OwnerlessLittleWindows().push_back(std::move(*it));
+      it = popups_.erase(it);
+    }
+    for (auto* host : Instances()) host->AdoptOwnerlessLittleWindows();
+    SyncGlobalLittleShortcut();
     for (auto& popup : popups_) {
       if (popup->swift) BarkSwiftPopupDetach(popup->swift);
       popup->swift = nullptr;
@@ -522,32 +600,34 @@ class SidebarMac::Impl : public TabStripModelObserver,
     view_->RemoveChildViewT(extensions_anchor_.ExtractAsDangling());
   }
 
-  int expanded_width() const {
-    return std::min(width_, std::max(0, view_->width() - 500));
-  }
-
   static constexpr int kFloatingInset = 8;
   // Keep in sync with SidebarBackdropView.shadowMargin.
   static constexpr int kShadowMargin = 24;
 
+  bool CanShow() const {
+    return !fullscreen_utils::IsInContentFullscreen(view_->browser()) &&
+           !(view_->IsFullscreen() &&
+             base::CommandLine::ForCurrentProcess()->HasSwitch(switches::kKioskMode));
+  }
+
   // Spring progress can exceed one: the panel gently overshoots its resting
   // position, while opacity stays clamped independently.
   int SlideOffset(int sidebar_width) const {
-    if (!collapsed_ || view_->IsFullscreen()) return 0;
+    if (!collapsed_) return 0;
     return -static_cast<int>(std::lround((1 - sidebar_progress_) * (sidebar_width + 16)));
   }
 
   int width() const {
-    return view_->IsFullscreen() || collapsed_ ? 0 : expanded_width();
+    return !collapsed_ && CanShow() ? width_ : 0;
   }
 
   void Layout() {
-    const bool fullscreen = view_->IsFullscreen();
+    const bool can_show = CanShow();
     // Chromium reserves the gutter and rounds the native page surfaces. This
     // input-transparent host paints one continuous theme behind the docked
     // sidebar and around the page, including the space between split panes.
-    page_frame_host_->SetVisible(!fullscreen);
-    if (!fullscreen) {
+    page_frame_host_->SetVisible(can_show);
+    if (can_show) {
       page_frame_host_->SetBounds(0, 0, view_->width(), view_->height());
       auto rect_value = [this](views::View* source) {
         const gfx::Rect rect = views::View::ConvertRectToTarget(
@@ -566,13 +646,8 @@ class SidebarMac::Impl : public TabStripModelObserver,
       geometry.Set("panes", std::move(panes));
       if (auto json = base::WriteJson(geometry)) BarkSwiftPageFrameUpdate(page_frame_swift_, json->c_str());
     }
-    const int sidebar_width = expanded_width();
-    if (sidebar_width != last_layout_width_) {
-      last_layout_width_ = sidebar_width;
-      QueueSnapshot();
-    }
-    const bool shown = !fullscreen && sidebar_width > 0 &&
-        (!collapsed_ || revealed_ || sidebar_progress_ > 0);
+    const int sidebar_width = width_;
+    const bool shown = can_show && (!collapsed_ || revealed_ || sidebar_progress_ > 0);
     host_->SetVisible(shown);
     // Keep the native hosts alive until the fade finishes, then remove them
     // from hit testing. Window controls fade with the sidebar.
@@ -593,8 +668,11 @@ class SidebarMac::Impl : public TabStripModelObserver,
                               sidebar_width + shadow * 2, panel_height + shadow * 2);
     host_->SetBounds(panel_x, top + inset, sidebar_width, std::max(0, panel_height - top));
     header_host_->SetVisible(shown);
-    header_host_->SetBounds(84 + panel_x, inset + std::max(0, (top - 28) / 2),
-                           std::max(28, sidebar_width - (collapsed_ ? 92 : 85)), 28);
+    // Fullscreen hides the caption buttons, so the header no longer needs to
+    // clear the space they normally occupy.
+    const int header_leading = view_->IsFullscreen() ? 10 : 84;
+    header_host_->SetBounds(header_leading + panel_x, inset + std::max(0, (top - 28) / 2),
+                           std::max(28, sidebar_width - header_leading - (collapsed_ ? 8 : 1)), 28);
     // Keep the generous resize target on the actual boundary. Reserving it
     // inside the Swift tab list creates a visible gutter beside every row.
     resize_host_->SetVisible(shown);
@@ -607,9 +685,9 @@ class SidebarMac::Impl : public TabStripModelObserver,
     ((__bridge NSView*)backdrop_swift_).alphaValue = content_opacity;
     ((__bridge NSView*)resize_swift_).alphaValue = content_opacity;
     edge_host_->SetBounds(0, top, 7, std::max(0, view_->height() - top));
-    edge_host_->SetVisible(!fullscreen && collapsed_ && progress < 1);
+    edge_host_->SetVisible(can_show && collapsed_ && progress < 1);
     edge_hint_.alphaValue = 1 - progress;
-    if (fullscreen) {
+    if (view_->IsFullscreen()) {
       RestoreTrafficLights();  // Fullscreen's caption controls belong to AppKit.
     } else {
       NSWindow* window = view_->GetNativeWindow().GetNativeNSWindow();
@@ -636,8 +714,8 @@ class SidebarMac::Impl : public TabStripModelObserver,
                             expanded ? top + inset + 9 : 5, 24, 28);
     extensions_anchor_->SetBounds(expanded ? sidebar_width - (collapsed_ ? 65 : 58) + panel_x : 84,
                                   expanded ? top + inset + 9 : 5, 24, 28);
-    site_anchor_->SetVisible(!fullscreen);
-    extensions_anchor_->SetVisible(!fullscreen);
+    site_anchor_->SetVisible(can_show);
+    extensions_anchor_->SetVisible(can_show);
   }
 
   views::View* bubble_anchor(bool extensions) const {
@@ -736,6 +814,7 @@ class SidebarMac::Impl : public TabStripModelObserver,
   void OnDownloadRemoved(content::DownloadManager*, download::DownloadItem*) override { QueueDownloadSnapshot(); }
 
  private:
+  friend class SidebarMac;
   void RestoreTrafficLights() {
     if (!traffic_lights_managed_) return;
     NSWindow* window = view_->GetNativeWindow().GetNativeNSWindow();
@@ -754,7 +833,7 @@ class SidebarMac::Impl : public TabStripModelObserver,
     sidebar_motion_timer_.Stop();
     sidebar_target_ = !collapsed_ || revealed_ ? 1 : 0;
     if (!animate || NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion ||
-        view_->IsFullscreen() || (sidebar_progress_ == sidebar_target_ && sidebar_velocity_ == 0)) {
+        !CanShow() || (sidebar_progress_ == sidebar_target_ && sidebar_velocity_ == 0)) {
       sidebar_progress_ = sidebar_target_;
       sidebar_velocity_ = 0;
     } else {
@@ -1160,9 +1239,35 @@ class SidebarMac::Impl : public TabStripModelObserver,
         context:nil eventNumber:0 clickCount:0 pressure:0];
     [NSApp postEvent:event atStart:NO];
   }
+  static NSView* FindNativeViewForTesting(NSView* root, NSString* identifier) {
+    if ([root.identifier isEqualToString:identifier]) return root;
+    for (NSView* child in root.subviews) {
+      if (NSView* match = FindNativeViewForTesting(child, identifier)) return match;
+    }
+    return nil;
+  }
+
+  static views::LabelButton* FindPopupButtonForTesting(views::View* view,
+                                                       std::u16string_view text) {
+    if (!view || !view->GetVisible()) return nullptr;
+    if (auto* button = views::AsViewClass<views::LabelButton>(view);
+        button && button->GetEnabled() && button->GetText() == text) return button;
+    for (views::View* child : view->children())
+      if (auto* match = FindPopupButtonForTesting(child, text)) return match;
+    return nullptr;
+  }
+
   static base::DictValue TestRequest(base::DictValue request) {
     base::DictValue result;
     if (auto* action = request.FindString("action"); action && *action != "snapshot") {
+      // A surviving Little window has no sidebar window ID to address.
+      if (!request.FindInt("windowId") && *action == "testPopupControl") {
+        if (const auto* command = request.FindString("text")) {
+          auto& windows = OwnerlessLittleWindows();
+          if (!windows.empty() && windows.front()->swift)
+            BarkSwiftPopupPerformControl(windows.front()->swift, command->c_str());
+        }
+      }
       for (auto* host : Instances()) {
         if (host->view_->browser()->GetSessionID().id() != request.FindInt("windowId").value_or(-1)) continue;
         if (*action == "testCloseWindow") chrome::CloseWindow(host->view_->browser());
@@ -1239,6 +1344,23 @@ class SidebarMac::Impl : public TabStripModelObserver,
             host->tabs_->MoveWebContentsAt(from, to, false);
         }
         else if (*action == "testAutoArchive") host->AutoArchive();
+        else if (*action == "testLittleShortcutRegistration") {
+          // Exercise macOS registration without touching the real shortcut or defaults.
+          const ui::Accelerator key(ui::VKEY_F19, ui::EF_CONTROL_DOWN | ui::EF_ALT_DOWN |
+                                                     ui::EF_SHIFT_DOWN | ui::EF_COMMAND_DOWN);
+          GlobalLittleShortcut other(key), lookup(key);
+          other.Update(true, false);
+          result.Set("reserved", !other.unavailable());
+          lookup.Update(true, false);
+          result.Set("conflict", lookup.unavailable());
+          other.Update(false, false);
+          lookup.Update(true, true);
+          result.Set("retrySucceeded", !lookup.unavailable());
+          lookup.Update(false, false);
+          other.Update(true, false);
+          result.Set("released", !other.unavailable());
+          other.Update(false, false);
+        }
         else if (*action == "testExternalLinks") {
           NSMutableArray<NSURL*>* urls = [NSMutableArray array];
           if (const auto* list = request.FindList("urls")) {
@@ -1274,7 +1396,58 @@ class SidebarMac::Impl : public TabStripModelObserver,
             break;
           }
         }
+        else if (*action == "testLittleHeaderImage") {
+          for (const auto& popup : host->popups_) {
+            if (popup->kind != "little" || !popup->swift) continue;
+            NSWindow* window = popup->browser->GetWindow()->GetNativeWindow().GetNativeNSWindow();
+            if (auto number = request.FindInt("windowNumber"); number && window.windowNumber != *number) continue;
+            NSView* header = FindNativeViewForTesting(window.contentView, @"BarkLittleHeader");
+            if (!header || header.hidden) continue;
+            // Draw the window's own view hierarchy so AppKit includes its
+            // standard window buttons in their real positions above the header.
+            NSView* frame = window.contentView;
+            while (frame.superview) frame = frame.superview;
+            [frame layoutSubtreeIfNeeded];
+            NSView* address = FindNativeViewForTesting(header, @"BarkLittleAddress");
+            if (address && !address.hidden) {
+              const NSPoint center = NSMakePoint(NSMidX(address.bounds), NSMidY(address.bounds));
+              NSView* hit = [frame hitTest:[address convertPoint:center toView:frame.superview]];
+              result.Set("addressHit", static_cast<bool>(hit == address || [hit isDescendantOf:address]));
+            }
+            NSRect rect = [frame convertRect:header.bounds fromView:header];
+            NSBitmapImageRep* bitmap = [frame bitmapImageRepForCachingDisplayInRect:rect];
+            if (!bitmap || NSIsEmptyRect(rect)) break;
+            [frame cacheDisplayInRect:rect toBitmapImageRep:bitmap];
+            NSData* image = [bitmap representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
+            if (image.length) {
+              result.Set("headerPNG", base::SysNSStringToUTF8([image base64EncodedStringWithOptions:0]));
+              result.Set("headerWidth", NSWidth(rect));
+              result.Set("headerHeight", NSHeight(rect));
+            }
+            break;
+          }
+        }
+        else if (*action == "testLittleExtensionMenuItem") {
+          const auto* text = request.FindString("text");
+          for (const auto& popup : host->popups_) {
+            if (!text || popup->kind != "little") continue;
+            auto* view = BrowserView::GetBrowserViewForBrowser(popup->browser);
+            if (!view || !view->GetWidget()) continue;
+            for (views::Widget* widget : views::Widget::GetAllOwnedWidgets(view->GetWidget()->GetNativeView())) {
+              if (!widget->IsVisible()) continue;
+              if (auto* button = FindPopupButtonForTesting(widget->GetContentsView(), base::UTF8ToUTF16(*text))) {
+                button->AcceleratorPressed(ui::Accelerator(ui::VKEY_RETURN, ui::EF_NONE));
+                result.Set("pressed", true);
+                break;
+              }
+            }
+          }
+        }
         else if (*action == "testActivateWindow") host->view_->browser()->GetWindow()->Activate();
+        else if (*action == "testClickZoomButton") {
+          NSWindow* window = host->view_->GetNativeWindow().GetNativeNSWindow();
+          [[window standardWindowButton:NSWindowZoomButton] performClick:nil];
+        }
         else if (*action == "testUsePrivateCopyPasteboard") {
           const std::string name = "BarkUITest.CopyLink." + base::Uuid::GenerateRandomV4().AsLowercaseString();
           BarkSwiftUseCopyPasteboardForTesting(name.c_str());
@@ -1285,7 +1458,7 @@ class SidebarMac::Impl : public TabStripModelObserver,
           if (auto leave = request.FindInt("leaveAfter")) {
             base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(FROM_HERE,
                 base::BindOnce(&Impl::PostTestPointer, host->weak_factory_.GetWeakPtr(),
-                               host->expanded_width() + 100.0, 300.0),
+                               host->width_ + 100.0, 300.0),
                 base::Milliseconds(std::clamp(*leave, 1, 1000)));
           }
         }
@@ -1353,6 +1526,10 @@ class SidebarMac::Impl : public TabStripModelObserver,
       presentation.Set("reduceMotion", static_cast<bool>(NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion));
       NSWindow* native_window = host->view_->GetNativeWindow().GetNativeNSWindow();
       presentation.Set("keyWindow", static_cast<bool>(native_window.isKeyWindow));
+      presentation.Set("windowFullscreen", (native_window.styleMask & NSWindowStyleMaskFullScreen) != 0);
+      auto* tab_strip = host->view_->horizontal_tab_strip_region_view_for_testing();
+      presentation.Set("chromiumTabStripVisible", tab_strip && !tab_strip->GetVisibleBounds().IsEmpty());
+      presentation.Set("chromiumToolbarVisible", host->view_->IsToolbarVisible());
       if (auto* banners = host->view_->infobar_container()) {
         presentation.Set("notificationBannerPresent", !banners->IsEmpty());
         presentation.Set("notificationBannerVisible", banners->GetVisible());
@@ -1416,9 +1593,26 @@ class SidebarMac::Impl : public TabStripModelObserver,
         NSWindow* popup_window = popup->browser->GetWindow()->GetNativeWindow().GetNativeNSWindow();
         value.Set("keyWindow", static_cast<bool>(popup_window.isKeyWindow));
         value.Set("hasControls", popup->swift != nullptr);
+        value.Set("addressEditor", popup->swift && BarkSwiftPopupAddressVisible(popup->swift));
+        auto* popup_view = BrowserView::GetBrowserViewForBrowser(popup->browser);
+        value.Set("chromiumToolbarVisible", popup_view && popup_view->IsToolbarVisible());
+        if (popup->kind == "little") {
+          value.Set("defaultSpace", popup->space);
+          value.Set("windowNumber", static_cast<int>(popup_window.windowNumber));
+          auto* address = base::apple::ObjCCast<NSButton>(
+              FindNativeViewForTesting(popup_window.contentView, @"BarkLittleAddress"));
+          if (address) value.Set("site", base::SysNSStringToUTF8(address.title));
+        }
         value.Set("canSplit", host->CanSplitPopup(popup.get()));
-        if (auto* model = popup->browser->GetTabStripModel(); model && !model->empty())
-          value.Set("url", model->GetWebContentsAt(0)->GetVisibleURL().spec());
+        if (auto* model = popup->browser->GetTabStripModel(); model && !model->empty()) {
+          auto* page = model->GetWebContentsAt(0);
+          value.Set("url", page->GetVisibleURL().spec());
+          const auto page_bounds = page->GetContainerBounds();
+          base::DictValue content_bounds;
+          content_bounds.Set("x", page_bounds.x()); content_bounds.Set("y", page_bounds.y());
+          content_bounds.Set("width", page_bounds.width()); content_bounds.Set("height", page_bounds.height());
+          value.Set("contentBounds", std::move(content_bounds));
+        }
         const auto popup_bounds = popup->browser->GetWindow()->GetBounds();
         base::DictValue frame;
         frame.Set("x", popup_bounds.x()); frame.Set("y", popup_bounds.y());
@@ -1495,9 +1689,12 @@ class SidebarMac::Impl : public TabStripModelObserver,
   }
   void EnsureProfileSpaces() {
     if (IsPrivate() || IsBarkImportInProgress()) return;
-    for (auto* entry : profiles_->GetAllProfilesAttributesSortedForDisplay()) {
+    EnsureProfileSpaces(catalog_, *profiles_);
+  }
+  static void EnsureProfileSpaces(SpaceCatalog& catalog, ProfileAttributesStorage& profiles) {
+    for (auto* entry : profiles.GetAllProfilesAttributesSortedForDisplay()) {
       std::string key = entry->GetPath().BaseName().AsUTF8Unsafe();
-      if (entry->IsOmitted() || !catalog_.FirstForProfile(key).empty()) continue;
+      if (entry->IsOmitted() || !catalog.FirstForProfile(key).empty()) continue;
       NSString* prefix = base::SysUTF8ToNSString("BarkChromium." + entry->GetPath().AsUTF8Unsafe());
       NSString* theme = [[NSUserDefaults standardUserDefaults] stringForKey:[prefix stringByAppendingString:@".theme"]];
       NSString* emoji = [[NSUserDefaults standardUserDefaults] stringForKey:[prefix stringByAppendingString:@".emoji"]];
@@ -1505,9 +1702,9 @@ class SidebarMac::Impl : public TabStripModelObserver,
       if (name == "Your Chromium" || name == "Your Bark") name = "Personal";
       // No icon by default; the sidebar draws a dot for a space without one.
       NSString* default_icon = key == "Default" && name == "Personal" ? @"👤" : @"";
-      catalog_.Create(name, key, base::SysNSStringToUTF8(theme ?: @"gray"), base::SysNSStringToUTF8(emoji ?: default_icon));
+      catalog.Create(name, key, base::SysNSStringToUTF8(theme ?: @"gray"), base::SysNSStringToUTF8(emoji ?: default_icon));
     }
-    catalog_.MigratePersonalIcon();
+    catalog.MigratePersonalIcon();
   }
   void AssignTab(content::WebContents* contents, const std::string& space) {
     if (IsPrivate() || !SpaceBelongsHere(space)) return;
@@ -1992,7 +2189,8 @@ class SidebarMac::Impl : public TabStripModelObserver,
   // A Chromium popup window with Bark's controls on it: Peek shows a link
   // from a pinned tab over this window; a Little window shows a link from
   // another app. Either can become a tab in this window's active space.
-  struct Popup {
+  struct Popup : public content::WebContentsObserver {
+    explicit Popup(content::WebContents* little_page) : WebContentsObserver(little_page) {}
     std::string kind;
     std::string space;
     base::WeakPtr<content::WebContents> opener;
@@ -2003,7 +2201,42 @@ class SidebarMac::Impl : public TabStripModelObserver,
     bool capturing = false;
     base::CallbackListSubscription closed;
     raw_ptr<Impl> owner = nullptr;
+    std::string destinations_json;
+    base::WeakPtrFactory<Popup> commands{this};
     base::WeakPtrFactory<Popup> entrance_callbacks{this};
+
+    base::DictValue SiteState() const {
+      base::DictValue state;
+      auto* location = browser ? LocationBarModel::From(browser.get()) : nullptr;
+      const GURL url = location ? location->GetURL() : GURL();
+      std::u16string site;
+      if (url.is_valid() && !IsBlankPage(url)) {
+        // Use Chromium's security formatter for IDNs, ports and credentials.
+        // Never render unbounded data or script contents as a site identity.
+        site = url.IsStandard() ? url_formatter::FormatUrlForSecurityDisplay(
+            url, url_formatter::SchemeDisplay::OMIT_HTTP_AND_HTTPS)
+                                : base::UTF8ToUTF16(std::string(url.scheme()) + ":");
+      }
+      state.Set("site", base::UTF16ToUTF8(site));
+      const auto security = location ? location->GetSecurityLevel() : security_state::NONE;
+      state.Set("security", security == security_state::DANGEROUS ? "dangerous" :
+          security == security_state::WARNING ? "warning" :
+          security == security_state::SECURE ? "secure" : "neutral");
+      state.Set("securityDescription", location ? base::UTF16ToUTF8(location->GetSecureAccessibilityText()) : "");
+      state.Set("canShowSiteInfo", !site.empty());
+      return state;
+    }
+
+    void UpdateSite() {
+      if (swift && browser && !browser->IsDeleteScheduled()) {
+        if (auto json = base::WriteJson(SiteState())) BarkSwiftPopupUpdateSite(swift, json->c_str());
+      }
+    }
+    void DidFinishNavigation(content::NavigationHandle* handle) override {
+      if (handle->IsInPrimaryMainFrame()) UpdateSite();
+    }
+    void DidChangeVisibleSecurityState() override { UpdateSite(); }
+    void DidStopLoading() override { UpdateSite(); }
 
     void BeginEntrance() {
       entrance_callbacks.InvalidateWeakPtrs();
@@ -2027,6 +2260,119 @@ class SidebarMac::Impl : public TabStripModelObserver,
       }
     }
   };
+
+  // Chromium's native bubbles anchor to these noninteractive Views. Ask the
+  // AppKit header for its actual button position when a bubble is positioned,
+  // including after resizing the window or renaming its Space.
+  class LittleWindowAnchor : public views::View {
+    METADATA_HEADER(LittleWindowAnchor, views::View)
+
+   public:
+    LittleWindowAnchor(base::WeakPtr<Popup> popup, bool extensions)
+        : popup_(std::move(popup)), extensions_(extensions) {
+      SetCanProcessEventsWithinSubtree(false);
+      SetBounds(0, 0, 1, kLittleHeaderHeight);
+    }
+    gfx::Rect GetAnchorBoundsInScreen() const override {
+      auto bounds = views::View::GetAnchorBoundsInScreen();
+      if (popup_ && popup_->swift) bounds.Offset(
+          static_cast<int>(std::round(BarkSwiftPopupAnchorX(popup_->swift, extensions_))), 0);
+      return bounds;
+    }
+
+   private:
+    const base::WeakPtr<Popup> popup_;
+    const bool extensions_;
+  };
+
+  static std::vector<std::unique_ptr<Popup>>& OwnerlessLittleWindows() {
+    static base::NoDestructor<std::vector<std::unique_ptr<Popup>>> windows;
+    return *windows;
+  }
+
+  // True while Bark opens its own Peek or Little window, which attaches its
+  // controls once Navigate returns.
+  static bool& CreatingPopup() {
+    static bool creating = false;
+    return creating;
+  }
+
+  static bool HasPopup(BrowserWindowInterface* browser) {
+    const auto matches = [browser](const auto& popup) { return popup->browser == browser; };
+    for (auto* host : Instances()) {
+      if (std::ranges::any_of(host->popups_, matches)) return true;
+    }
+    return std::ranges::any_of(OwnerlessLittleWindows(), matches);
+  }
+
+  // A popup opened by a page, an extension or session restore gets the same
+  // header as a Little window. It keeps its opener and its requested bounds.
+  static void AttachLittleWindow(BrowserWindowInterface* browser, content::WebContents* page) {
+    if (CreatingPopup() || HasPopup(browser)) return;
+    Impl* owner = nullptr;
+    if (auto* opener = page->GetFirstWebContentsInLiveOriginalOpenerChain()) {
+      for (auto* host : Instances()) {
+        if (!host->IsPrivate() && host->tabs_ && !host->tabs_->closing_all() && !host->group_->closing &&
+            host->view_->GetProfile() == browser->GetProfile() &&
+            host->tabs_->GetIndexOfWebContents(opener) != TabStripModel::kNoTab) {
+          owner = host;
+          break;
+        }
+      }
+    }
+    std::string space;
+    const auto meta = ReadTabMeta(page);
+    if (const auto* saved = meta.FindString("littleWindowSpace")) {
+      space = *saved;
+    } else if (owner) {
+      space = owner->active_space_;
+    } else {
+      SpaceCatalog catalog(g_browser_process->local_state());
+      space = catalog.FirstForProfile(browser->GetProfile()->GetPath().BaseName().AsUTF8Unsafe());
+    }
+    AttachPopup(owner, browser, page, std::move(space), {});
+    if (owner) owner->QueueSnapshot();
+    else for (auto* host : Instances()) host->AdoptOwnerlessLittleWindows();
+  }
+
+  void AdoptOwnerlessLittleWindows() {
+    if (IsPrivate() || !tabs_ || tabs_->closing_all() || group_->closing ||
+        view_->browser()->IsDeleteScheduled()) return;
+    auto& windows = OwnerlessLittleWindows();
+    for (auto it = windows.begin(); it != windows.end();) {
+      if ((*it)->browser->GetProfile() != view_->GetProfile()) { ++it; continue; }
+      (*it)->owner = this;
+      popups_.push_back(std::move(*it));
+      it = windows.erase(it);
+      QueueSnapshot();
+    }
+  }
+
+  static base::DictValue LittleDestinations(Profile* profile, const std::string& active_space) {
+    base::ListValue spaces;
+    std::string default_space;
+    SpaceCatalog catalog(g_browser_process->local_state());
+    const auto profile_key = profile->GetPath().BaseName().AsUTF8Unsafe();
+    for (const auto& value : catalog.List()) {
+      const auto& entry = value.GetDict();
+      const auto* id = entry.FindString("id");
+      const auto* name = entry.FindString("name");
+      const auto* owner = entry.FindString("profile");
+      if (!id || !name || !owner || *owner != profile_key || entry.FindBool("hidden").value_or(false)) continue;
+      if (default_space.empty() || *id == active_space) default_space = *id;
+      base::DictValue space;
+      space.Set("id", *id);
+      space.Set("name", *name);
+      if (const auto* emoji = entry.FindString("emoji")) space.Set("emoji", *emoji);
+      if (const auto* theme = entry.FindString("theme")) space.Set("theme", *theme);
+      if (const auto* canvas = entry.FindDict("gradientCanvas")) space.Set("gradientCanvas", canvas->Clone());
+      spaces.Append(std::move(space));
+    }
+    base::DictValue destinations;
+    destinations.Set("activeSpace", default_space);
+    destinations.Set("spaces", std::move(spaces));
+    return destinations;
+  }
 
   // Opens cross-site links clicked in pinned tabs and Favorites in Peek.
   class PeekThrottle : public content::NavigationThrottle {
@@ -2060,8 +2406,7 @@ class SidebarMac::Impl : public TabStripModelObserver,
           net::registry_controlled_domains::SameDomainOrHost(
               current, url, net::registry_controlled_domains::INCLUDE_PRIVATE_REGISTRIES)) return false;
       base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(FROM_HERE,
-          base::BindOnce(&Impl::OpenPopup, host->weak_factory_.GetWeakPtr(), url, std::string("peek"),
-                         contents->GetWeakPtr()));
+          base::BindOnce(&Impl::OpenPeek, host->weak_factory_.GetWeakPtr(), url, contents->GetWeakPtr()));
       return true;
     }
     return false;
@@ -2082,38 +2427,59 @@ class SidebarMac::Impl : public TabStripModelObserver,
       auto* source = params.source_contents.get();
       if (host->tabs_->GetActiveWebContents() != source || source->IsFullscreen() ||
           (!host->tabs_->IsTabPinned(host->tabs_->active_index()) && !host->IsFavorite(source))) return false;
-      host->NavigatePopup(params, "peek", source->GetWeakPtr());
+      NavigatePopup(host, params, host->active_space_, source->GetWeakPtr());
       return true;
     }
     return false;
   }
 
-  // The frontmost sidebar window, for links from other apps while Bark is
-  // in the background.
-  static Impl* FrontHost() {
-    if (Impl* host = ActiveMenuHost(); host && !host->IsPrivate()) return host;
-    for (NSWindow* window in NSApp.orderedWindows) {
+  // External links and the global shortcut follow the last browsing window,
+  // including a Little window whose original sidebar is hidden or closed.
+  static std::pair<Impl*, Popup*> LittleWindowContext() {
+    std::pair<Impl*, Popup*> context{};
+    GlobalBrowserCollection::GetInstance()->ForEach([&](BrowserWindowInterface* browser) {
+      if (browser->IsDeleteScheduled() || browser->GetProfile()->IsOffTheRecord() ||
+          !browser->GetTabStripModel() || browser->GetTabStripModel()->closing_all()) return true;
+      const auto matches = [browser](const auto& popup) {
+        return popup->kind == "little" && popup->browser == browser;
+      };
       for (auto* host : Instances()) {
-        if (!host->IsPrivate() && host->tabs_ && !host->tabs_->closing_all() &&
-            !host->view_->browser()->IsDeleteScheduled() && host->view_->browser()->GetWindow()->IsVisible() &&
-            host->view_->GetNativeWindow().GetNativeNSWindow() == window) return host;
+        if (host->group_->closing) continue;
+        if (host->view_->browser() == browser && !host->concealed_ &&
+            (browser->GetWindow()->IsVisible() || browser->GetWindow()->IsMinimized() || NSApp.hidden)) {
+          context.first = host;
+          return false;
+        }
+        auto it = std::ranges::find_if(host->popups_, matches);
+        if (it != host->popups_.end()) { context = {host, it->get()}; return false; }
       }
-    }
-    return nullptr;
+      for (const auto& popup : OwnerlessLittleWindows()) {
+        if (matches(popup)) { context.second = popup.get(); return false; }
+      }
+      return true;
+    }, BrowserCollection::Order::kActivation);
+    return context;
   }
 
-  gfx::Rect PopupBounds(const std::string& kind) const {
-    const gfx::Rect window = view_->browser()->GetWindow()->GetBounds();
-    if (kind == "peek") {
-      // Centered over the page, leaving its edges visible around it.
-      gfx::Rect page = window;
-      page.Inset(gfx::Insets::TLBR(0, width(), 0, 0));
-      const int w = std::min(1180, static_cast<int>(page.width() * 0.86));
-      const int h = static_cast<int>(page.height() * 0.88);
-      return gfx::Rect(page.x() + (page.width() - w) / 2, page.y() + (page.height() - h) / 2, w, h);
+  gfx::Rect PeekBounds() const {
+    // Centered over the page, leaving its edges visible around it.
+    gfx::Rect page = view_->browser()->GetWindow()->GetBounds();
+    page.Inset(gfx::Insets::TLBR(0, width(), 0, 0));
+    const int w = std::min(1180, static_cast<int>(page.width() * 0.86));
+    const int h = static_cast<int>(page.height() * 0.88);
+    return gfx::Rect(page.x() + (page.width() - w) / 2, page.y() + (page.height() - h) / 2, w, h);
+  }
+
+  static gfx::Rect LittleBounds() {
+    // External links are often clicked on a different display from Bark.
+    NSScreen* screen = NSScreen.mainScreen;
+    const NSPoint pointer = NSEvent.mouseLocation;
+    for (NSScreen* candidate in NSScreen.screens) {
+      if (NSPointInRect(pointer, candidate.frame)) {
+        screen = candidate;
+        break;
+      }
     }
-    // A Little window: small, centered on this window's screen.
-    NSScreen* screen = view_->GetNativeWindow().GetNativeNSWindow().screen ?: NSScreen.mainScreen;
     const NSRect visible = screen.visibleFrame;
     const NSRect full = NSScreen.screens.firstObject.frame;
     const int w = std::min(960, static_cast<int>(visible.size.width * 0.7));
@@ -2124,73 +2490,233 @@ class SidebarMac::Impl : public TabStripModelObserver,
     return gfx::Rect(x, y, w, h);
   }
 
-  void OpenPopup(const GURL& url, const std::string& kind,
-                 base::WeakPtr<content::WebContents> opener = {}) {
-    if (IsPrivate() || !tabs_ || tabs_->closing_all() || group_->closing) return;
+  void OpenPeek(const GURL& url, base::WeakPtr<content::WebContents> opener) {
     // The link request is posted. Do not open a preview over a different tab
     // if its source was closed or the user switched pages before it runs.
-    if (kind == "peek" && (!opener || tabs_->GetActiveWebContents() != opener.get())) return;
+    if (IsPrivate() || !tabs_ || tabs_->closing_all() || group_->closing ||
+        !opener || tabs_->GetActiveWebContents() != opener.get()) return;
     NavigateParams params(view_->browser(), url, ui::PAGE_TRANSITION_LINK);
     params.user_gesture = true;
-    NavigatePopup(params, kind, opener);
+    NavigatePopup(this, params, active_space_, opener);
   }
 
-  void NavigatePopup(NavigateParams& params, const std::string& kind,
-                     base::WeakPtr<content::WebContents> opener) {
+  static Popup* OpenStandaloneLittle(Profile* profile, const GURL& url, const std::string& space) {
+    if (GetBrowserWindowCreationStatusForProfile(*profile) != BrowserWindowInterface::CreationStatus::kOk)
+      return nullptr;
+    BrowserWindowCreateParams create(BrowserWindowInterface::TYPE_POPUP, profile, true);
+    create.initial_bounds = LittleBounds();
+    // A lookup while the main browser is closed must not replace its saved session.
+    create.omit_from_session_restore = true;
+    create.should_trigger_session_restore = false;
+    auto* browser = CreateBrowserWindow(std::move(create));
+    if (!browser) return nullptr;
+    NavigateParams params(browser, url, ui::PAGE_TRANSITION_LINK);
+    params.disposition = WindowOpenDisposition::kNewForegroundTab;
+    params.user_gesture = true;
+    {
+      base::AutoReset<bool> creating(&CreatingPopup(), true);
+      Navigate(&params);
+    }
+    auto* page = params.navigated_or_inserted_contents.get();
+    if (!page) {
+      browser->GetWindow()->Close();
+      return nullptr;
+    }
+    auto* popup = AttachPopup(nullptr, browser, page, space, {});
+    browser->GetWindow()->Show();
+    ActivateLittleWindow(browser, page);
+    return popup;
+  }
+
+  static Popup* OpenLittleWindow(const GURL& url, Impl* host, Popup* source = nullptr) {
+    if (host && host->group_->closing) return nullptr;
+    auto* browser = host ? host->view_->browser() : source ? source->browser.get() : nullptr;
+    if (!browser || browser->IsDeleteScheduled() || browser->GetProfile()->IsOffTheRecord() ||
+        !browser->GetTabStripModel() || browser->GetTabStripModel()->closing_all()) return nullptr;
+    if (!host) return OpenStandaloneLittle(browser->GetProfile(), url, source->space);
+    NavigateParams params(browser, url, ui::PAGE_TRANSITION_LINK);
+    params.user_gesture = true;
+    return NavigatePopup(host, params, host->active_space_, {});
+  }
+
+  static void OpenFreshLittleWindow(Impl* host, Popup* source = nullptr) {
+    if (auto* popup = OpenLittleWindow(GURL("about:blank"), host, source); popup && popup->swift)
+      BarkSwiftPopupEditAddress(popup->swift, "", true);
+  }
+
+  // Register only the requested combination. macOS dispatches this key even
+  // when another application is frontmost.
+  class GlobalLittleShortcut : public ui::GlobalAcceleratorListener::Observer {
+   public:
+    explicit GlobalLittleShortcut(const ui::Accelerator& key) : key_(key) {}
+    static GlobalLittleShortcut& Get() {
+      static base::NoDestructor<GlobalLittleShortcut> shortcut(
+          ui::Accelerator(ui::VKEY_N, ui::EF_COMMAND_DOWN | ui::EF_ALT_DOWN));
+      return *shortcut;
+    }
+
+    bool unavailable() const { return state_ == State::kUnavailable; }
+
+    void Update(bool enable, bool retry) {
+      if (enable && state_ == State::kRegistered) return;
+      if (enable && unavailable() && !retry) return;
+      if (!enable && state_ == State::kDisabled) return;
+      auto* listener = ui::GlobalAcceleratorListener::GetInstance();
+      if (enable) {
+        state_ = listener && listener->RegisterAccelerator(key_, this)
+                     ? State::kRegistered : State::kUnavailable;
+      } else {
+        if (state_ == State::kRegistered) listener->UnregisterAccelerator(key_, this);
+        state_ = State::kDisabled;
+      }
+    }
+
+    void OnKeyPressed(const ui::Accelerator&) override {
+      if (NSApp.active) {
+        auto* front = GlobalBrowserCollection::GetInstance()->GetLastActiveBrowser();
+        if (front && front->GetProfile()->IsOffTheRecord()) return;
+      }
+      auto [host, popup] = LittleWindowContext();
+      OpenFreshLittleWindow(host, popup);
+    }
+
+    // The macOS listener delivers registered hotkeys through OnKeyPressed.
+    void ExecuteCommand(const std::string&, const std::string&) override {}
+
+   private:
+    enum class State { kDisabled, kRegistered, kUnavailable };
+    State state_ = State::kDisabled;
+    const ui::Accelerator key_;
+  };
+
+  static void SyncGlobalLittleShortcut(bool retry = false) {
+    const bool enabled = GlobalLittleShortcutEnabled() &&
+        (!OwnerlessLittleWindows().empty() || std::ranges::any_of(Instances(), [](Impl* host) {
+          return !host->IsPrivate() && !host->group_->closing;
+        }));
+    GlobalLittleShortcut::Get().Update(enabled, retry);
+  }
+
+  static void ActivateLittleWindow(BrowserWindowInterface* browser, content::WebContents* page) {
+    auto* window = browser->GetWindow();
+    if (window->IsMinimized()) window->Restore();
+    // Bring the lookup to the user's current macOS Space, including a
+    // fullscreen app, without bringing its main Bark window along.
+    if (auto* view = BrowserView::GetBrowserViewForBrowser(browser); view && view->GetWidget()) {
+      view->GetWidget()->SetCanAppearInExistingFullscreenSpaces(true);
+      view->GetWidget()->MoveToActiveFullscreenSpace();
+    }
+    window->Activate();
+    page->Focus();
+  }
+
+  static Popup* NavigatePopup(Impl* host, NavigateParams& params, std::string space,
+                              base::WeakPtr<content::WebContents> opener) {
+    const bool peek = !!opener;
     std::optional<ScopedPeekCreation> entering;
-    if (kind == "peek") {
-      ClosePopups("peek");
-      entering.emplace(view_->GetProfile());
+    if (peek) {
+      host->ClosePopups("peek");
+      entering.emplace(host->view_->GetProfile());
+    } else {
+      // Do not switch desktops before ActivateLittleWindow can place the popup.
+      params.window_action = NavigateParams::WindowAction::kShowWindowInactive;
     }
     params.disposition = WindowOpenDisposition::kNewPopup;
-    params.window_features.bounds = PopupBounds(kind);
+    params.window_features.bounds = peek ? host->PeekBounds() : LittleBounds();
     params.window_features.has_x = params.window_features.has_y = true;
     params.window_features.has_width = params.window_features.has_height = true;
-    auto self = weak_factory_.GetWeakPtr();
-    Navigate(&params);
-    if (self) self->AttachPopup(params.navigated_or_inserted_contents.get(), kind, opener);
-  }
-
-  void AttachPopup(content::WebContents* contents, const std::string& kind,
-                   base::WeakPtr<content::WebContents> opener) {
+    auto owner = host ? host->weak_factory_.GetWeakPtr() : base::WeakPtr<Impl>();
+    auto source = params.browser->GetWeakPtr();
+    {
+      base::AutoReset<bool> creating(&CreatingPopup(), true);
+      Navigate(&params);
+    }
+    auto* contents = params.navigated_or_inserted_contents.get();
     auto* tab = contents ? tabs::TabInterface::MaybeGetFromContents(contents) : nullptr;
     BrowserWindowInterface* browser = tab ? tab->GetBrowserWindowInterface() : nullptr;
-    if (!browser || browser == view_->browser()) return;
-    auto popup = std::make_unique<Popup>();
-    popup->kind = kind;
-    popup->space = active_space_;
+    if (!browser || source.get() == browser || (peek && (!owner || !opener))) return nullptr;
+    Popup* record = AttachPopup(owner.get(), browser, contents, std::move(space), opener);
+    auto live = record->commands.GetWeakPtr();
+    if (peek) {
+      if (record->swift) record->AwaitFirstWindowFrame();
+      browser->GetWindow()->Activate();
+    } else {
+      SetLittleSessionSpace(browser, contents, &record->space);
+      ActivateLittleWindow(browser, contents);
+    }
+    return live.get();
+  }
+
+  // The session already serializes Bark's tab metadata with the page history.
+  // Label only Little windows so ordinary Chromium popups remain independent.
+  static void SetLittleSessionSpace(BrowserWindowInterface* browser, content::WebContents* page,
+                                    const std::string* space) {
+    auto meta = ReadTabMeta(page);
+    if (space) meta.Set("littleWindowSpace", *space);
+    else meta.Remove("littleWindowSpace");
+    auto json = base::WriteJson(meta);
+    if (!json) return;
+    if (meta.empty()) json->clear();
+    SetTabMeta(page, *json);
+    if (auto* session = SessionServiceFactory::GetForProfile(browser->GetProfile())) {
+      auto tab_id = sessions::SessionTabHelper::IdForTab(page);
+      if (tab_id.is_valid()) session->AddTabExtraData(browser->GetSessionID(), tab_id, kTabMetaKey, *json);
+    }
+  }
+
+  static Popup* AttachPopup(Impl* owner, BrowserWindowInterface* browser, content::WebContents* contents,
+                            std::string space, base::WeakPtr<content::WebContents> opener) {
+    const bool peek = !!opener;
+    auto popup = std::make_unique<Popup>(peek ? nullptr : contents);
+    popup->kind = peek ? "peek" : "little";
+    popup->space = std::move(space);
     popup->opener = opener;
     if (opener) popup->opener_url = PageURL(opener.get());
     popup->browser = browser;
-    popup->owner = this;
+    popup->owner = owner;
     Popup* record = popup.get();
     popup->closed = browser->RegisterBrowserDidClose(base::BindRepeating(
-        [](base::WeakPtr<Impl> self, Popup* record, BrowserWindowInterface*) {
-          if (self) self->ForgetPopup(record);
-        }, weak_factory_.GetWeakPtr(), record));
-    base::DictValue config;
-    config.Set("kind", kind);
-    if (kind == "peek") {
+        [](Popup* record, BrowserWindowInterface*) { ForgetPopup(record); }, record));
+    base::DictValue config = peek ? base::DictValue() : LittleDestinations(browser->GetProfile(), record->space);
+    if (!peek) config.Merge(record->SiteState());
+    config.Set("kind", record->kind);
+    if (peek) {
       if (auto* surface = contents->GetRenderWidgetHostView()) {
         if (auto color = surface->GetBackgroundColor(); color && SkColorGetA(*color) == 255)
           config.Set("backgroundColor", base::StringPrintf("#%06X", *color & 0x00ffffffu));
       }
     }
-    record->can_split = CanSplitPopup(record);
+    record->can_split = peek && owner->CanSplitPopup(record);
     config.Set("canSplit", record->can_split);
-    if (const auto* space = catalog_.Find(active_space_)) {
-      if (const auto* name = space->FindString("name")) config.Set("space", *name);
-      if (const auto* emoji = space->FindString("emoji")) config.Set("emoji", *emoji);
-    }
     NSWindow* window = browser->GetWindow()->GetNativeWindow().GetNativeNSWindow();
-    NSWindow* owner = view_->GetNativeWindow().GetNativeNSWindow();
+    NSWindow* owner_window = owner ? owner->view_->GetNativeWindow().GetNativeNSWindow() : nil;
     NSView* viewport = opener ? opener->GetNativeView().GetNativeNSView() : nil;
-    if (auto json = base::WriteJson(config))
-      popup->swift = BarkSwiftPopupAttach((__bridge void*)window, (__bridge void*)owner, (__bridge void*)viewport,
+    if (auto json = base::WriteJson(config)) {
+      // The popup's default AppKit frame needs its height before the full-size
+      // content style is applied and AppKit first lays out its caption buttons.
+      if (!peek) objc_setAssociatedObject(window, sel_registerName("barkLittleHeaderHeight"),
+                                          @(kLittleHeaderHeight), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+      popup->swift = BarkSwiftPopupAttach((__bridge void*)window, (__bridge void*)owner_window, (__bridge void*)viewport,
                                           json->c_str(), record, &ReceivePopupCommand);
-    popups_.push_back(std::move(popup));
-    if (kind == "peek" && record->swift) record->AwaitFirstWindowFrame();
-    browser->GetWindow()->Activate();
+      if (!peek && !popup->swift)
+        objc_setAssociatedObject(window, sel_registerName("barkLittleHeaderHeight"), nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    if (popup->swift) {
+      auto* view = BrowserView::GetBrowserViewForBrowser(browser);
+      if (peek) {
+        view->SetProperty(kBarkPeek, true);
+      } else {
+        for (bool extensions : {false, true}) {
+          views::View* anchor = view->AddChildView(std::make_unique<LittleWindowAnchor>(
+              record->commands.GetWeakPtr(), extensions));
+          view->SetProperty(extensions ? kLittleExtensionsAnchor : kLittleSiteAnchor, anchor);
+        }
+      }
+      view->InvalidateLayout();
+      if (peek) view->GetWidget()->LayoutRootViewIfNecessary();
+    }
+    (owner ? owner->popups_ : OwnerlessLittleWindows()).push_back(std::move(popup));
+    return record;
   }
 
   static void ReceivePopupCommand(void* context, const char* json) {
@@ -2198,33 +2724,84 @@ class SidebarMac::Impl : public TabStripModelObserver,
     if (!json || !record) return;
     // Dismissal and tab promotion can destroy the UI that sent this action.
     base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(FROM_HERE,
-        base::BindOnce([](base::WeakPtr<Impl> owner, base::WeakPtr<BrowserWindowInterface> target,
-                          std::string command) {
-          if (!owner || !target) return;
-          for (auto& popup : owner->popups_) {
-            if (popup->browser == target.get()) {
-              owner->PopupCommand(popup.get(), command);
-              return;
-            }
-          }
-        }, record->owner->weak_factory_.GetWeakPtr(), record->browser->GetWeakPtr(), std::string(json)));
+        base::BindOnce([](base::WeakPtr<Popup> popup, std::string command) {
+          if (popup) PopupCommand(popup.get(), command);
+        }, record->commands.GetWeakPtr(), std::string(json)));
   }
 
-  void PopupCommand(Popup* record, const std::string& command) {
-    if (!record || record->owner != this || !record->browser || record->browser->IsDeleteScheduled()) return;
+  static void PopupCommand(Popup* record, const std::string& command) {
+    if (!record || !record->browser || record->browser->IsDeleteScheduled()) return;
+    auto* browser = record->browser.get();
+    auto* model = browser->GetTabStripModel();
+    if (!model || model->closing_all()) return;
+    auto* page = model->GetActiveWebContents();
     if (command == "close") {
-      record->browser->GetWindow()->Close();
+      browser->GetWindow()->Close();
     } else if (command == "copyURL" && record->swift) {
-      auto* model = record->browser->GetTabStripModel();
-      auto* page = model ? model->GetActiveWebContents() : nullptr;
       if (page && !IsBlankPage(page->GetVisibleURL())) {
         BarkSwiftPopupCopyURL(record->swift, page->GetVisibleURL().spec().c_str());
       }
-    } else if (command == "expand") {
-      if (record->kind == "peek" && record->swift) CapturePeekForPromotion(record);
-      else MovePopupToTab(record);
-    } else if (command == "split" && CanSplitPopup(record)) {
-      MovePopupToTab(record, true);
+    } else if (record->kind == "little" && command == "focusPage" && page) {
+      page->Focus();
+    } else if (record->kind == "little" && command == "newLittleWindow") {
+      OpenFreshLittleWindow(record->owner, record);
+    } else if (record->kind == "little" && command == "siteInfo" && page) {
+      ShowPageInfoDialog(page, {}, bubble_anchor_util::Anchor::kLocationBar);
+    } else if (record->kind == "little" && command == "extensions" && page) {
+      auto* actions = ToolbarActionsModel::Get(browser->GetProfile());
+      if (!actions || actions->action_ids().empty()) {
+        chrome::ShowExtensions(browser);
+        return;
+      }
+      auto* container = ExtensionsContainer::From(*browser);
+      if (!container) {
+        // A Chromium popup normally has only a location bar. Give its menu
+        // a toolbar model bound to this window so actions see the Little tab.
+        auto* view = BrowserView::GetBrowserViewForBrowser(browser);
+        if (!view) return;
+        auto* host = view->AddChildView(std::make_unique<views::View>());
+        host->SetVisible(false);
+        host->AddChildView(std::make_unique<ExtensionsToolbarDesktop>(
+            browser, ExtensionsToolbarDesktop::DisplayMode::kAutoHide));
+        container = ExtensionsContainer::From(*browser);
+      }
+      if (container) container->ToggleExtensionsMenu();
+    } else if (record->kind == "little" && command == "editAddress" && page && record->swift) {
+      const GURL url = page->GetVisibleURL();
+      BarkSwiftPopupEditAddress(record->swift, IsBlankPage(url) ? "" : url.spec().c_str(), false);
+    } else if (record->kind == "little" && command.starts_with("navigate:") && page) {
+      const auto input = base::TrimWhitespaceASCII(std::string_view(command).substr(9), base::TRIM_ALL);
+      if (input.empty()) return;
+      const GURL url = ResolveAddress(std::string(input), browser->GetProfile()).url;
+      if (!url.is_valid()) return;
+      NavigateParams params(browser, url, ui::PAGE_TRANSITION_TYPED);
+      params.disposition = WindowOpenDisposition::kCurrentTab;
+      Navigate(&params);
+    } else if (record->kind == "little" && (command == "expand" || command.starts_with("expand:"))) {
+      const auto space = command == "expand" ? (record->owner ? record->owner->active_space_ : record->space)
+                                             : command.substr(7);
+      SpaceCatalog catalog(g_browser_process->local_state());
+      const auto* entry = catalog.Find(space);
+      const auto* profile = entry ? entry->FindString("profile") : nullptr;
+      if (!profile || *profile != browser->GetProfile()->GetPath().BaseName().AsUTF8Unsafe() ||
+          entry->FindBool("hidden").value_or(false)) {
+        // The picker can outlive a Space that was moved or deleted.
+        auto json = base::WriteJson(LittleDestinations(browser->GetProfile(), record->space));
+        if (record->swift && json) BarkSwiftPopupSetSpaces(record->swift, json->c_str());
+        return;
+      }
+      // Opening a normal window is deferred until promotion if the user
+      // closed the last one while reading. Its sidebar adopts this popup.
+      if (!record->owner) {
+        BrowserWindowCreateParams params(browser->GetProfile(), true);
+        params.should_trigger_session_restore = false;
+        if (!CreateBrowserWindow(std::move(params))) return;
+      }
+      if (record->owner) record->owner->MovePopupToTab(record, false, space);
+    } else if (auto* host = record->owner.get()) {
+      if (command == "expand" && record->swift) host->CapturePeekForPromotion(record);
+      else if (command == "expand") host->MovePopupToTab(record);
+      else if (command == "split" && host->CanSplitPopup(record)) host->MovePopupToTab(record, true);
     }
   }
 
@@ -2315,7 +2892,7 @@ class SidebarMac::Impl : public TabStripModelObserver,
 
   // Moves the popup's page into this window's active space as a tab.
   // Splitting retains the live page and its history; it never navigates a copy.
-  void MovePopupToTab(Popup* record, bool split = false) {
+  void MovePopupToTab(Popup* record, bool split = false, std::string destination = {}) {
     if (!tabs_ || tabs_->closing_all() || group_->closing ||
         !record || record->owner != this || (split && !CanSplitPopup(record))) return;
     auto* source = record->browser.get();
@@ -2326,13 +2903,28 @@ class SidebarMac::Impl : public TabStripModelObserver,
     if (!source->GetTabStripModel()->ContainsIndex(source_index)) return;
     auto contents = source->GetTabStripModel()->GetWebContentsAt(source_index)->GetWeakPtr();
     auto opener = record->opener;
-    if (record->swift) BarkSwiftPopupDetach(record->swift);
-    record->swift = nullptr;
+    if (record->kind == "peek" && record->swift) {
+      BarkSwiftPopupDetach(record->swift);
+      record->swift = nullptr;
+    }
     chrome::MoveTabsToExistingWindow(source, view_->browser(), {source_index});
     if (!contents || tabs_->closing_all() || group_->closing) return;
     const int index = tabs_->GetIndexOfWebContents(contents.get());
     if (index == TabStripModel::kNoTab) return;
-    AssignTab(contents.get(), active_space_);
+    if (!destination.empty()) SetLittleSessionSpace(view_->browser(), contents.get(), nullptr);
+    AssignTab(contents.get(), destination.empty() ? active_space_ : destination);
+    if (!destination.empty()) {
+      selected_tabs_[destination] = sessions::SessionTabHelper::IdForTab(contents.get()).id();
+      if (destination != active_space_) SelectLocalSpace(destination);
+      // A profile switch can have hidden the popup's original sidebar.
+      for (auto* host : Instances()) {
+        if (host != this && host->group_ == group_ && host->view_->browser()->GetWindow()->IsVisible()) {
+          host->PresentSpace(destination, view_->browser());
+          break;
+        }
+      }
+      view_->browser()->GetWindow()->Show();
+    }
     if (split && opener) {
       const int opener_index = tabs_->GetIndexOfWebContents(opener.get());
       if (tabs_->ContainsIndex(opener_index)) {
@@ -2354,14 +2946,19 @@ class SidebarMac::Impl : public TabStripModelObserver,
     QueueGroupSnapshot();
   }
 
-  void ForgetPopup(Popup* record) {
-    for (auto it = popups_.begin(); it != popups_.end(); ++it) {
+  static void ForgetPopup(Popup* record) {
+    auto& windows = record->owner ? record->owner->popups_ : OwnerlessLittleWindows();
+    for (auto it = windows.begin(); it != windows.end(); ++it) {
       if (it->get() != record) continue;
       if ((*it)->swift) BarkSwiftPopupDetach((*it)->swift);
       (*it)->swift = nullptr;
+      record->commands.InvalidateWeakPtrs();
+      record->owner = nullptr;
+      record->browser = nullptr;
       // The close notification is running; release the subscription later.
       base::SingleThreadTaskRunner::GetCurrentDefault()->DeleteSoon(FROM_HERE, std::move(*it));
-      popups_.erase(it);
+      windows.erase(it);
+      SyncGlobalLittleShortcut();
       return;
     }
   }
@@ -2383,14 +2980,35 @@ class SidebarMac::Impl : public TabStripModelObserver,
     }
   }
 
-  static bool OpenExternalLinks(const std::vector<GURL>& urls) {
-    if (!LittleWindowEnabled() || urls.empty()) return false;
-    for (const auto& url : urls) if (!url.SchemeIsHTTPOrHTTPS()) return false;
-    Impl* host = FrontHost();
-    if (!host) return false;
-    BarkSwiftSidebarDismissAddress(host->swift_);
-    for (const auto& url : urls) host->OpenPopup(url, "little");
-    return true;
+  static bool ActivateMatchingLittle(const std::vector<std::unique_ptr<Popup>>& popups,
+                                     Profile* profile, const GURL& url) {
+    for (const auto& popup : popups) {
+      auto* browser = popup->browser.get();
+      if (popup->kind != "little" || !browser || browser->IsDeleteScheduled() ||
+          browser->GetProfile() != profile) continue;
+      auto* model = browser->GetTabStripModel();
+      auto* page = model && !model->closing_all() ? model->GetActiveWebContents() : nullptr;
+      // Use the live URL, including its fragment. Returning to a link after
+      // it navigated away must leave that window's current page intact.
+      if (page && page->GetVisibleURL() == url) {
+        ActivateLittleWindow(browser, page);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  static bool OpenExternalLink(const GURL& url) {
+    if (!LittleWindowEnabled() || !url.SchemeIsHTTPOrHTTPS()) return false;
+    auto [host, popup] = LittleWindowContext();
+    if (!host && !popup) return false;
+    auto* profile = host ? host->view_->GetProfile() : popup->browser->GetProfile();
+    if (host) BarkSwiftSidebarDismissAddress(host->swift_);
+    for (auto* candidate : Instances()) {
+      if (!candidate->group_->closing && candidate->view_->GetProfile() == profile &&
+          ActivateMatchingLittle(candidate->popups_, profile, url)) return true;
+    }
+    return ActivateMatchingLittle(OwnerlessLittleWindows(), profile, url) || OpenLittleWindow(url, host, popup);
   }
   void PersistTitle(content::WebContents* contents) {
     if (IsPrivate()) return;
@@ -2852,14 +3470,8 @@ class SidebarMac::Impl : public TabStripModelObserver,
     }
     for (auto& host : others) {
       if (!host || !host->tabs_ || host->view_->browser()->IsDeleteScheduled()) continue;
-      // Preserve Chromium's beforeunload confirmation, including its visible
-      // window, when a background space contains an unfinished form.
-      for (int i = 0; i < host->tabs_->count(); ++i) {
-        if (host->tabs_->GetWebContentsAt(i)->NeedToFireBeforeUnload()) {
-          host->view_->browser()->GetWindow()->Show();
-          break;
-        }
-      }
+      // Chromium activates the owning tab when it presents a beforeunload
+      // dialog. A handler that allows closing should leave its host hidden.
       chrome::CloseWindow(host->view_->browser());
     }
     // A cancelled beforeunload dialog leaves a usable group that can be
@@ -2900,7 +3512,16 @@ class SidebarMac::Impl : public TabStripModelObserver,
     snapshot_pending_ = false;
     last_snapshot_ = base::TimeTicks::Now();
     if (!tabs_ || tabs_->closing_all()) return;
+    std::optional<std::string> destinations;
     for (auto& popup : popups_) {
+      if (popup->kind == "little" && popup->swift) {
+        if (!destinations) destinations = base::WriteJson(LittleDestinations(view_->GetProfile(), active_space_));
+        if (destinations && *destinations != popup->destinations_json) {
+          popup->space = active_space_;
+          popup->destinations_json = *destinations;
+          BarkSwiftPopupSetSpaces(popup->swift, destinations->c_str());
+        }
+      }
       if (!popup->swift || popup->kind != "peek") continue;
       const bool can_split = CanSplitPopup(popup.get());
       if (can_split != popup->can_split) {
@@ -2926,12 +3547,13 @@ class SidebarMac::Impl : public TabStripModelObserver,
         HasFolder(GetTabSpace(tabs_->GetWebContentsAt(i)), *folder)) tab.Set("folder", *folder);
   }
 
-  // Keep a host hidden through the first pending navigation. Restored entries
-  // already have a committed virtual URL even before their renderer starts.
+  // Hide only unused blank hosts, not tabs navigating to their first page.
   bool IsBlankPlaceholder(int i) const {
     auto* contents = tabs_->GetWebContentsAt(i);
     if (tabs_->IsTabPinned(i) || tabs_->GetSplitForTab(i) || IsFavorite(contents)) return false;
     auto& controller = contents->GetController();
+    const auto* pending = controller.GetPendingEntry();
+    if (pending && !IsBlankPage(pending->GetVirtualURL())) return false;
     const auto* committed = controller.GetLastCommittedEntry();
     return controller.GetEntryCount() <= 1 && (!committed || IsBlankPage(committed->GetVirtualURL()));
   }
@@ -3147,6 +3769,7 @@ class SidebarMac::Impl : public TabStripModelObserver,
     };
     add("settings", "Settings", "Bark preferences · ⌘,", "slider.horizontal.3", "settings");
     if (!IsPrivate()) {
+      add("newLittleWindow", "New Little Window", "Quick lookup · ⌥⌘N", "macwindow.badge.plus", "newLittleWindow");
       add("newFolder", "New Folder", "In this space", "folder.badge.plus", "newFolder", false, "New Folder");
       add("archive", "Archived Tabs", "Search and restore tabs in this space", "archivebox", "");
       if (!organization_undo_.empty() && organization_undo_.back().space == active_space_)
@@ -3156,7 +3779,8 @@ class SidebarMac::Impl : public TabStripModelObserver,
     const bool page_available = target && tabs_->ContainsIndex(index) && !IsBlankPage(PageURL(target));
     if (page_available) {
       const bool pinned = tabs_->IsTabPinned(index);
-      add(pinned ? "unpin" : "pin", pinned ? "Unpin Tab" : "Pin Tab", page_detail, pinned ? "pin.slash" : "pin", "pin", true);
+      if (!IsPrivate())
+        add(pinned ? "unpin" : "pin", pinned ? "Unpin Tab" : "Pin Tab", page_detail, pinned ? "pin.slash" : "pin", "pin", true);
       if (tabs_->GetSplitForTab(index)) {
         add("unsplit", "Separate Split View", page_detail, "rectangle", "unsplit", true);
       } else if (!IsFavorite(target)) {
@@ -3249,6 +3873,11 @@ class SidebarMac::Impl : public TabStripModelObserver,
     const bool empty = base::TrimWhitespaceASCII(query, base::TRIM_ALL).empty();
     if (empty || IsActionQuery(query)) {
       if (autocomplete_) autocomplete_->Stop(AutocompleteStopReason::kClobbered);
+      // A fresh address bar session starts without stale favicon lookups.
+      if (empty) {
+        suggestion_favicon_tasks_.TryCancelAll();
+        suggestion_favicons_.clear();
+      }
     } else {
       if (!autocomplete_) {
         // History only: no search provider, so typing is not sent to a
@@ -3269,6 +3898,25 @@ class SidebarMac::Impl : public TabStripModelObserver,
   }
 
   void OnResultChanged(AutocompleteController*, bool) override { SendSuggestions(); }
+
+  // Returns the history favicon for a suggestion's page, starting a lookup the
+  // first time a page is seen. Results refresh the list when they arrive.
+  const std::string& SuggestionFavicon(const GURL& url) {
+    auto [it, inserted] = suggestion_favicons_.try_emplace(url.spec());
+    if (!inserted) return it->second;
+    auto* favicons = FaviconServiceFactory::GetForProfile(view_->GetProfile(), ServiceAccessType::IMPLICIT_ACCESS);
+    if (!favicons) return it->second;
+    favicons->GetFaviconImageForPageURL(url, base::BindOnce([](base::WeakPtr<Impl> self, const std::string& spec,
+        const favicon_base::FaviconImageResult& result) {
+      if (!self) return;
+      auto it = self->suggestion_favicons_.find(spec);
+      if (it == self->suggestion_favicons_.end()) return;
+      it->second = SuggestionFaviconPNG(result.image, 16384);
+      if (!it->second.empty() && !base::TrimWhitespaceASCII(self->suggest_query_, base::TRIM_ALL).empty())
+        self->SendSuggestions();
+    }, weak_factory_.GetWeakPtr(), url.spec()), &suggestion_favicon_tasks_);
+    return it->second;
+  }
 
   void SendSuggestions() {
     constexpr size_t kMaxSuggestions = 8;
@@ -3303,12 +3951,20 @@ class SidebarMac::Impl : public TabStripModelObserver,
         item.Set("kind", typed ? "url" : "history");
         item.Set("title", base::UTF16ToUTF8(typed ? match.contents : match.description));
         item.Set("url", url.spec());
+        const std::string& favicon = SuggestionFavicon(url);
+        if (!favicon.empty()) {
+          item.Set("favicon", favicon);
+          item.Set("faviconValid", true);
+        }
         items.Append(std::move(item));
       }
     }
     base::DictValue message;
     message.Set("query", suggest_query_);
-    message.Set("action", actions_only ? "command" : ResolveAddress(suggest_query_, view_->GetProfile()).is_search ? "search" : "navigate");
+    const auto destination = ResolveAddress(suggest_query_, view_->GetProfile());
+    message.Set("action", actions_only ? "command" : destination.is_search ? "search" : "navigate");
+    if (!actions_only && destination.is_search && !destination.engine_name.empty())
+      message.Set("searchEngine", base::UTF16ToUTF8(destination.engine_name));
     message.Set("items", std::move(items));
     if (auto json = base::WriteJson(message)) BarkSwiftSidebarSuggestions(swift_, json->c_str());
   }
@@ -3536,7 +4192,7 @@ class SidebarMac::Impl : public TabStripModelObserver,
     if (!incognito && browser_import_result_) state.Set("browserImportResult", browser_import_result_->Clone());
     state.Set("sidebarCollapsed", collapsed_);
     state.Set("sidebarRevealed", revealed_);
-    state.Set("sidebarWidth", expanded_width());
+    state.Set("sidebarWidth", width_);
     state.Set("tabs", std::move(tab_list));
     state.Set("archiveGeneration", archive_generation_);
     state.Set("favorites", std::move(favorites));
@@ -3550,6 +4206,8 @@ class SidebarMac::Impl : public TabStripModelObserver,
       features.Set("archiveAfterHours", ArchiveAfterHours());
       features.Set("peek", PeekEnabled());
       features.Set("littleWindow", LittleWindowEnabled());
+      features.Set("globalLittleShortcut", GlobalLittleShortcutEnabled());
+      if (GlobalLittleShortcut::Get().unavailable()) features.Set("globalLittleShortcutUnavailable", true);
       features.Set("autoPictureInPicture", AutoPictureInPictureAllowed());
       state.Set("features", std::move(features));
     }
@@ -4068,6 +4726,10 @@ class SidebarMac::Impl : public TabStripModelObserver,
     if (incognito && (*action == "space" || *action == "createSpace" || *action == "deleteSpace" ||
                       *action == "manageSpaces" || *action == "moveTabToSpace" ||
                       *action == "createProfile" || *action == "deleteProfile" || *action == "customizeSpace" || *action == "appearance" || *action == "importBrowserData")) return;
+    if (*action == "newLittleWindow") {
+      if (!incognito) OpenFreshLittleWindow(this);
+      return;
+    }
     auto* active = tabs_->GetActiveWebContents();
     // Scope popover actions to the page they described, including navigations
     // in the same tab, so stale extension clicks cannot grant another page access.
@@ -4123,7 +4785,7 @@ class SidebarMac::Impl : public TabStripModelObserver,
       if (*action == "closePinnedSession") return;
       tabs_->CloseWebContentsAt(index, CLOSE_USER_GESTURE);
       return;  // Closing the last tab may destroy this browser window.
-    } else if (*action == "pin" && tabs_->ContainsIndex(index)) {
+    } else if (*action == "pin" && tabs_->ContainsIndex(index) && !IsPrivate()) {
       tabs_->SetTabPinned(index, !tabs_->IsTabPinned(index));
     } else if (*action == "mute" && tabs_->ContainsIndex(index)) {
       auto* contents = tabs_->GetWebContentsAt(index);
@@ -4154,7 +4816,7 @@ class SidebarMac::Impl : public TabStripModelObserver,
       MoveTab(message->FindInt("id").value_or(-1), before,
               !zone ? (tabs_->IsTabPinned(index) ? TabZone::kPinned : TabZone::kUnpinned)
               : *zone == "favorites" ? TabZone::kFavorites
-              : *zone == "pinned" ? TabZone::kPinned : TabZone::kUnpinned);
+              : *zone == "pinned" && !IsPrivate() ? TabZone::kPinned : TabZone::kUnpinned);
     } else if (*action == "splitTab" && tabs_->ContainsIndex(index)) {
       const bool stacked = text && (*text == "top" || *text == "bottom");
       SplitWithActive(index, stacked ? split_tabs::SplitTabLayout::kStacked
@@ -4346,6 +5008,10 @@ class SidebarMac::Impl : public TabStripModelObserver,
       if (base::StringToInt(*text, &hours) && hours >= 0 && hours <= 24 * 365)
         [NSUserDefaults.standardUserDefaults setInteger:hours forKey:kArchiveAfterHours];
       AutoArchive();
+    } else if (*action == "setGlobalLittleShortcut" && text && !incognito) {
+      [NSUserDefaults.standardUserDefaults setBool:*text == "on" forKey:kGlobalLittleShortcut];
+      SyncGlobalLittleShortcut(/*retry=*/true);
+      for (auto* host : Instances()) host->QueueSnapshot();
     } else if ((*action == "setPeek" || *action == "setLittleWindow") && text && !incognito) {
       [NSUserDefaults.standardUserDefaults setBool:*text != "on"
                                             forKey:*action == "setPeek" ? kPeekDisabled : kLittleWindowDisabled];
@@ -4563,8 +5229,10 @@ class SidebarMac::Impl : public TabStripModelObserver,
   RAW_PTR_EXCLUSION void* backdrop_swift_ = nullptr;
   std::unique_ptr<AutocompleteController> autocomplete_;
   std::string suggest_query_;
+  // Page URL -> base64 favicon PNG ("" while pending or when none is stored).
+  std::map<std::string, std::string> suggestion_favicons_;
+  base::CancelableTaskTracker suggestion_favicon_tasks_;
   int width_ = 260;
-  int last_layout_width_ = 0;
   bool snapshot_pending_ = false;
   bool site_controls_open_ = false;
   bool preferences_open_ = false;
@@ -4611,15 +5279,45 @@ class SidebarMac::Impl : public TabStripModelObserver,
   base::WeakPtrFactory<Impl> weak_factory_{this};
 };
 
+BEGIN_METADATA(SidebarMac::Impl, LittleWindowAnchor)
+END_METADATA
+
+bool SidebarMac::IsPeek(const BrowserView* view) {
+  return view->GetProperty(kBarkPeek);
+}
+
+views::View* SidebarMac::LittleToolbarAnchor(const BrowserView* view, bool extensions) {
+  return view->GetProperty(extensions ? kLittleExtensionsAnchor : kLittleSiteAnchor);
+}
+
+bool SidebarMac::OpenStandaloneLittleWindow(Profile* profile, const GURL& url) {
+  if (!IsSwiftUIEnabled() || !LittleWindowEnabled() || !profile->IsRegularProfile() ||
+      !url.SchemeIsHTTPOrHTTPS()) return false;
+  if (Impl::OpenExternalLink(url)) return true;
+  SpaceCatalog catalog(g_browser_process->local_state());
+  Impl::EnsureProfileSpaces(catalog, g_browser_process->profile_manager()->GetProfileAttributesStorage());
+  auto* popup = Impl::OpenStandaloneLittle(profile, url,
+      catalog.FirstForProfile(profile->GetPath().BaseName().AsUTF8Unsafe()));
+  if (!popup) return false;
+  ExternalLink() = &Impl::OpenExternalLink;
+  Impl::SyncGlobalLittleShortcut();
+  return true;
+}
+
+void SidebarMac::AttachLittleWindow(BrowserWindowInterface* browser, content::WebContents* page) {
+  if (!IsSwiftUIEnabled() || !browser->GetProfile()->IsRegularProfile()) return;
+  Impl::AttachLittleWindow(browser, page);
+  ExternalLink() = &Impl::OpenExternalLink;
+  Impl::SyncGlobalLittleShortcut();
+}
+
 bool SidebarMac::IsEnabled(BrowserWindowInterface* browser) {
   InitializeUpdater();
-  return IsSwiftUIEnabled() &&
-         browser->GetType() == BrowserWindowInterface::Type::TYPE_NORMAL &&
-         (browser->GetProfile()->IsRegularProfile() ||
-          browser->GetProfile()->IsIncognitoProfile());
+  return UsesSidebar(*browser);
 }
 SidebarMac::SidebarMac(BrowserView* view) : impl_(std::make_unique<Impl>(view)) {}
 SidebarMac::~SidebarMac() = default;
+bool SidebarMac::CanShow() const { return impl_->CanShow(); }
 int SidebarMac::width() const { return impl_->width(); }
 void SidebarMac::Layout() { impl_->Layout(); }
 void SidebarMac::FocusAddress() { impl_->FocusAddress(); }

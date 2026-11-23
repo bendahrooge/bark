@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {setTimeout as delay} from 'node:timers/promises';
-import {Browser, expectTitle} from './test_chromium_browser.mjs';
+import {Browser, uiDriver, expectTitle} from './test_chromium_browser.mjs';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const resultRoot = path.join(root, 'test-results/chromium-spaces');
@@ -18,22 +18,8 @@ const directory = path.join(profile, '.bark-ui-driver');
 fs.mkdirSync(directory);
 const checks = [];
 const report = {passed: false, checks};
-let requestId = 0;
-let latest;
-async function command(action = 'snapshot', fields = {}) {
-  const id = ++requestId;
-  fs.writeFileSync(path.join(directory, 'request.tmp'), JSON.stringify({action, ...fields, requestId: id}));
-  fs.renameSync(path.join(directory, 'request.tmp'), path.join(directory, 'request.json'));
-  const deadline = Date.now() + 30000;
-  while (Date.now() < deadline) {
-    try {
-      const response = JSON.parse(fs.readFileSync(path.join(directory, 'response.json'), 'utf8'));
-      if (response.requestId === id) { latest = response; return response; }
-    } catch (error) { if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error; }
-    await delay(50);
-  }
-  throw new Error(`Timed out waiting for Bark command ${action}`);
-}
+const ui = uiDriver({directory: () => directory, browser: () => browser, attempts: 600});
+const {command} = ui;
 async function waitState(predicate, label) {
   for (let attempt = 0; attempt < 100; attempt++) {
     const state = await command();
@@ -149,7 +135,14 @@ async function verifySettingsRestored() {
   await browser.send('Target.closeTarget', {targetId: restored.targetId});
 }
 
+let reportCloseVisibility;
+const closeVisibility = new Promise(resolve => { reportCloseVisibility = resolve; });
 const server = http.createServer((request, response) => {
+  if (request.url.startsWith('/closing/')) {
+    reportCloseVisibility(request.url);
+    response.writeHead(204).end();
+    return;
+  }
   response.writeHead(200, {'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store'});
   response.end('<!doctype html><meta charset="utf-8"><title>Space page</title><body>Space test</body>');
 });
@@ -324,6 +317,10 @@ try {
   state = await waitState(state => visible(state).length === 2 && state.windows.length === 3, 'explicit second window');
   const second = visible(state).find(window => window.windowGroup !== originalGroup);
   assert.ok(second);
+  const background = await sessionFor(browser, base + '/second-window');
+  await evaluate(browser, background.sessionId, `window.addEventListener('beforeunload', () => {
+    navigator.sendBeacon('/closing/' + document.visibilityState);
+  })`);
   const otherSpace = second.profileId === firstProfile ? workSpace : personal;
   await command('space', {text: otherSpace, windowId: second.windowId});
   state = await waitState(state => state.windows.length === 4 && visible(state).length === 2 &&
@@ -332,6 +329,8 @@ try {
   await command('testCloseWindow', {windowId: visible(state).find(window => window.windowGroup === second.windowGroup).windowId});
   state = await waitState(state => state.windows.length === 2 && visible(state).length === 1, 'close second window without closing original');
   assert.equal(visible(state)[0].windowGroup, originalGroup);
+  assert.equal(await Promise.race([closeVisibility, delay(5000, 'missing')]), '/closing/hidden',
+    'A background window stays hidden when its beforeunload handler allows closing');
   checks.push('An explicitly opened second window owns independent profile hosts and closes without affecting the first');
 
   const dirtyPage = await sessionFor(browser, urls.work);
@@ -385,7 +384,7 @@ try {
   console.log(`${checks.length} native space/profile/settings checks passed`);
 } catch (error) {
   report.error = error.stack || String(error);
-  report.lastState = latest;
+  report.lastState = ui.latest;
   report.preservedProfile = profile;
   console.error(error);
   process.exitCode = 1;

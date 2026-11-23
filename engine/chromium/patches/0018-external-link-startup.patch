@@ -12,18 +12,18 @@ diff --git a/chrome/browser/app_controller_mac.h b/chrome/browser/app_controller
  @property(readonly, nonatomic) BOOL startupComplete;
  @property(readonly, nonatomic) Profile* lastProfileIfLoaded;
 diff --git a/chrome/browser/app_controller_mac.mm b/chrome/browser/app_controller_mac.mm
-index 6c7c439..9de3e51 100644
 --- a/chrome/browser/app_controller_mac.mm
 +++ b/chrome/browser/app_controller_mac.mm
-@@ -14,6 +14,7 @@
+@@ -12,6 +12,8 @@
  #include <memory>
  #include <vector>
  
++#include "bark/mac/sidebar_mac.h"
 +#include "bark/native_ui_mac.h"
  #include "base/apple/bridging.h"
  #include "base/apple/foundation_util.h"
  #include "base/apple/scoped_cftyperef.h"
-@@ -70,6 +71,7 @@
+@@ -68,6 +70,7 @@
  #include "chrome/browser/profiles/profile_observer.h"
  #include "chrome/browser/profiles/profiles_state.h"
  #include "chrome/browser/sessions/session_restore.h"
@@ -31,15 +31,16 @@ index 6c7c439..9de3e51 100644
  #include "chrome/browser/sessions/session_service.h"
  #include "chrome/browser/sessions/session_service_factory.h"
  #include "chrome/browser/sessions/tab_restore_service_factory.h"
-@@ -557,6 +559,7 @@ - (void)profileWasRemoved:(const base::FilePath&)profilePath
+@@ -555,6 +558,8 @@
  // once after startup has completed. It opens the tabs in |_startupTabs|, and
  // clears |_startupTabs|.
  - (void)openStartupUrls;
 +- (void)resumeStartupUrlsAfterWindowActivation;
++- (BOOL)deferStartupWindow:(base::OnceClosure)launch;
  
  // Opens a tab for each StartupTab in |tabs|. If there is exactly one tab open
  // before this method is called, and that tab is the NTP, then this method
-@@ -597,7 +600,8 @@ - (void)onVerticalTabStripModeChanged:
+@@ -595,7 +600,8 @@
  
  class AppControllerProfileObserver : public ProfileAttributesStorage::Observer,
                                       public ProfileManagerObserver,
@@ -49,7 +50,7 @@ index 6c7c439..9de3e51 100644
   public:
    AppControllerProfileObserver(
        ProfileManager* profile_manager, AppController* app_controller)
-@@ -605,6 +609,7 @@ - (void)onVerticalTabStripModeChanged:
+@@ -603,6 +609,7 @@
          app_controller_(app_controller) {
      CHECK(profile_manager_, base::NotFatalUntil::M163);
      CHECK(app_controller_, base::NotFatalUntil::M163);
@@ -57,7 +58,7 @@ index 6c7c439..9de3e51 100644
      // Listen to ProfileObserver and ProfileManagerObserver.
      profile_manager_observer_.Observe(profile_manager_.get());
      for (Profile* profile : profile_manager_->GetLoadedProfiles()) {
-@@ -622,7 +627,13 @@ - (void)onVerticalTabStripModeChanged:
+@@ -620,7 +627,13 @@
    AppControllerProfileObserver& operator=(const AppControllerProfileObserver&) =
        delete;
  
@@ -72,16 +73,18 @@ index 6c7c439..9de3e51 100644
  
   private:
    // ProfileAttributesStorage::Observer implementation:
-@@ -719,6 +730,8 @@ @implementation AppController {
+@@ -717,6 +730,10 @@
    // |_startupTabs| so that they can go in the first browser window/tab.
    StartupTabs _startupTabs;
    BOOL _startupComplete;
 +  BOOL _browserStartupFinished;
 +  BOOL _barkWaitingForStartupWindows;
++  base::OnceClosure _deferredStartupWindow;
++  BOOL _waitingForLaunchEvent;
  
    // Outlets for testing close tab/window menu items.
    NSMenuItem* __strong _cmdWMenuItemForTesting;
-@@ -809,6 +822,8 @@ + (AppController*)sharedController {
+@@ -807,6 +824,8 @@
  
  - (instancetype)init {
    if (self = [super init]) {
@@ -90,10 +93,25 @@ index 6c7c439..9de3e51 100644
      // -[NSMenu cr_menuItemForKeyEquivalentEvent:] lives in /content, but
      // we need to execute special update code before the search begins.
      // Setting this block gives us the hook we need.
-@@ -1218,10 +1233,30 @@ - (void)setUpdateCheckInterval {
+@@ -1249,10 +1268,55 @@
  #endif
  }
  
++- (BOOL)hasPendingLittleWindowLaunch {
++  return !_startupTabs.empty() && bark::LittleWindowEnabled() &&
++      std::ranges::all_of(_startupTabs, [](const StartupTab& tab) {
++        return !tab.is_untrusted_launch && tab.url.SchemeIsHTTPOrHTTPS();
++      });
++}
++
++- (BOOL)deferStartupWindow:(base::OnceClosure)launch {
++  if (_browserStartupFinished || !_barkWaitingForStartupWindows ||
++      !bark::LittleWindowEnabled()) return NO;
++  // Keep an ordinary launch available while LaunchServices delivers its intent.
++  _deferredStartupWindow = std::move(launch);
++  return YES;
++}
++
 +- (void)didFinishBrowserStartup {
 +  _browserStartupFinished = YES;
 +  [self resumeStartupUrlsAfterWindowActivation];
@@ -117,6 +135,16 @@ index 6c7c439..9de3e51 100644
 +       (!_browserStartupFinished || SessionRestore::IsAnySessionCurrentlyRestoring()))) {
 +    return;
 +  }
++  if (_deferredStartupWindow && _waitingForLaunchEvent && _startupTabs.empty()) return;
++  if (_deferredStartupWindow) {
++    VLOG(1) << "Bark resolving startup with " << _startupTabs.size()
++            << " queued URLs, Little window: " << [self hasPendingLittleWindowLaunch];
++    auto launch = std::move(_deferredStartupWindow);
++    if (![self hasPendingLittleWindowLaunch]) {
++      std::move(launch).Run();
++      if (SessionRestore::IsAnySessionCurrentlyRestoring()) return;
++    }
++  }
 +  _barkWaitingForStartupWindows = NO;
 +  StartupTabs tabs;
 +  tabs.swap(_startupTabs);
@@ -124,7 +152,7 @@ index 6c7c439..9de3e51 100644
  }
  
  - (void)openStartupTabsReplacingNTP:(StartupTabs)tabs {
-@@ -1229,7 +1264,7 @@ - (void)openStartupTabsReplacingNTP:(StartupTabs)tabs {
+@@ -1260,10 +1324,11 @@
      return;
    }
  
@@ -133,6 +161,66 @@ index 6c7c439..9de3e51 100644
      for (auto& tab : tabs) {
        _startupTabs.push_back(std::move(tab));
      }
++    if (_startupComplete && _browserStartupFinished) [self openStartupUrls];
+     return;
+   }
+ 
+@@ -1329,6 +1394,20 @@
+   // Makes "Services" menu items available.
+   [self registerServicesMenuTypesTo:[notify object]];
+ 
++  NSNumber* defaultLaunch = notify.userInfo[NSApplicationLaunchIsDefaultLaunchKey];
++  VLOG(1) << "Bark startup default launch: " << (defaultLaunch ? defaultLaunch.intValue : -1);
++  if (_barkWaitingForStartupWindows && defaultLaunch && !defaultLaunch.boolValue &&
++      _startupTabs.empty()) {
++    // Like AppShimController, allow up to two seconds for LaunchServices to
++    // deliver the event that started a non-default launch. A received URL
++    // proceeds immediately, and a normal Dock launch never waits.
++    _waitingForLaunchEvent = YES;
++    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC),
++                   dispatch_get_main_queue(), ^{
++      self->_waitingForLaunchEvent = NO;
++      [self openStartupUrls];
++    });
++  }
+   _startupComplete = YES;
+ 
+   if (base::CommandLine::ForCurrentProcess()->HasSwitch(switches::kKioskMode))
+@@ -2644,7 +2723,7 @@
+   [AppController.sharedController setLastProfile:profile];
+ }
+ 
+-void OpenStartupTabsInBrowserWithProfile(const StartupTabs& tabs,
++void OpenStartupTabsInBrowserWithProfile(const StartupTabs& requested_tabs,
+                                          Profile* profile) {
+   if (!profile)
+     return;  // No suitable profile to open the URLs, do nothing.
+@@ -2657,6 +2736,14 @@
+   // window, not in PWA/app windows which cannot accept new tabs.
+   BrowserWindowInterface* browser =
+       ProfileBrowserCollection::GetForProfile(profile)->FindTabbedBrowser();
++  StartupTabs tabs = requested_tabs;
++  if (!browser) {
++    std::erase_if(tabs, [profile](const StartupTab& tab) {
++      return !tab.is_untrusted_launch &&
++             bark::SidebarMac::OpenStandaloneLittleWindow(profile, tab.url);
++    });
++    if (tabs.empty()) return;
++  }
+   int startupIndex = TabStripModel::kNoTab;
+   content::WebContents* startupContent = nullptr;
+   if (browser && browser->GetTabStripModel()->count() == 1) {
+@@ -2730,6 +2817,10 @@
+ 
+ }  // namespace
+ 
++bool bark::DeferStartupWindow(base::OnceClosure launch) {
++  return [AppController.sharedController deferStartupWindow:std::move(launch)];
++}
++
+ namespace app_controller_mac {
+ 
+ bool IsOpeningNewWindow() {
 diff --git a/chrome/browser/chrome_browser_main_mac.h b/chrome/browser/chrome_browser_main_mac.h
 --- a/chrome/browser/chrome_browser_main_mac.h
 +++ b/chrome/browser/chrome_browser_main_mac.h

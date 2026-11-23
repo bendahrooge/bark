@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {setTimeout as delay} from 'node:timers/promises';
-import {Browser} from './test_chromium_browser.mjs';
+import {Browser, uiDriver} from './test_chromium_browser.mjs';
 
 const root = path.resolve('test-results/chromium-space-canvas');
 fs.mkdirSync(root, {recursive: true});
@@ -14,22 +14,10 @@ const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'bark-space-canvas-'));
 const driver = path.join(profile, '.bark-ui-driver');
 fs.mkdirSync(driver);
 const report = {passed: false, checks: []};
-let browser, sequence = 0, latest;
+let browser;
 const visible = state => state.windows.find(window => window.visible && !window.incognito);
-async function command(action = 'snapshot', fields = {}) {
-  const requestId = ++sequence;
-  fs.writeFileSync(path.join(driver, 'request.tmp'), JSON.stringify({action, requestId, ...fields}));
-  fs.renameSync(path.join(driver, 'request.tmp'), path.join(driver, 'request.json'));
-  for (let attempt = 0; attempt < 300; attempt++) {
-    if (browser.exited) throw Error('Test browser exited');
-    try {
-      const state = JSON.parse(fs.readFileSync(path.join(driver, 'response.json')));
-      if (state.requestId === requestId) { latest = state; return state; }
-    } catch (error) { if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error; }
-    await delay(50);
-  }
-  throw Error('Timed out: ' + action);
-}
+const ui = uiDriver({directory: () => driver, browser: () => browser});
+const {command} = ui;
 async function waitFor(predicate, label) {
   for (let attempt = 0; attempt < 100; attempt++) {
     const window = visible(await command());
@@ -124,7 +112,7 @@ try {
   console.log(`${report.checks.length} space canvas checks passed: ${reports}`);
 } catch (error) {
   report.error = String(error.stack ?? error);
-  fs.writeFileSync(path.join(reports, 'last-state.json'), JSON.stringify(latest ?? {}, null, 2));
+  fs.writeFileSync(path.join(reports, 'last-state.json'), JSON.stringify(ui.latest ?? {}, null, 2));
   console.error(error);
   process.exitCode = 1;
 } finally {

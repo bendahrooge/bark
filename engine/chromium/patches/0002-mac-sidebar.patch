@@ -181,7 +181,7 @@ index 0dabb77..ac24bc8 100644
  
  bool BrowserView::ShouldDrawTabStrip() const {
 +#if BUILDFLAG(IS_MAC)
-+  if (bark_sidebar_ && !IsFullscreen()) return false;
++  if (bark_sidebar_) return false;
 +#endif
    // Return false if this window does not normally display a tabstrip or if the
    // tabstrip is currently hidden, e.g. because we're in fullscreen.
@@ -191,7 +191,7 @@ index 0dabb77..ac24bc8 100644
  
  void BrowserView::SetFocusToLocationBar(bool is_user_initiated) {
 +#if BUILDFLAG(IS_MAC)
-+  if (bark_sidebar_ && !IsFullscreen()) {
++  if (bark_sidebar_ && bark_sidebar_->CanShow()) {
 +    // Chromium also requests location focus when restoring a tab or showing
 +    // its initial blank page. Only an explicit command opens Bark's editor.
 +    if (is_user_initiated) {
@@ -206,27 +206,30 @@ index 0dabb77..ac24bc8 100644
    // On Windows, changing focus to the location bar causes the browser window to
    // become active. This can steal focus if the user has another window open
    // already. On Chrome OS, changing focus makes a view believe it has a focus
-@@ -3135,6 +3158,8 @@ void BrowserView::DisableTabStripEditingForTesting() {
+@@ -3135,6 +3158,10 @@ void BrowserView::DisableTabStripEditingForTesting() {
  
  bool BrowserView::IsToolbarVisible() const {
  #if BUILDFLAG(IS_MAC)
-+  if (bark_sidebar_ && !IsFullscreen())
++  if (bark::SidebarMac::IsPeek(this)) return false;
++  if (bark_sidebar_ ||
++      (!IsFullscreen() && bark::SidebarMac::LittleToolbarAnchor(this, false)))
 +    return false;
    // Immersive full screen makes it possible to display the toolbar when
    // kShowFullscreenToolbar is not set.
    if (!WindowFeatureController::From(browser())
-@@ -3161,6 +3186,10 @@ bool BrowserView::IsToolbarShowing() const {
+@@ -3161,6 +3188,11 @@ bool BrowserView::IsToolbarShowing() const {
  }
  
  bool BrowserView::IsLocationBarVisible() const {
 +#if BUILDFLAG(IS_MAC)
-+  if (bark_sidebar_ && !IsFullscreen())
-+    return true;  // Cmd+L targets the sidebar address field.
++  if (bark::SidebarMac::IsPeek(this)) return false;
++  if (bark_sidebar_)
++    return bark_sidebar_->CanShow();  // Cmd+L targets the sidebar address field.
 +#endif
    return WindowFeatureController::From(browser_)->SupportsWindowFeature(
               WindowFeatureController::WindowFeature::kFeatureLocationBar) &&
           GetLocationBar()->IsVisible();
-@@ -4912,7 +4941,14 @@ int BrowserView::NonClientHitTest(const gfx::Point& point) {
+@@ -4912,7 +4944,16 @@ int BrowserView::NonClientHitTest(const gfx::Point& point) {
  
  gfx::Size BrowserView::GetMinimumSize() const {
    auto* const layout = GetBrowserViewLayout();
@@ -236,13 +239,15 @@ index 0dabb77..ac24bc8 100644
 +  if (bark_sidebar_) {
 +    minimum.set_width(std::max(
 +        minimum.width(), BrowserViewLayout::kMainBrowserContentsMinimumWidth + 200));
++  } else if (auto* header = bark::SidebarMac::LittleToolbarAnchor(this, false)) {
++    minimum.SetToMax(gfx::Size(320, header->height() + 64));
 +  }
 +#endif
 +  return minimum;
  }
  
  ///////////////////////////////////////////////////////////////////////////////
-@@ -4976,6 +5012,9 @@ void BrowserView::Layout(PassKey) {
+@@ -4976,6 +5017,9 @@ void BrowserView::Layout(PassKey) {
    }
  
    LayoutSuperclass<views::View>(this);
@@ -252,7 +257,7 @@ index 0dabb77..ac24bc8 100644
  
    // TODO(jamescook): Why was this in the middle of layout code?
    toolbar_->location_bar()->UpdateFocusBehavior(IsToolbarVisible());
-@@ -5279,8 +5318,23 @@ void BrowserView::AddedToWidget() {
+@@ -5279,8 +5323,24 @@ void BrowserView::AddedToWidget() {
            views::features::kSkipRedundantSetNativeThemeUpdate)) {
      FrameColorsChanged();
    }
@@ -268,8 +273,9 @@ index 0dabb77..ac24bc8 100644
  }
 
 +views::View* BrowserView::GetBarkToolbarAnchor(bool extensions) const {
-+  return bark_sidebar_ && !IsFullscreen()
-+             ? bark_sidebar_->bubble_anchor(extensions) : nullptr;
++  if (bark_sidebar_)
++    return bark_sidebar_->CanShow() ? bark_sidebar_->bubble_anchor(extensions) : nullptr;
++  return IsFullscreen() ? nullptr : bark::SidebarMac::LittleToolbarAnchor(this, extensions);
 +}
 +#endif
 +
@@ -315,7 +321,7 @@ diff --git a/chrome/browser/ui/views/frame/layout/browser_view_layout_delegate_i
 index 162cb04878..08dff219a3 100644
 --- a/chrome/browser/ui/views/frame/layout/browser_view_layout_delegate_impl.cc
 +++ b/chrome/browser/ui/views/frame/layout/browser_view_layout_delegate_impl.cc
-@@ -114,8 +114,20 @@ BrowserLayoutParams BrowserViewLayoutDelegateImpl::GetBrowserLayoutParams(
+@@ -114,8 +114,27 @@ BrowserLayoutParams BrowserViewLayoutDelegateImpl::GetBrowserLayoutParams(
        use_browser_bounds = false;
      }
  #endif
@@ -332,6 +338,13 @@ index 162cb04878..08dff219a3 100644
 +          std::max(38.f, local.leading_exclusion.content.height()));
 +    }
 +    local.InsetHorizontal(browser_view_->GetBarkSidebarWidth(), /*leading=*/true);
++    if (!browser_view_->GetIsNormalType()) {
++      if (auto* header = browser_view_->GetBarkToolbarAnchor(false)) {
++        // The Little window header shares the full-size AppKit content view.
++        local.SetTop(std::min(local.visual_client_area.bottom(),
++                              local.visual_client_area.y() + header->height()));
++      }
++    }
 +#endif
 +    return local;
    }

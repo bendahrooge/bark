@@ -21,18 +21,16 @@ diff --git a/chrome/browser/app_controller_mac.mm b/chrome/browser/app_controlle
  
  #include <AppKit/AppKit.h>
  #include <dispatch/dispatch.h>
-@@ -1232,6 +1234,17 @@
+@@ -1232,6 +1234,15 @@
      return;
    }
  
-+  // Bark shows links from other apps in a Little window when it can.
-+  std::vector<GURL> barkLinks;
-+  for (const auto& tab : tabs) {
-+    barkLinks.push_back(tab.url);
-+  }
-+  // Keep the opaque initiator required for untrusted external launches.
-+  if (std::ranges::none_of(tabs, &StartupTab::is_untrusted_launch) &&
-+      bark::OpenExternalLinks(barkLinks)) {
++  // Keep Chromium's launch metadata (including the opaque initiator for
++  // untrusted launches) for every URL Bark did not handle.
++  std::erase_if(tabs, [](const StartupTab& tab) {
++    return !tab.is_untrusted_launch && bark::OpenExternalLink(tab.url);
++  });
++  if (tabs.empty()) {
 +    return;
 +  }
 +
@@ -147,3 +145,16 @@ diff --git a/chrome/browser/ui/BUILD.gn b/chrome/browser/ui/BUILD.gn
    }
  
    source_set("chrome_web_modal_dialog_manager_delegate") {
+diff --git a/chrome/browser/ui/views/frame/browser_view.cc b/chrome/browser/ui/views/frame/browser_view.cc
+--- a/chrome/browser/ui/views/frame/browser_view.cc
++++ b/chrome/browser/ui/views/frame/browser_view.cc
+@@ -3689,4 +3689,9 @@ void BrowserView::OnTabStripModelChanged(
+   for ([[maybe_unused]] const auto& contents : change.GetInsert()->contents) {
++#if BUILDFLAG(IS_MAC)
++    if (browser()->GetType() == BrowserWindowInterface::TYPE_POPUP) {
++      bark::SidebarMac::AttachLittleWindow(browser(), contents.contents);
++    }
++#endif
+ #if defined(USE_AURA)
+     // WebContents inserted in tabs might not have been added to the root
+     // window yet. Per http://crbug.com/41089037 add them now since drawing the
