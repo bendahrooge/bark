@@ -12,16 +12,16 @@ diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
 diff --git a/chrome/browser/app_controller_mac.mm b/chrome/browser/app_controller_mac.mm
 --- a/chrome/browser/app_controller_mac.mm
 +++ b/chrome/browser/app_controller_mac.mm
-@@ -3,6 +3,8 @@
- // found in the LICENSE file.
+@@ -4,6 +4,8 @@
  
  #import "chrome/browser/app_controller_mac.h"
-+
-+#include "bark/browser_hooks.h"
  
++#include "bark/browser_hooks.h"
++
  #include <AppKit/AppKit.h>
  #include <dispatch/dispatch.h>
-@@ -1232,6 +1234,15 @@
+ #include <stddef.h>
+@@ -1267,6 +1269,15 @@ - (void)openStartupTabsReplacingNTP:(StartupTabs)tabs {
      return;
    }
  
@@ -37,7 +37,7 @@ diff --git a/chrome/browser/app_controller_mac.mm b/chrome/browser/app_controlle
    OpenStartupTabsInBrowser(std::move(tabs));
  }
  
-@@ -1715,9 +1726,11 @@
+@@ -1750,9 +1761,11 @@ - (void)executeCommand:(id)sender withProfile:(Profile*)profile {
        // possible.
        if (BrowserWindowInterface* browser = ActivateBrowser(profile)) {
          chrome::ExecuteCommand(browser, IDC_NEW_TAB);
@@ -51,7 +51,7 @@ diff --git a/chrome/browser/app_controller_mac.mm b/chrome/browser/app_controlle
      case IDC_NEW_WINDOW:
        CreateBrowser(profile->GetOriginalProfile());
        break;
-@@ -2635,6 +2648,10 @@
+@@ -2671,6 +2684,10 @@ void OpenStartupTabsInBrowserWithProfile(const StartupTabs& tabs,
      browser->GetWindow()->Show();
    }
  
@@ -65,7 +65,7 @@ diff --git a/chrome/browser/app_controller_mac.mm b/chrome/browser/app_controlle
 diff --git a/chrome/browser/chrome_browser_field_trials.cc b/chrome/browser/chrome_browser_field_trials.cc
 --- a/chrome/browser/chrome_browser_field_trials.cc
 +++ b/chrome/browser/chrome_browser_field_trials.cc
-@@ -384,6 +384,13 @@ void ChromeBrowserFieldTrials::RegisterFeatureOverrides(
+@@ -385,6 +385,13 @@ void ChromeBrowserFieldTrials::RegisterFeatureOverrides(
    // Desktop-first features which are past incubation should either end up here,
    // or to a finch trial that enables it for all form factors.
  #endif  // BUILDFLAG(IS_ANDROID)
@@ -94,7 +94,7 @@ diff --git a/chrome/browser/chrome_content_browser_client.cc b/chrome/browser/ch
  #include <algorithm>
  #include <iterator>
  #include <map>
-@@ -5783,6 +5788,9 @@ void ChromeContentBrowserClient::RemovePresentationObserver(
+@@ -5795,6 +5800,9 @@ void ChromeContentBrowserClient::RemovePresentationObserver(
  void ChromeContentBrowserClient::CreateThrottlesForNavigation(
      content::NavigationThrottleRegistry& registry) {
    CreateAndAddChromeThrottlesForNavigation(registry);
@@ -104,22 +104,48 @@ diff --git a/chrome/browser/chrome_content_browser_client.cc b/chrome/browser/ch
  }
  
  void ChromeContentBrowserClient::CreateThrottlesForCommitWithoutUrlLoader(
+diff --git a/chrome/browser/search/BUILD.gn b/chrome/browser/search/BUILD.gn
+--- a/chrome/browser/search/BUILD.gn
++++ b/chrome/browser/search/BUILD.gn
+@@ -33,6 +33,9 @@ source_set("search") {
+     "//ui/webui:buildflags",
+     "//url",
+   ]
++  if (is_mac) {
++    deps += [ "//bark:browser_hooks" ]
++  }
+   if (is_android) {
+     sources += [
+       "contextual_search_policy_handler_android.cc",
+diff --git a/chrome/browser/ui/BUILD.gn b/chrome/browser/ui/BUILD.gn
+--- a/chrome/browser/ui/BUILD.gn
++++ b/chrome/browser/ui/BUILD.gn
+@@ -121,6 +121,9 @@ if (!is_android) {
+       "//ui/base",
+       "//url",
+     ]
++    if (is_mac) {
++      deps += [ "//bark:browser_hooks" ]
++    }
+   }
+ 
+   source_set("chrome_web_modal_dialog_manager_delegate") {
 diff --git a/chrome/browser/ui/browser_tabstrip.cc b/chrome/browser/ui/browser_tabstrip.cc
 --- a/chrome/browser/ui/browser_tabstrip.cc
 +++ b/chrome/browser/ui/browser_tabstrip.cc
-@@ -5,6 +5,11 @@
- #include "chrome/browser/ui/browser_tabstrip.h"
+@@ -6,6 +6,11 @@
  
  #include <optional>
-+
+ 
 +#include "build/build_config.h"
 +#if BUILDFLAG(IS_MAC)
 +#include "bark/browser_hooks.h"
 +#endif
- 
++
  #include "base/command_line.h"
  #include "base/feature_list.h"
-@@ -123,6 +128,12 @@
+ #include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+@@ -124,6 +129,12 @@ content::WebContents* AddWebContents(
    params.user_gesture = true;
    params.original_user_gesture = user_gesture;
  
@@ -132,26 +158,15 @@ diff --git a/chrome/browser/ui/browser_tabstrip.cc b/chrome/browser/ui/browser_t
    ConfigureTabGroupForNavigation(&params);
  
    Navigate(&params);
-diff --git a/chrome/browser/ui/BUILD.gn b/chrome/browser/ui/BUILD.gn
---- a/chrome/browser/ui/BUILD.gn
-+++ b/chrome/browser/ui/BUILD.gn
-@@ -121,6 +121,9 @@
-       "//ui/base",
-       "//url",
-     ]
-+    if (is_mac) {
-+      deps += [ "//bark:browser_hooks" ]
-+    }
-   }
- 
-   source_set("chrome_web_modal_dialog_manager_delegate") {
 diff --git a/chrome/browser/ui/views/frame/browser_view.cc b/chrome/browser/ui/views/frame/browser_view.cc
 --- a/chrome/browser/ui/views/frame/browser_view.cc
 +++ b/chrome/browser/ui/views/frame/browser_view.cc
-@@ -3689,4 +3689,9 @@ void BrowserView::OnTabStripModelChanged(
+@@ -3658,6 +3658,11 @@ void BrowserView::OnTabStripModelChanged(
+   }
+ 
    for ([[maybe_unused]] const auto& contents : change.GetInsert()->contents) {
 +#if BUILDFLAG(IS_MAC)
-+    if (browser()->GetType() == BrowserWindowInterface::TYPE_POPUP) {
++    if (browser()->GetType() != BrowserWindowInterface::TYPE_NORMAL) {
 +      bark::SidebarMac::AttachLittleWindow(browser(), contents.contents);
 +    }
 +#endif

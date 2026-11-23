@@ -392,9 +392,10 @@ struct ChromiumAddressBar: View {
     }
 
     var body: some View {
-        // The full surface opens the composer; visible utility buttons intercept
-        // only their own clicks. Fixed insets keep the origin steady on hover.
-        Button { model.composeAddress() } label: {
+        // The full surface edits the current address (or opens the composer on a
+        // blank page); visible utility buttons intercept only their own clicks.
+        // Fixed insets keep the origin steady on hover.
+        Button { model.activateAddress() } label: {
             Text(model.addressSummary.isEmpty ? "Search or enter address" : model.addressSummary)
                 .font(.system(size: 12.5))
                 .foregroundStyle(model.addressSummary.isEmpty ? Color.secondary : Color.primary.opacity(contrast == .increased ? 1 : 0.78))
@@ -405,7 +406,7 @@ struct ChromiumAddressBar: View {
         }.buttonStyle(.plain)
             .focused($focusedControl, equals: .address)
             .accessibilityFocused($accessibleControl, equals: .address)
-            .help("Search or open a new tab (⌘T)").accessibilityLabel("Address")
+            .help(model.addressSummary.isEmpty ? "Search or open a new tab (⌘T)" : "Edit address (⌘L)").accessibilityLabel("Address")
             .accessibilityValue(model.sidebarAddress)
             .overlay(alignment: .trailing) {
                 HStack(spacing: 2) {

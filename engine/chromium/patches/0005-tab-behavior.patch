@@ -1,5 +1,27 @@
+diff --git a/chrome/browser/ui/BUILD.gn b/chrome/browser/ui/BUILD.gn
+--- a/chrome/browser/ui/BUILD.gn
++++ b/chrome/browser/ui/BUILD.gn
+@@ -407,6 +407,7 @@ if (!is_android) {
+     if (is_mac) {
+       deps += [
+         ":browser_commands_mac",
++        "//bark:browser_hooks",
+         "//chrome/browser:global_keyboard_shortcuts_mac",
+       ]
+     }
+@@ -793,7 +794,10 @@ if (!is_android) {
+       ]
+     }
+     if (is_mac) {
+-      deps += [ ":browser_commands_mac" ]
++      deps += [
++        ":browser_commands_mac",
++        "//bark:browser_hooks",
++      ]
+     }
+     if (use_ozone) {
+       deps += [ "//ui/ozone" ]
 diff --git a/chrome/browser/ui/browser_actions.cc b/chrome/browser/ui/browser_actions.cc
-index 66af63a..3c8a282 100644
 --- a/chrome/browser/ui/browser_actions.cc
 +++ b/chrome/browser/ui/browser_actions.cc
 @@ -72,6 +72,7 @@
@@ -25,7 +47,7 @@ index 66af63a..3c8a282 100644
 diff --git a/chrome/browser/ui/browser_command_controller.cc b/chrome/browser/ui/browser_command_controller.cc
 --- a/chrome/browser/ui/browser_command_controller.cc
 +++ b/chrome/browser/ui/browser_command_controller.cc
-@@ -165,6 +165,7 @@
+@@ -167,6 +167,7 @@
  #endif
  
  #if BUILDFLAG(IS_MAC)
@@ -33,7 +55,7 @@ diff --git a/chrome/browser/ui/browser_command_controller.cc b/chrome/browser/ui
  #include "chrome/browser/ui/browser_commands_mac.h"
  #endif
  
-@@ -783,6 +784,11 @@
+@@ -785,6 +786,11 @@ void BrowserCommandController::HandleCommandWithDisposition(
        CloseWindow(browser_);
        break;
      case IDC_NEW_TAB: {
@@ -45,26 +67,3 @@ diff --git a/chrome/browser/ui/browser_command_controller.cc b/chrome/browser/ui
        NewTab(browser_, NewTabTypes::kNewTabCommand);
        break;
      }
-diff --git a/chrome/browser/ui/BUILD.gn b/chrome/browser/ui/BUILD.gn
---- a/chrome/browser/ui/BUILD.gn
-+++ b/chrome/browser/ui/BUILD.gn
-@@ -397,6 +397,7 @@
-     if (is_mac) {
-       deps += [
-         ":browser_commands_mac",
-+        "//bark:browser_hooks",
-         "//chrome/browser:global_keyboard_shortcuts_mac",
-       ]
-     }
-@@ -792,7 +793,10 @@
-       ]
-     }
-     if (is_mac) {
--      deps += [ ":browser_commands_mac" ]
-+      deps += [
-+        ":browser_commands_mac",
-+        "//bark:browser_hooks",
-+      ]
-     }
-     if (use_ozone) {
-       deps += [ "//ui/ozone" ]

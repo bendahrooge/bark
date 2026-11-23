@@ -418,6 +418,12 @@ enum AddressDisposition {
         presentAddress(.currentTab)
     }
 
+    /// A click on the sidebar's address edits the loaded page's URL in place,
+    /// like Cmd+L; with no page loaded it opens the composer, like Cmd+T.
+    func activateAddress() {
+        if currentPageAddress.isEmpty { composeAddress() } else { focusAddress() }
+    }
+
     private func presentAddress(_ disposition: AddressDisposition) {
         addressDisposition = disposition
         editingAddress = true

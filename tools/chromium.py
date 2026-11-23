@@ -241,7 +241,7 @@ def sync(work, lock, github_mirror=False, min_free=150):
     run([depot / 'gclient', 'sync', '--no-history', '--nohooks', '--revision', 'src@' + lock['revision']], cwd=work, env=env)
     ensure_checkout(src, lock)
     verify_dependencies(work)
-    print('Dependencies fetched. On Linux, install the OS dependencies described in engine/chromium/README.md before configure.')
+    print('Dependencies fetched. On Linux, install the OS dependencies (see build/install-build-deps.sh in the Chromium checkout) before configure.')
 
 
 def add_mapped_files(result, manifest):

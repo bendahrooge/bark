@@ -1,4 +1,4 @@
-![Bark — A better place to browse. Three overlapping windows show the Studio, Library, and Garden Spaces.](docs/assets/banner-concepts/spaces.svg)
+![Bark — A better place to browse. Three overlapping windows show the Studio, Library, and Garden Spaces.](docs/assets/banner.svg)
 
 # Bark
 

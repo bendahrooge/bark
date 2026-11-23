@@ -18,7 +18,8 @@ class SidebarMac {
   static bool OpenStandaloneLittleWindow(Profile* profile, const GURL& url);
   static bool IsEnabled(BrowserWindowInterface* browser);
   static bool IsPeek(const BrowserView* view);
-  // Called for each page added to a popup window, including restored ones.
+  // Called for each page added to a non-normal window, including restored ones.
+  // Page popups and extension popups get the Little window header.
   static void AttachLittleWindow(BrowserWindowInterface* browser, content::WebContents* page);
   static views::View* LittleToolbarAnchor(const BrowserView* view, bool extensions);
   explicit SidebarMac(BrowserView* view);

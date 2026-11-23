@@ -196,6 +196,31 @@ try {
   await command('testActivateWindow', {windowId: original.windowId});
   report.checks.push('The Little window puzzle button opens its extensions menu and its action operates on the Little page.');
 
+  const popupFixture = path.join(reports, 'popup-window-fixture');
+  fs.mkdirSync(popupFixture);
+  fs.writeFileSync(path.join(popupFixture, 'manifest.json'), JSON.stringify({
+    manifest_version: 3, name: 'Popup Window Test', version: '1.0', action: {}, background: {service_worker: 'worker.js'},
+  }));
+  fs.writeFileSync(path.join(popupFixture, 'window.html'), '<title>Extension window</title><body>Extension window</body>');
+  fs.writeFileSync(path.join(popupFixture, 'worker.js'),
+    "chrome.action.onClicked.addListener(() => chrome.windows.create({type: 'popup', url: 'window.html', width: 360, height: 480}));");
+  const {id: popupId} = await browser.send('Extensions.loadUnpacked', {path: popupFixture});
+  const popupURL = `chrome-extension://${popupId}/window.html`;
+  await command('testActivateWindow', {windowId: original.windowId});
+  await waitMenu(original.windowId, value => actions(value).some(item => item.action === popupId && item.enabled), 'popup window action appears');
+  await menu(original.windowId, popupId);
+  state = await waitFor(state => visible(state)?.popups.some(p => p.url === popupURL), 'extension popup window');
+  const extensionWindow = visible(state).popups.find(p => p.url === popupURL);
+  assert.equal(extensionWindow.kind, 'little', 'chrome.windows.create popups use the Little window frame');
+  assert.ok(extensionWindow.hasControls, 'Extension popup windows show the Little window header');
+  assert.equal(extensionWindow.chromiumToolbarVisible, false);
+  await command('testPopupControl', {...littleFields, text: 'close'});
+  await waitFor(state => !visible(state)?.popups.length, 'close extension popup window');
+  await browser.send('Extensions.uninstall', {id: popupId});
+  await waitMenu(original.windowId, value => !actions(value).some(item => item.action === popupId), 'popup window fixture removed');
+  await command('testActivateWindow', {windowId: original.windowId});
+  report.checks.push('Extension popup windows from chrome.windows.create get the Little window header.');
+
   await command('createProfile', {windowId: original.windowId, text: 'Other profile'});
   state = await waitFor(state => visible(state)?.spaces.some(space => space.name === 'Other profile'), 'second profile');
   const otherSpace = visible(state).spaces.find(space => space.name === 'Other profile').id;

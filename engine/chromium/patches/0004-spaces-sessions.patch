@@ -1,7 +1,70 @@
+diff --git a/chrome/browser/app_controller_mac.mm b/chrome/browser/app_controller_mac.mm
+--- a/chrome/browser/app_controller_mac.mm
++++ b/chrome/browser/app_controller_mac.mm
+@@ -1907,6 +1907,10 @@ - (BOOL)applicationShouldHandleReopen:(NSApplication*)theApplication
+       apps::AppShimTerminationManager::Get()->ShouldRestoreSession() ||
+       (!doneOnce && base::mac::WasLaunchedAsHiddenLoginItem());
+   doneOnce = YES;
++  // Bark brings back the last window when reopened from the Dock: its
++  // Favorites and pins live only in the profile's session. Without a session
++  // to restore, AttemptSessionRestore falls back to a normal launch.
++  attemptRestore = attemptRestore || bark::IsSwiftUIEnabled();
+ 
+   // If the profile is locked or was off-the-record, open the profile picker.
+   if (lastProfilePath == ProfileManager::GetGuestProfilePath() ||
+diff --git a/chrome/browser/performance_manager/BUILD.gn b/chrome/browser/performance_manager/BUILD.gn
+--- a/chrome/browser/performance_manager/BUILD.gn
++++ b/chrome/browser/performance_manager/BUILD.gn
+@@ -288,6 +288,10 @@ source_set("impl") {
+   if (enable_extensions_core && !is_android) {
+     sources += [ "priority/extension_service_worker_priority_voter.cc" ]
+   }
++
++  if (is_mac) {
++    deps += [ "//bark:browser_hooks" ]
++  }
+ }
+ 
+ source_set("test_support") {
+diff --git a/chrome/browser/performance_manager/policies/background_tab_loading_policy.cc b/chrome/browser/performance_manager/policies/background_tab_loading_policy.cc
+--- a/chrome/browser/performance_manager/policies/background_tab_loading_policy.cc
++++ b/chrome/browser/performance_manager/policies/background_tab_loading_policy.cc
+@@ -20,11 +20,15 @@
+ #include "base/trace_event/named_trigger.h"
+ #include "base/trace_event/typed_macros.h"
+ #include "build/build_config.h"
++#if BUILDFLAG(IS_MAC)
++#include "bark/native_ui_mac.h"
++#endif
+ #include "chrome/browser/performance_manager/mechanisms/page_loader.h"
+ #include "chrome/browser/performance_manager/policies/background_tab_loading_policy_helpers.h"
+ #include "chrome/browser/performance_manager/public/background_tab_loading_policy.h"
+ #include "components/favicon/content/content_favicon_driver.h"
+ #include "components/performance_manager/graph/page_node_impl.h"
++#include "components/performance_manager/public/decorators/page_live_state_decorator.h"
+ #include "components/performance_manager/public/decorators/site_data_recorder.h"
+ #include "components/performance_manager/public/features.h"
+ #include "components/performance_manager/public/graph/graph.h"
+@@ -119,6 +123,15 @@ void ScheduleLoadForRestoredTabs(
+                                    /*is_same_document=*/false);
+     }
+ 
++#if BUILDFLAG(IS_MAC)
++    // Bark keeps background pins (including Favorites) dormant until shown.
++    // Their saved title, URL and favicon remain available in the sidebar.
++    if (bark::IsSwiftUIEnabled() &&
++        PageLiveStateDecorator::IsPinnedTab(content)) {
++      continue;
++    }
++#endif
++
+     content::PermissionController* permission_controller =
+         content->GetBrowserContext()->GetPermissionController();
+ 
 diff --git a/chrome/browser/prefs/browser_prefs.cc b/chrome/browser/prefs/browser_prefs.cc
 --- a/chrome/browser/prefs/browser_prefs.cc
 +++ b/chrome/browser/prefs/browser_prefs.cc
-@@ -1715,6 +1715,10 @@ std::string GetCountry() {
+@@ -1781,6 +1781,10 @@ std::string GetCountry() {
  }
  
  void RegisterLocalState(PrefRegistrySimple* registry) {
@@ -37,7 +100,19 @@ diff --git a/chrome/browser/prefs/session_startup_pref.cc b/chrome/browser/prefs
 diff --git a/chrome/browser/sessions/BUILD.gn b/chrome/browser/sessions/BUILD.gn
 --- a/chrome/browser/sessions/BUILD.gn
 +++ b/chrome/browser/sessions/BUILD.gn
-@@ -193,6 +193,9 @@ source_set("impl") {
+@@ -176,7 +176,10 @@ source_set("impl") {
+     ]
+ 
+     if (is_mac) {
+-      deps += [ "//chrome/browser:app_controller_mac" ]
++      deps += [
++        "//bark:browser_hooks",
++        "//chrome/browser:app_controller_mac",
++      ]
+     }
+ 
+     if (use_ozone) {
+@@ -195,6 +198,9 @@ source_set("impl") {
        sources += [ "profile_diff_after_restart_recorder.cc" ]
      }
    }
@@ -47,13 +122,64 @@ diff --git a/chrome/browser/sessions/BUILD.gn b/chrome/browser/sessions/BUILD.gn
  }
  
  if (!is_android) {
+diff --git a/chrome/browser/sessions/session_restore.cc b/chrome/browser/sessions/session_restore.cc
+--- a/chrome/browser/sessions/session_restore.cc
++++ b/chrome/browser/sessions/session_restore.cc
+@@ -39,6 +39,9 @@
+ #include "base/time/time.h"
+ #include "base/token.h"
+ #include "build/build_config.h"
++#if BUILDFLAG(IS_MAC)
++#include "bark/native_ui_mac.h"
++#endif
+ #include "chrome/browser/after_startup_task_utils.h"
+ #include "chrome/browser/browser_process.h"
+ #include "chrome/browser/buildflags.h"
+@@ -1084,6 +1087,19 @@ class SessionRestoreImpl : public BrowserCollectionObserver {
+     const int selected_tab_index = std::clamp(
+         window.selected_tab_index, 0, static_cast<int>(window.tabs.size() - 1));
+ 
++#if BUILDFLAG(IS_MAC)
++    // An empty tab strip implicitly selects its first insertion. Keep a blank
++    // tab selected until the real selection is restored so the first pin does
++    // not start a navigation merely because it is inserted before that tab.
++    base::WeakPtr<WebContents> bark_restore_placeholder;
++    if (initial_tab_count == 0 && selected_tab_index != 0 &&
++        window.tabs.front()->pinned && bark::IsSwiftUIEnabled()) {
++      chrome::AddTabAt(browser, GURL("about:blank"), -1, true);
++      bark_restore_placeholder =
++          browser->GetTabStripModel()->GetActiveWebContents()->GetWeakPtr();
++    }
++#endif
++
+ #if defined(USE_AURA)
+     // Each restored tab's WebContents window is parented to the browser's
+     // root window as the tab is inserted (BrowserView::OnTabStripModelChanged),
+@@ -1126,6 +1142,17 @@ class SessionRestoreImpl : public BrowserCollectionObserver {
+                  did_show_browser);
+     }
+ 
++#if BUILDFLAG(IS_MAC)
++    if (bark_restore_placeholder) {
++      auto* tab_strip = browser->GetTabStripModel();
++      const int index =
++          tab_strip->GetIndexOfWebContents(bark_restore_placeholder.get());
++      if (index != TabStripModel::kNoTab && tab_strip->count() > 1) {
++        tab_strip->CloseWebContentsAt(index, CLOSE_NONE);
++      }
++    }
++#endif
++
+     for (const auto& pair : tabs_by_split_id) {
+       const split_tabs::SplitTabId split_id = pair.first;
+       const std::vector<tabs::TabInterface*> tab_contents_list = pair.second;
 diff --git a/chrome/browser/sessions/session_service.cc b/chrome/browser/sessions/session_service.cc
 --- a/chrome/browser/sessions/session_service.cc
 +++ b/chrome/browser/sessions/session_service.cc
-@@ -438,6 +438,21 @@
+@@ -438,6 +438,21 @@ void SessionService::WindowOpened(BrowserWindowInterface* browser) {
        BrowserWindow::FromBrowser(browser)->IsVisibleOnAllWorkspaces());
  }
-
+ 
 +void SessionService::TrackWindowAfterTabMove(BrowserWindowInterface* browser) {
 +  if (!is_saving_enabled() ||
 +      ShouldTrackChangesToWindow(browser->GetSessionID()) ||
@@ -75,16 +201,16 @@ diff --git a/chrome/browser/sessions/session_service.cc b/chrome/browser/session
 diff --git a/chrome/browser/sessions/session_service.h b/chrome/browser/sessions/session_service.h
 --- a/chrome/browser/sessions/session_service.h
 +++ b/chrome/browser/sessions/session_service.h
-@@ -143,6 +143,9 @@
+@@ -143,6 +143,9 @@ class SessionService : public SessionServiceBase {
    // Notification a window has opened.
    void WindowOpened(BrowserWindowInterface* browser) override;
-
+ 
 +  // Resume session tracking if a rebuild skipped an empty tab-move destination.
 +  void TrackWindowAfterTabMove(BrowserWindowInterface* browser);
 +
    // Notification the window is about to close.
    void WindowClosing(SessionID window_id) override;
-
+ 
 diff --git a/chrome/browser/sessions/session_service_base.cc b/chrome/browser/sessions/session_service_base.cc
 --- a/chrome/browser/sessions/session_service_base.cc
 +++ b/chrome/browser/sessions/session_service_base.cc
@@ -99,7 +225,7 @@ diff --git a/chrome/browser/sessions/session_service_base.cc b/chrome/browser/se
  #include "chrome/browser/apps/app_service/web_contents_app_id_utils.h"
  #include "chrome/browser/browser_process.h"
  #include "chrome/browser/profiles/profile.h"
-@@ -675,6 +679,23 @@ void SessionServiceBase::BuildCommandsForTab(
+@@ -676,6 +680,23 @@ void SessionServiceBase::BuildCommandsForTab(
          sessions::CreatePinnedStateCommand(session_id, true));
    }
  
@@ -126,7 +252,7 @@ diff --git a/chrome/browser/sessions/session_service_base.cc b/chrome/browser/se
 diff --git a/chrome/browser/ui/BUILD.gn b/chrome/browser/ui/BUILD.gn
 --- a/chrome/browser/ui/BUILD.gn
 +++ b/chrome/browser/ui/BUILD.gn
-@@ -521,7 +521,10 @@ if (!is_android) {
+@@ -513,7 +513,10 @@ if (!is_android) {
        "//ui/gfx/geometry",
        "//ui/gfx/range",
      ]
@@ -137,7 +263,7 @@ diff --git a/chrome/browser/ui/BUILD.gn b/chrome/browser/ui/BUILD.gn
  
    source_set("scoped_tabbed_browser_displayer") {
      public = [ "scoped_tabbed_browser_displayer.h" ]
-@@ -586,7 +589,10 @@ if (!is_android) {
+@@ -579,7 +582,10 @@ if (!is_android) {
        "//ui/base",
        "//ui/base/mojom:ui_base_types",
      ]
@@ -148,6 +274,42 @@ diff --git a/chrome/browser/ui/BUILD.gn b/chrome/browser/ui/BUILD.gn
  
    source_set("browser_tab_restorer") {
      sources = [ "browser_tab_restorer.cc" ]
+@@ -828,6 +834,9 @@ if (!is_android) {
+   source_set("browser_commands_impl") {
+     sources = [ "browser_commands.cc" ]
+     public_deps = [ ":browser_commands" ]
++    if (is_mac) {
++      public_deps += [ "//bark:pinned_tab_close" ]
++    }
+     deps = [
+       ":accelerator_utils_headers",
+       ":browser_command_controller",
+diff --git a/chrome/browser/ui/browser_commands.cc b/chrome/browser/ui/browser_commands.cc
+--- a/chrome/browser/ui/browser_commands.cc
++++ b/chrome/browser/ui/browser_commands.cc
+@@ -30,6 +30,9 @@
+ #include "base/time/time.h"
+ #include "base/trace_event/trace_event.h"
+ #include "build/build_config.h"
++#if BUILDFLAG(IS_MAC)
++#include "bark/pinned_tab_close.h"
++#endif
+ #include "chrome/app/chrome_command_ids.h"
+ #include "chrome/browser/autocomplete/autocomplete_classifier_factory.h"
+ #include "chrome/browser/bookmarks/bookmark_bar_utils.h"
+@@ -1465,6 +1468,12 @@ void CloseTab(BrowserWindowInterface* browser) {
+     return;
+   }
+ 
++#if BUILDFLAG(IS_MAC)
++  if (bark::HandlePinnedTabClose(browser, active_tab->GetContents())) {
++    return;
++  }
++#endif
++
+   // If the selection model consists of only the indices of a single split tab,
+   // decide if just the active tab in the split is closed instead of all tabs in
+   // the split.
 diff --git a/chrome/browser/ui/browser_live_tab_context.cc b/chrome/browser/ui/browser_live_tab_context.cc
 --- a/chrome/browser/ui/browser_live_tab_context.cc
 +++ b/chrome/browser/ui/browser_live_tab_context.cc
@@ -163,7 +325,7 @@ diff --git a/chrome/browser/ui/browser_live_tab_context.cc b/chrome/browser/ui/b
  
  #include <algorithm>
  #include <memory>
-@@ -208,6 +213,14 @@ std::map<std::string, std::string> BrowserLiveTabContext::GetExtraDataForTab(
+@@ -207,6 +212,14 @@ std::map<std::string, std::string> BrowserLiveTabContext::GetExtraDataForTab(
      extra_data.merge(contextual_tasks_controller->GetTabRestoreData(tab));
    }
  
@@ -207,3 +369,201 @@ diff --git a/chrome/browser/ui/browser_tabrestore.cc b/chrome/browser/ui/browser
    glic::RestoreGlicStateFromExtraData(web_contents.get(), extra_data);
    contextual_tasks::ContextualTasksTabRestoreData::RestoreFromExtraData(
        web_contents.get(), extra_data);
+diff --git a/chrome/browser/ui/browser_web_contents_delegate/BUILD.gn b/chrome/browser/ui/browser_web_contents_delegate/BUILD.gn
+--- a/chrome/browser/ui/browser_web_contents_delegate/BUILD.gn
++++ b/chrome/browser/ui/browser_web_contents_delegate/BUILD.gn
+@@ -46,6 +46,9 @@ if (!is_android) {
+       "//content/public/browser",
+       "//ui/base",
+     ]
++    if (is_mac) {
++      deps += [ "//bark:pinned_tab_close" ]
++    }
+     if (use_aura) {
+       deps += [ "//chrome/browser/ui:overscroll_pref_manager" ]
+     }
+diff --git a/chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.cc b/chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.cc
+--- a/chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.cc
++++ b/chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.cc
+@@ -4,6 +4,11 @@
+ 
+ #include "chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.h"
+ 
++#include "build/build_config.h"
++#if BUILDFLAG(IS_MAC)
++#include "bark/pinned_tab_close.h"
++#endif
++
+ #include "base/check_deref.h"
+ #include "base/feature_list.h"
+ #include "base/metrics/histogram_macros.h"
+@@ -941,6 +946,14 @@ void BrowserWebContentsDelegate::BeforeUnloadFired(
+     content::WebContents* web_contents,
+     bool proceed,
+     bool* proceed_to_fire_unload) {
++#if BUILDFLAG(IS_MAC)
++  if (bark::HandlePinnedTabClose(&browser_.get(), web_contents,
++          proceed ? bark::PinnedTabCloseAction::kConfirm
++                  : bark::PinnedTabCloseAction::kCancel)) {
++    *proceed_to_fire_unload = false;
++    return;
++  }
++#endif
+   unload_controller_->BeforeUnloadFired(web_contents, proceed,
+                                         proceed_to_fire_unload);
+ }
+diff --git a/chrome/browser/ui/startup/BUILD.gn b/chrome/browser/ui/startup/BUILD.gn
+--- a/chrome/browser/ui/startup/BUILD.gn
++++ b/chrome/browser/ui/startup/BUILD.gn
+@@ -294,6 +294,9 @@ source_set("impl") {
+ 
+     if (is_mac) {
+       deps += [
++        "//bark:browser_hooks",
++        "//bark:lazy_tab",
++        "//bark:space_tab_data",
+         "//chrome/browser:app_controller_mac",
+         "//chrome/browser/mac",
+       ]
+diff --git a/chrome/browser/ui/startup/startup_browser_creator_impl.cc b/chrome/browser/ui/startup/startup_browser_creator_impl.cc
+--- a/chrome/browser/ui/startup/startup_browser_creator_impl.cc
++++ b/chrome/browser/ui/startup/startup_browser_creator_impl.cc
+@@ -21,6 +21,11 @@
+ #include "base/time/time.h"
+ #include "base/version.h"
+ #include "build/build_config.h"
++#if BUILDFLAG(IS_MAC)
++#include "bark/lazy_tab.h"
++#include "bark/native_ui_mac.h"
++#include "bark/space_tab_data.h"
++#endif
+ #include "chrome/browser/apps/platform_apps/install_chrome_app.h"
+ #include "chrome/browser/browser_process.h"
+ #include "chrome/browser/custom_handlers/protocol_handler_registry_factory.h"
+@@ -457,6 +462,13 @@ BrowserWindowInterface* StartupBrowserCreatorImpl::OpenTabsInBrowser(
+             ? ui::mojom::WindowOpenDisposition::kNewForegroundTab
+             : ui::mojom::WindowOpenDisposition::kNewBackgroundTab;
+     params.tabstrip_add_types = add_types;
++#if BUILDFLAG(IS_MAC)
++    // The new-tab/custom-startup path restores pins without a session restore.
++    if (tab.type == StartupTab::Type::kPinned && bark::IsSwiftUIEnabled()) {
++      params.contents_to_insert = bark::CreateLazyTab(profile_, tab.url);
++      bark::SetTabMeta(params.contents_to_insert.get(), tab.bark_tab_meta);
++    }
++#endif
+ 
+ #if BUILDFLAG(ENABLE_RLZ)
+     if (process_startup == chrome::startup::IsProcessStartup::kYes &&
+diff --git a/chrome/browser/ui/startup/startup_tab.h b/chrome/browser/ui/startup/startup_tab.h
+--- a/chrome/browser/ui/startup/startup_tab.h
++++ b/chrome/browser/ui/startup/startup_tab.h
+@@ -5,8 +5,10 @@
+ #ifndef CHROME_BROWSER_UI_STARTUP_STARTUP_TAB_H_
+ #define CHROME_BROWSER_UI_STARTUP_STARTUP_TAB_H_
+ 
++#include <string>
+ #include <vector>
+ 
++#include "build/build_config.h"
+ #include "url/gurl.h"
+ 
+ // Represents tab data at startup.
+@@ -28,6 +30,11 @@ struct StartupTab {
+ 
+   Type type = Type::kNormal;
+ 
++#if BUILDFLAG(IS_MAC)
++  // Per-pin sidebar metadata saved alongside the URL in the pinned-tabs pref.
++  std::string bark_tab_meta;
++#endif
++
+   // True if this tab was launched from an untrusted external custom protocol
+   // (e.g., google-chrome://) that was stripped on startup.
+   bool is_untrusted_launch = false;
+diff --git a/chrome/browser/ui/tabs/BUILD.gn b/chrome/browser/ui/tabs/BUILD.gn
+--- a/chrome/browser/ui/tabs/BUILD.gn
++++ b/chrome/browser/ui/tabs/BUILD.gn
+@@ -782,6 +782,10 @@ if (!is_android) {
+       ]
+     }
+ 
++    if (is_mac) {
++      deps += [ "//bark:space_tab_data" ]
++    }
++
+     if (is_win) {
+       deps += [
+         "//chrome/browser:font_prewarmer_tab_helper",
+diff --git a/chrome/browser/ui/tabs/pinned_tab_codec.cc b/chrome/browser/ui/tabs/pinned_tab_codec.cc
+--- a/chrome/browser/ui/tabs/pinned_tab_codec.cc
++++ b/chrome/browser/ui/tabs/pinned_tab_codec.cc
+@@ -9,6 +9,10 @@
+ #include <utility>
+ 
+ #include "base/values.h"
++#include "build/build_config.h"
++#if BUILDFLAG(IS_MAC)
++#include "bark/space_tab_data.h"
++#endif
+ #include "chrome/browser/profiles/profile.h"
+ #include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+ #include "chrome/browser/ui/browser_window/public/browser_window_interface_iterator.h"
+@@ -29,9 +33,14 @@ namespace {
+ const char kURL[] = "url";
+ 
+ // Returns a base::DictValue representing the supplied StartupTab.
+-base::DictValue EncodeTab(const GURL& url) {
++base::DictValue EncodeTab(const StartupTab& tab) {
+   base::DictValue dict;
+-  dict.Set(kURL, url.spec());
++  dict.Set(kURL, tab.url.spec());
++#if BUILDFLAG(IS_MAC)
++  if (!tab.bark_tab_meta.empty()) {
++    dict.Set(bark::kTabMetaKey, tab.bark_tab_meta);
++  }
++#endif
+   return dict;
+ }
+ 
+@@ -48,7 +57,11 @@ void EncodePinnedTabs(BrowserWindowInterface* browser,
+     NavigationEntry* entry =
+         web_contents->GetController().GetLastCommittedEntry();
+     if (entry) {
+-      serialized_tabs.Append(EncodeTab(entry->GetURL()));
++      StartupTab pin(entry->GetURL(), StartupTab::Type::kPinned);
++#if BUILDFLAG(IS_MAC)
++      pin.bark_tab_meta = bark::GetTabMeta(web_contents);
++#endif
++      serialized_tabs.Append(EncodeTab(pin));
+     }
+   }
+ }
+@@ -57,9 +70,16 @@ void EncodePinnedTabs(BrowserWindowInterface* browser,
+ // on success.
+ std::optional<StartupTab> DecodeTab(const base::DictValue& value) {
+   const std::string* const url_string = value.FindString(kURL);
+-  return url_string ? std::make_optional(StartupTab(GURL(*url_string),
+-                                                    StartupTab::Type::kPinned))
+-                    : std::nullopt;
++  if (!url_string) {
++    return std::nullopt;
++  }
++  StartupTab pin(GURL(*url_string), StartupTab::Type::kPinned);
++#if BUILDFLAG(IS_MAC)
++  if (const auto* meta = value.FindString(bark::kTabMetaKey)) {
++    pin.bark_tab_meta = *meta;
++  }
++#endif
++  return pin;
+ }
+ 
+ }  // namespace
+@@ -101,7 +121,7 @@ void PinnedTabCodec::WritePinnedTabs(Profile* profile,
+   base::ListValue& values = update.Get();
+   values.clear();
+   for (const auto& tab : tabs) {
+-    values.Append(EncodeTab(tab.url));
++    values.Append(EncodeTab(tab));
+   }
+ }
+ 

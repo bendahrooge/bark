@@ -1,0 +1,477 @@
+diff --git a/chrome/browser/app_controller_mac.h b/chrome/browser/app_controller_mac.h
+--- a/chrome/browser/app_controller_mac.h
++++ b/chrome/browser/app_controller_mac.h
+@@ -47,6 +47,9 @@ class ColorProvider;
+ // to not be nil.
+ @property(readonly, nonatomic, class) AppController* sharedController;
+ 
++// Called after Chromium has launched its initial profiles and windows.
++- (void)didFinishBrowserStartup;
++
+ @property(readonly, nonatomic) BOOL startupComplete;
+ @property(readonly, nonatomic) Profile* lastProfileIfLoaded;
+ 
+diff --git a/chrome/browser/app_controller_mac.mm b/chrome/browser/app_controller_mac.mm
+--- a/chrome/browser/app_controller_mac.mm
++++ b/chrome/browser/app_controller_mac.mm
+@@ -14,6 +14,8 @@
+ #include <memory>
+ #include <vector>
+ 
++#include "bark/mac/sidebar_mac.h"
++#include "bark/native_ui_mac.h"
+ #include "base/apple/bridging.h"
+ #include "base/apple/foundation_util.h"
+ #include "base/apple/scoped_cftyperef.h"
+@@ -70,6 +72,7 @@
+ #include "chrome/browser/profiles/profile_observer.h"
+ #include "chrome/browser/profiles/profiles_state.h"
+ #include "chrome/browser/sessions/session_restore.h"
++#include "chrome/browser/sessions/session_restore_observer.h"
+ #include "chrome/browser/sessions/session_service.h"
+ #include "chrome/browser/sessions/session_service_factory.h"
+ #include "chrome/browser/sessions/tab_restore_service_factory.h"
+@@ -557,6 +560,8 @@ - (void)profileWasRemoved:(const base::FilePath&)profilePath
+ // once after startup has completed. It opens the tabs in |_startupTabs|, and
+ // clears |_startupTabs|.
+ - (void)openStartupUrls;
++- (void)resumeStartupUrlsAfterWindowActivation;
++- (BOOL)deferStartupWindow:(base::OnceClosure)launch;
+ 
+ // Opens a tab for each StartupTab in |tabs|. If there is exactly one tab open
+ // before this method is called, and that tab is the NTP, then this method
+@@ -597,7 +602,8 @@ - (void)onVerticalTabStripModeChanged:
+ 
+ class AppControllerProfileObserver : public ProfileAttributesStorage::Observer,
+                                      public ProfileManagerObserver,
+-                                     public ProfileObserver {
++                                     public ProfileObserver,
++                                     public SessionRestoreObserver {
+  public:
+   AppControllerProfileObserver(
+       ProfileManager* profile_manager, AppController* app_controller)
+@@ -605,6 +611,7 @@ - (void)onVerticalTabStripModeChanged:
+         app_controller_(app_controller) {
+     CHECK(profile_manager_, base::NotFatalUntil::M163);
+     CHECK(app_controller_, base::NotFatalUntil::M163);
++    SessionRestore::AddObserver(this);
+     // Listen to ProfileObserver and ProfileManagerObserver.
+     profile_manager_observer_.Observe(profile_manager_.get());
+     for (Profile* profile : profile_manager_->GetLoadedProfiles()) {
+@@ -622,7 +629,13 @@ - (void)onVerticalTabStripModeChanged:
+   AppControllerProfileObserver& operator=(const AppControllerProfileObserver&) =
+       delete;
+ 
+-  ~AppControllerProfileObserver() override = default;
++  ~AppControllerProfileObserver() override {
++    SessionRestore::RemoveObserver(this);
++  }
++
++  void OnProfileSessionRestored(Profile*, int, int) override {
++    [app_controller_ resumeStartupUrlsAfterWindowActivation];
++  }
+ 
+  private:
+   // ProfileAttributesStorage::Observer implementation:
+@@ -719,6 +732,10 @@ @implementation AppController {
+   // |_startupTabs| so that they can go in the first browser window/tab.
+   StartupTabs _startupTabs;
+   BOOL _startupComplete;
++  BOOL _browserStartupFinished;
++  BOOL _barkWaitingForStartupWindows;
++  base::OnceClosure _deferredStartupWindow;
++  BOOL _waitingForLaunchEvent;
+ 
+   // Outlets for testing close tab/window menu items.
+   NSMenuItem* __strong _cmdWMenuItemForTesting;
+@@ -809,6 +826,8 @@ + (AppController*)sharedController {
+ 
+ - (instancetype)init {
+   if (self = [super init]) {
++    _barkWaitingForStartupWindows = bark::IsSwiftUIEnabled();
++
+     // -[NSMenu cr_menuItemForKeyEquivalentEvent:] lives in /content, but
+     // we need to execute special update code before the search begins.
+     // Setting this block gives us the hook we need.
+@@ -1010,43 +1029,10 @@ - (void)allowApplicationToTerminate {
+ }
+ 
+ - (ConfirmQuitResult)confirmQuitIfNeeded {
+-  // If there are no windows, quit immediately.
+-  if (!GetLastActiveBrowserWindowInterfaceWithAnyProfile() &&
+-      !AppWindowRegistryUtil::IsAppWindowVisibleInAnyProfile(0)) {
+-    return ConfirmQuitResultNotPrompted;
+-  }
+-
+-  // Check if the preference is turned on.
+-  const PrefService* prefs = g_browser_process->local_state();
+-  if (!prefs->GetBoolean(prefs::kConfirmToQuitEnabled)) {
+-    confirm_quit::RecordHistogram(confirm_quit::kNoConfirm);
+-    return ConfirmQuitResultNotPrompted;
+-  }
+-
+-  NSEvent* event = [NSApp currentEvent];
+-  // Run only for keyboard-initiated quits.
+-  if (!event || CommandForKeyEvent(event).chrome_command != IDC_EXIT) {
+-    return ConfirmQuitResultNotPrompted;
+-  }
+-
+-  // In the event of a double-quit attempt (holding command and pressing 'Q'
+-  // twice), we will already have a ConfirmQuitPanelController, so only create a
+-  // new one if needed.
+-  if (!_confirmQuitPanelController) {
+-    _confirmQuitPanelController = [[ConfirmQuitPanelController alloc] init];
+-  }
+-
+-  __weak AppController* weakSelf = self;
+-  BOOL quitConfirmed = [_confirmQuitPanelController
+-      runConfirmQuitLoopWithEvent:event
+-                dismissedCallback:^{
+-                  AppController* strongSelf = weakSelf;
+-                  if (strongSelf && !browser_shutdown::IsTryingToQuit()) {
+-                    strongSelf->_confirmQuitPanelController = nil;
+-                  }
+-                }];
+-
+-  return quitConfirmed ? ConfirmQuitResultConfirmed : ConfirmQuitResultAborted;
++  // Bark restores tabs through the normal shutdown/session path. Quit without
++  // Chrome's hold-to-confirm delay, including when an existing profile has the
++  // legacy confirmation preference enabled.
++  return ConfirmQuitResultNotPrompted;
+ }
+ 
+ // Handles the NSApplicationWillTerminateNotification notification. (Note to
+@@ -1251,10 +1237,55 @@ - (void)setUpdateCheckInterval {
+ #endif
+ }
+ 
++- (BOOL)hasPendingLittleWindowLaunch {
++  return !_startupTabs.empty() && bark::LittleWindowEnabled() &&
++      std::ranges::all_of(_startupTabs, [](const StartupTab& tab) {
++        return !tab.is_untrusted_launch && tab.url.SchemeIsHTTPOrHTTPS();
++      });
++}
++
++- (BOOL)deferStartupWindow:(base::OnceClosure)launch {
++  if (_browserStartupFinished || !_barkWaitingForStartupWindows ||
++      !bark::LittleWindowEnabled()) return NO;
++  // Keep an ordinary launch available while LaunchServices delivers its intent.
++  _deferredStartupWindow = std::move(launch);
++  return YES;
++}
++
++- (void)didFinishBrowserStartup {
++  _browserStartupFinished = YES;
++  [self resumeStartupUrlsAfterWindowActivation];
++}
++
++- (void)resumeStartupUrlsAfterWindowActivation {
++  if (_barkWaitingForStartupWindows && _browserStartupFinished) {
++    // Let already queued startup-window activations run before opening a link.
++    dispatch_async(dispatch_get_main_queue(), ^{
++      [self openStartupUrls];
++    });
++  }
++}
++
+ - (void)openStartupUrls {
+-  CHECK(_startupComplete);
+-  [self openStartupTabsReplacingNTP:std::move(_startupTabs)];
+-  _startupTabs.clear();
++  if (!_startupComplete ||
++      (_barkWaitingForStartupWindows &&
++       (!_browserStartupFinished || SessionRestore::IsAnySessionCurrentlyRestoring()))) {
++    return;
++  }
++  if (_deferredStartupWindow && _waitingForLaunchEvent && _startupTabs.empty()) return;
++  if (_deferredStartupWindow) {
++    VLOG(1) << "Bark resolving startup with " << _startupTabs.size()
++            << " queued URLs, Little window: " << [self hasPendingLittleWindowLaunch];
++    auto launch = std::move(_deferredStartupWindow);
++    if (![self hasPendingLittleWindowLaunch]) {
++      std::move(launch).Run();
++      if (SessionRestore::IsAnySessionCurrentlyRestoring()) return;
++    }
++  }
++  _barkWaitingForStartupWindows = NO;
++  StartupTabs tabs;
++  tabs.swap(_startupTabs);
++  [self openStartupTabsReplacingNTP:std::move(tabs)];
+ }
+ 
+ - (void)openStartupTabsReplacingNTP:(StartupTabs)tabs {
+@@ -1262,10 +1293,11 @@ - (void)openStartupTabsReplacingNTP:(StartupTabs)tabs {
+     return;
+   }
+ 
+-  if (!_startupComplete) {
++  if (!_startupComplete || _barkWaitingForStartupWindows) {
+     for (auto& tab : tabs) {
+       _startupTabs.push_back(std::move(tab));
+     }
++    if (_startupComplete && _browserStartupFinished) [self openStartupUrls];
+     return;
+   }
+ 
+@@ -1340,6 +1372,20 @@ - (void)applicationDidFinishLaunching:(NSNotification*)notify {
+   // Makes "Services" menu items available.
+   [self registerServicesMenuTypesTo:[notify object]];
+ 
++  NSNumber* defaultLaunch = notify.userInfo[NSApplicationLaunchIsDefaultLaunchKey];
++  VLOG(1) << "Bark startup default launch: " << (defaultLaunch ? defaultLaunch.intValue : -1);
++  if (_barkWaitingForStartupWindows && defaultLaunch && !defaultLaunch.boolValue &&
++      _startupTabs.empty()) {
++    // Like AppShimController, allow up to two seconds for LaunchServices to
++    // deliver the event that started a non-default launch. A received URL
++    // proceeds immediately, and a normal Dock launch never waits.
++    _waitingForLaunchEvent = YES;
++    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC),
++                   dispatch_get_main_queue(), ^{
++      self->_waitingForLaunchEvent = NO;
++      [self openStartupUrls];
++    });
++  }
+   _startupComplete = YES;
+ 
+   if (base::CommandLine::ForCurrentProcess()->HasSwitch(switches::kKioskMode))
+@@ -2657,7 +2703,7 @@ void UpdateProfileInUse(Profile* profile) {
+   [AppController.sharedController setLastProfile:profile];
+ }
+ 
+-void OpenStartupTabsInBrowserWithProfile(const StartupTabs& tabs,
++void OpenStartupTabsInBrowserWithProfile(const StartupTabs& requested_tabs,
+                                          Profile* profile) {
+   if (!profile)
+     return;  // No suitable profile to open the URLs, do nothing.
+@@ -2670,6 +2716,14 @@ void OpenStartupTabsInBrowserWithProfile(const StartupTabs& tabs,
+   // window, not in PWA/app windows which cannot accept new tabs.
+   BrowserWindowInterface* browser =
+       ProfileBrowserCollection::GetForProfile(profile)->FindTabbedBrowser();
++  StartupTabs tabs = requested_tabs;
++  if (!browser) {
++    std::erase_if(tabs, [profile](const StartupTab& tab) {
++      return !tab.is_untrusted_launch &&
++             bark::SidebarMac::OpenStandaloneLittleWindow(profile, tab.url);
++    });
++    if (tabs.empty()) return;
++  }
+   int startupIndex = TabStripModel::kNoTab;
+   content::WebContents* startupContent = nullptr;
+   if (browser && browser->GetTabStripModel()->count() == 1) {
+@@ -2747,6 +2801,10 @@ void OnProfileLoaded(base::OnceCallback<void(Profile*)> callback,
+ 
+ }  // namespace
+ 
++bool bark::DeferStartupWindow(base::OnceClosure launch) {
++  return [AppController.sharedController deferStartupWindow:std::move(launch)];
++}
++
+ namespace app_controller_mac {
+ 
+ bool IsOpeningNewWindow() {
+diff --git a/chrome/browser/app_controller_mac_browsertest.mm b/chrome/browser/app_controller_mac_browsertest.mm
+--- a/chrome/browser/app_controller_mac_browsertest.mm
++++ b/chrome/browser/app_controller_mac_browsertest.mm
+@@ -1252,11 +1252,10 @@ void SetUpCommandLine(base::CommandLine* command_line) override {
+   AppControllerMainMenuBrowserTest() = default;
+ };
+ 
+-// Verifies that the Confirm Quit panel is shown when a browser window is
+-// active, the kConfirmToQuitEnabled preference is enabled, and the quit is
+-// keyboard-initiated.
++// Bark quits immediately for keyboard-initiated quits, even if an existing
++// profile still has the legacy confirmation preference enabled.
+ IN_PROC_BROWSER_TEST_F(AppControllerMainMenuBrowserTest,
+-                       ConfirmQuitPanelShownWithBrowserWindowAndKeyQuit) {
++                       ConfirmQuitPanelNotShownWhenLegacyPrefEnabled) {
+   g_browser_process->local_state()->SetBoolean(prefs::kConfirmToQuitEnabled,
+                                                true);
+ 
+@@ -1268,7 +1267,7 @@ void SetUpCommandLine(base::CommandLine* command_line) override {
+   ScopedMockConfirmQuitPanel mock_quit_panel;
+ 
+   EXPECT_EQ([AppController.sharedController confirmQuitIfNeeded],
+-            ConfirmQuitResultConfirmed);
++            ConfirmQuitResultNotPrompted);
+ }
+ 
+ // Verifies that the Confirm Quit panel is not shown when the
+diff --git a/chrome/browser/app_controller_mac_interactive_uitest.mm b/chrome/browser/app_controller_mac_interactive_uitest.mm
+--- a/chrome/browser/app_controller_mac_interactive_uitest.mm
++++ b/chrome/browser/app_controller_mac_interactive_uitest.mm
+@@ -237,16 +237,6 @@ @interface AppController (TryToTerminate)
+ - (void)tryToTerminateApplication;
+ @end
+ 
+-@interface AppController (TryToTerminateTesting)
+-- (ConfirmQuitResult)test_confirmQuitIfNeeded;
+-@end
+-
+-@implementation AppController (TryToTerminateTesting)
+-- (ConfirmQuitResult)test_confirmQuitIfNeeded {
+-  return ConfirmQuitResultAborted;
+-}
+-@end
+-
+ @interface ConfirmQuitPanelController (TryToTerminateTesting)
+ - (BOOL)test_failConfirmQuitLoopWithEvent:(NSEvent*)event
+                         dismissedCallback:(void (^)())dismissedCallback;
+@@ -304,24 +294,24 @@ explicit ScopedMockCurrentEvent(NSEvent* event) {
+   AppControllerTerminateInteractiveUITest() = default;
+ };
+ 
+-// Verifies that when the Confirm Quit panel is shown and cancelled,
+-// tryToTerminateApplication correctly aborts the termination sequence.
++// Bark starts normal shutdown on a single keyboard quit, even if an
++// existing profile has the legacy confirmation preference enabled.
+ IN_PROC_BROWSER_TEST_F(AppControllerTerminateInteractiveUITest,
+-                       ConfirmQuitPanelShownForKeyboardQuit) {
++                       ConfirmQuitPanelNotShownForKeyboardQuit) {
+   AppController* app_controller = AppController.sharedController;
+ 
+-  // Set up conditions that should trigger the Confirm Quit panel.
++  // Simulate an existing profile with the old preference enabled.
+   g_browser_process->local_state()->SetBoolean(prefs::kConfirmToQuitEnabled,
+                                                true);
+   NSEvent* cmd_q_event = cocoa_test_event_utils::KeyEventWithKeyCode(
+       'q', 'q', NSEventTypeKeyDown, NSEventModifierFlagCommand);
+   ScopedMockCurrentEvent mock_event(cmd_q_event);
+ 
+-  // Swizzle runConfirmQuitPanel to return NO, which happens if the user does
+-  // not complete the Confirm Quit action.
++  // Fail if the confirmation loop is entered instead of quitting directly.
+   base::apple::ScopedObjCClassSwizzler run_quit_swizzler(
+-      [AppController class], @selector(confirmQuitIfNeeded),
+-      @selector(test_confirmQuitIfNeeded));
++      [ConfirmQuitPanelController class],
++      @selector(runConfirmQuitLoopWithEvent:dismissedCallback:),
++      @selector(test_failConfirmQuitLoopWithEvent:dismissedCallback:));
+ 
+   // Track closing notifications.
+   std::vector<bool> closing_all_browsers_notifications;
+@@ -334,11 +324,9 @@ explicit ScopedMockCurrentEvent(NSEvent* event) {
+ 
+   [app_controller tryToTerminateApplication];
+ 
+-  // Verify that no closing notifications were ever sent and that the browser
+-  // remains open and visible.
+-  EXPECT_TRUE(closing_all_browsers_notifications.empty());
+-  EXPECT_EQ(1u, GlobalBrowserCollection::GetInstance()->GetSize());
+-  EXPECT_TRUE(browser()->GetWindow()->IsVisible());
++  // Verify that the regular closing sequence was initiated, not cancelled.
++  ASSERT_EQ(1u, closing_all_browsers_notifications.size());
++  EXPECT_TRUE(closing_all_browsers_notifications[0]);
+ }
+ 
+ // Verifies that when the Confirm Quit panel is bypassed (e.g. mouse quit),
+diff --git a/chrome/browser/chrome_browser_main_mac.h b/chrome/browser/chrome_browser_main_mac.h
+--- a/chrome/browser/chrome_browser_main_mac.h
++++ b/chrome/browser/chrome_browser_main_mac.h
+@@ -31,6 +31,7 @@ class ChromeBrowserMainPartsMac : public ChromeBrowserMainPartsPosix {
+   void PostCreateMainMessageLoop() override;
+   int PreCreateThreads() override;
+   void PreProfileInit() override;
++  void PostBrowserStart() override;
+   void PostProfileInit(Profile* profile, bool is_initial_profile) override;
+ 
+   // Perform platform-specific work that needs to be done after the main event
+diff --git a/chrome/browser/chrome_browser_main_mac.mm b/chrome/browser/chrome_browser_main_mac.mm
+--- a/chrome/browser/chrome_browser_main_mac.mm
++++ b/chrome/browser/chrome_browser_main_mac.mm
+@@ -187,6 +187,11 @@
+   ChromeBrowserMainPartsPosix::PostProfileInit(profile, is_initial_profile);
+ }
+ 
++void ChromeBrowserMainPartsMac::PostBrowserStart() {
++  ChromeBrowserMainPartsPosix::PostBrowserStart();
++  [AppController.sharedController didFinishBrowserStartup];
++}
++
+ void ChromeBrowserMainPartsMac::DidEndMainMessageLoop() {
+   [AppController.sharedController didEndMainMessageLoop];
+ }
+diff --git a/chrome/browser/resources/settings/appearance_page/appearance_page.html.ts b/chrome/browser/resources/settings/appearance_page/appearance_page.html.ts
+--- a/chrome/browser/resources/settings/appearance_page/appearance_page.html.ts
++++ b/chrome/browser/resources/settings/appearance_page/appearance_page.html.ts
+@@ -332,9 +332,6 @@ export function getHtml(this: SettingsAppearancePageElement) {
+     <settings-toggle-button class="hr" pref-key="webkit.webprefs.tabs_to_links"
+         label="$i18n{tabsToLinks}">
+     </settings-toggle-button>
+-    <settings-toggle-button class="hr" pref-key="browser.confirm_to_quit"
+-        label="$i18n{warnBeforeQuitting}">
+-    </settings-toggle-button>
+ </if>
+   </div>
+   <settings-toggle-button class="hr" id="splitViewDragAndDrop"
+diff --git a/chrome/browser/ui/cocoa/confirm_quit.cc b/chrome/browser/ui/cocoa/confirm_quit.cc
+--- a/chrome/browser/ui/cocoa/confirm_quit.cc
++++ b/chrome/browser/ui/cocoa/confirm_quit.cc
+@@ -15,7 +15,7 @@ void RecordHistogram(ConfirmQuitMetric sample) {
+ }
+ 
+ void RegisterLocalState(PrefRegistrySimple* registry) {
+-  registry->RegisterBooleanPref(prefs::kConfirmToQuitEnabled, true);
++  registry->RegisterBooleanPref(prefs::kConfirmToQuitEnabled, false);
+ }
+ 
+ }  // namespace confirm_quit
+diff --git a/chrome/browser/ui/cocoa/main_menu_builder.mm b/chrome/browser/ui/cocoa/main_menu_builder.mm
+--- a/chrome/browser/ui/cocoa/main_menu_builder.mm
++++ b/chrome/browser/ui/cocoa/main_menu_builder.mm
+@@ -88,11 +88,6 @@
+               Item(IDS_SHOW_ALL_MAC)
+                   .action(@selector(unhideAllApplications:)),
+               Item().is_separator(),
+-              Item(IDS_CONFIRM_TO_QUIT_OPTION)
+-                  .target(app_delegate)
+-                  .action(@selector(toggleConfirmToQuit:))
+-                  .remove_if(is_pwa),
+-              Item().is_separator(),
+               Item(IDS_EXIT_MAC)
+                   .string_format_1(product_name)
+                   .tag(IDC_EXIT)
+diff --git a/chrome/browser/ui/startup/startup_browser_creator.cc b/chrome/browser/ui/startup/startup_browser_creator.cc
+--- a/chrome/browser/ui/startup/startup_browser_creator.cc
++++ b/chrome/browser/ui/startup/startup_browser_creator.cc
+@@ -126,6 +126,7 @@
+ #endif
+ 
+ #if BUILDFLAG(IS_MAC)
++#include "bark/native_ui_mac.h"
+ #include "chrome/browser/web_applications/os_integration/mac/app_shim_registry.h"
+ #endif
+ 
+@@ -796,6 +797,33 @@ void StartupBrowserCreator::LaunchBrowserForLastProfiles(
+     StartupProfileInfo profile_info,
+     const Profiles& last_opened_profiles,
+     bool restore_tabbed_browser) {
++#if BUILDFLAG(IS_MAC)
++  if (process_startup == chrome::startup::IsProcessStartup::kYes &&
++      command_line.GetArgs().empty() && bark::IsSwiftUIEnabled() &&
++      profile_info.mode == StartupProfileMode::kBrowserWindow &&
++      profile_info.profile && profile_info.profile->IsRegularProfile()) {
++    // StartupBrowserCreator is destroyed before AppKit finishes launching.
++    // Retain the launch options and resolve still-loaded profiles on delivery.
++    std::vector<base::WeakPtr<Profile>> profiles;
++    for (auto* profile : last_opened_profiles) profiles.push_back(profile->GetWeakPtr());
++    auto launch = base::BindOnce(
++        [](base::CommandLine command, base::FilePath dir, chrome::startup::IsFirstRun first_run,
++           bool restore, std::vector<GURL> first_tabs, base::WeakPtr<Profile> initial,
++           std::vector<base::WeakPtr<Profile>> profiles) {
++          if (!initial) return;
++          Profiles loaded;
++          for (const auto& profile : profiles) {
++            if (profile) loaded.push_back(profile.get());
++          }
++          StartupBrowserCreator creator;
++          creator.AddFirstRunTabs(first_tabs);
++          creator.LaunchBrowserForLastProfiles(command, dir, chrome::startup::IsProcessStartup::kYes,
++              first_run, {initial.get(), StartupProfileMode::kBrowserWindow}, loaded, restore);
++        }, command_line, cur_dir, is_first_run, restore_tabbed_browser, first_run_tabs_,
++        profile_info.profile->GetWeakPtr(), std::move(profiles));
++    if (bark::DeferStartupWindow(std::move(launch))) return;
++  }
++#endif
+   TRACE_EVENT0("ui", "StartupBrowserCreator::LaunchBrowserForLastProfiles");
+ #if !BUILDFLAG(IS_CHROMEOS)
+   // Start observing before launching profiles: primary-profile session restore

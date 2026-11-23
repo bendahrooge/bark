@@ -1,0 +1,520 @@
+diff --git a/chrome/app/BUILD.gn b/chrome/app/BUILD.gn
+--- a/chrome/app/BUILD.gn
++++ b/chrome/app/BUILD.gn
+@@ -202,6 +202,10 @@ static_library("test_support") {
+   ]
+   public_deps = [ "//ui/lottie" ]
+ 
++  if (is_mac || is_linux) {
++    deps += [ "//bark:factory_reset" ]
++  }
++
+   if (is_mac || is_win || is_linux || is_chromeos) {
+     deps += [ "//components/webapps/isolated_web_apps:scheme" ]
+   }
+diff --git a/chrome/app/chrome_main_delegate.cc b/chrome/app/chrome_main_delegate.cc
+--- a/chrome/app/chrome_main_delegate.cc
++++ b/chrome/app/chrome_main_delegate.cc
+@@ -4,6 +4,13 @@
+ 
+ #include "chrome/app/chrome_main_delegate.h"
+ 
++#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX)
++#include "bark/factory_reset.h"
++#endif
++#if BUILDFLAG(IS_MAC)
++#include "bark/factory_reset_mac.h"
++#endif
++
+ #include <stddef.h>
+ 
+ #include <string>
+@@ -931,6 +938,17 @@ std::optional<int> ChromeMainDelegate::PostEarlyInitialization(
+ 
+     return process_singleton_result;
+   }
++#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX)
++  // Erase only after acquiring exclusive ownership and before loading prefs.
++  if (!bark::FinishPendingFactoryReset(user_data_dir)) {
++    LOG(ERROR) << "Bark could not finish its factory reset. Check write access to "
++               << user_data_dir << " and reopen Bark to retry.";
++#if BUILDFLAG(IS_MAC)
++    bark::ShowFactoryResetError();
++#endif
++    return CHROME_RESULT_CODE_MISSING_DATA;
++  }
++#endif
+ #endif
+ 
+ #if BUILDFLAG(IS_WIN)
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -1551,6 +1551,10 @@ source_set("core") {
+       "//chrome/browser/ui/webui/omnibox_popup/mojom",
+     ]
+ 
++    if (is_mac || is_linux) {
++      deps += [ "//bark:factory_reset" ]
++    }
++
+     sources += [
+       "chrome_process_singleton.cc",
+       "process_singleton_startup_lock.cc",
+diff --git a/chrome/browser/chrome_browser_main.cc b/chrome/browser/chrome_browser_main.cc
+--- a/chrome/browser/chrome_browser_main.cc
++++ b/chrome/browser/chrome_browser_main.cc
+@@ -30,6 +30,12 @@
+ #include "base/values.h"
+ #include "build/branding_buildflags.h"
+ #include "build/build_config.h"
++#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX)
++#include "bark/factory_reset.h"
++#endif
++#if BUILDFLAG(IS_MAC)
++#include "bark/factory_reset_mac.h"
++#endif
+ #include "chrome/browser/active_use_util.h"
+ #include "chrome/browser/after_startup_task_utils.h"
+ #include "chrome/browser/browser_features.h"
+@@ -2295,7 +2301,11 @@ void ChromeBrowserMainParts::PostMainMessageLoopRun() {
+   TranslateService::Shutdown();
+ 
+ #if BUILDFLAG(ENABLE_PROCESS_SINGLETON)
+-  ChromeProcessSingleton::GetInstance()->Cleanup();
++#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX)
++  // A confirmed reset retains the lock until all profile writers have stopped.
++  if (!bark::ShouldRetainDataLockForReset())
++#endif
++    ChromeProcessSingleton::GetInstance()->Cleanup();
+ #endif
+ 
+   browser_process_->metrics_service()->Stop();
+@@ -2389,6 +2399,17 @@ void ChromeBrowserMainParts::PostDestroyThreads() {
+ #endif
+ 
+   device_event_log::Shutdown();
++#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX)
++  if (bark::ShouldRetainDataLockForReset()) {
++    if (!bark::FinishFactoryResetOnExit(user_data_dir_)) {
++      LOG(ERROR) << "Factory reset will retry on the next launch.";
++#if BUILDFLAG(IS_MAC)
++      bark::ShowFactoryResetError();
++#endif
++    }
++    ChromeProcessSingleton::GetInstance()->Cleanup();
++  }
++#endif
+ #endif  // BUILDFLAG(IS_ANDROID)
+ }
+ 
+diff --git a/chrome/browser/profiles/BUILD.gn b/chrome/browser/profiles/BUILD.gn
+--- a/chrome/browser/profiles/BUILD.gn
++++ b/chrome/browser/profiles/BUILD.gn
+@@ -716,6 +716,10 @@ source_set("profile_util_impl") {
+     "//url",
+   ]
+ 
++  if (is_mac) {
++    deps += [ "//bark:space_catalog" ]
++  }
++
+   if (!is_android) {
+     deps += [
+       "//chrome/browser/ui/browser_window",
+diff --git a/chrome/browser/profiles/nuke_profile_directory_utils.cc b/chrome/browser/profiles/nuke_profile_directory_utils.cc
+--- a/chrome/browser/profiles/nuke_profile_directory_utils.cc
++++ b/chrome/browser/profiles/nuke_profile_directory_utils.cc
+@@ -132,6 +132,10 @@ void NukeProfileFromDisk(const base::FilePath& profile_path,
+                           kNukeProfileMaxRetryCount, std::move(done_callback));
+ }
+ 
++bool IsProfileDirectoryScheduledForDeletion(const base::FilePath& profile_path) {
++  return ProfilesToDelete().contains(profile_path);
++}
++
+ bool IsProfileDirectoryMarkedForDeletion(const base::FilePath& profile_path) {
+   const auto it = ProfilesToDelete().find(profile_path);
+   return it != ProfilesToDelete().end() &&
+diff --git a/chrome/browser/profiles/nuke_profile_directory_utils.h b/chrome/browser/profiles/nuke_profile_directory_utils.h
+--- a/chrome/browser/profiles/nuke_profile_directory_utils.h
++++ b/chrome/browser/profiles/nuke_profile_directory_utils.h
+@@ -19,6 +19,9 @@ void NukeDeletedProfilesFromDisk();
+ void NukeProfileFromDisk(const base::FilePath& profile_path,
+                          base::OnceClosure done_callback);
+ 
++// Includes the period while a profile's windows are being asked to close.
++bool IsProfileDirectoryScheduledForDeletion(const base::FilePath& profile_path);
++
+ // Returns if profile is marked for deletion.
+ bool IsProfileDirectoryMarkedForDeletion(const base::FilePath& profile_path);
+ 
+diff --git a/chrome/browser/profiles/profile_attributes_storage.cc b/chrome/browser/profiles/profile_attributes_storage.cc
+--- a/chrome/browser/profiles/profile_attributes_storage.cc
++++ b/chrome/browser/profiles/profile_attributes_storage.cc
+@@ -28,6 +28,9 @@
+ #include "base/values.h"
+ #include "build/build_config.h"
+ #include "build/chromeos_buildflags.h"
++#if BUILDFLAG(IS_MAC)
++#include "bark/space_catalog.h"
++#endif
+ #include "chrome/browser/enterprise/browser_management/management_service_factory.h"
+ #include "chrome/browser/profiles/profile_attributes_entry.h"
+ #include "chrome/browser/profiles/profile_avatar_downloader.h"
+@@ -473,6 +476,10 @@ void ProfileAttributesStorage::RemoveProfile(
+     observer.OnProfileWasRemoved(profile_path, name);
+   }
+ 
++#if BUILDFLAG(IS_MAC)
++  if (prefs_->FindPreference(bark::kSpacesPref))
++    bark::SpaceCatalog(prefs_).RemoveSpacesForProfile(key);
++#endif
+   NotifyIfProfileNamesHaveChanged();
+ }
+ 
+diff --git a/chrome/browser/resources/settings/about_page/about_page.html.ts b/chrome/browser/resources/settings/about_page/about_page.html.ts
+--- a/chrome/browser/resources/settings/about_page/about_page.html.ts
++++ b/chrome/browser/resources/settings/about_page/about_page.html.ts
+@@ -18,6 +18,23 @@ export function getHtml(this: SettingsAboutPageElement) {
+         alt="$i18n{aboutProductLogoAlt}" role="presentation">
+     <div class="product-title">$i18n{aboutProductTitle}</div>
+   </div>
++<if expr="is_macosx">
++  <div class="cr-row two-line" id="barkUpdates">
++    <div class="flex cr-padded-text">
++      <div id="barkReleaseVersion">$i18n{barkReleaseVersion}</div>
++      <div class="secondary" id="barkEngineVersion">$i18n{barkEngineVersion}</div>
++      <div id="barkUpdateDescription">$i18n{barkUpdateDescription}</div>
++      <a href="https://github.com/bendahrooge/bark/releases" target="_blank"
++          rel="noopener">Bark releases</a>
++    </div>
++    <cr-button id="barkCheckForUpdates"
++        ?disabled="${!this.barkUpdatesAvailable_}"
++        @click="${this.onBarkCheckForUpdatesClick_}">
++      Check for Updates
++    </cr-button>
++  </div>
++</if>
++<if expr="not is_macosx">
+   <div class="cr-row two-line">
+     <!-- Set the icon from the iconset (when it's obsolete/EOL and
+       when update is done) or set the src (when it's updating). -->
+@@ -63,6 +80,7 @@ export function getHtml(this: SettingsAboutPageElement) {
+     </span>
+ </if>
+   </div>
++</if>
+ <if expr="_google_chrome and is_macosx">
+   ${!this.promoteUpdaterStatus_.hidden ? html`
+     <div id="promoteUpdater" class="cr-row ${this.getPromoteUpdaterClass_()}"
+diff --git a/chrome/browser/resources/settings/about_page/about_page.ts b/chrome/browser/resources/settings/about_page/about_page.ts
+--- a/chrome/browser/resources/settings/about_page/about_page.ts
++++ b/chrome/browser/resources/settings/about_page/about_page.ts
+@@ -50,7 +50,7 @@ export const ABOUT_PAGE_PRIVACY_POLICY_URL: string =
+ export interface SettingsAboutPageElement {
+   $: {
+     productLogo: HTMLImageElement,
+-    // <if expr="not is_chromeos">
++    // <if expr="not is_chromeos and not is_macosx">
+     deprecationWarning: HTMLElement,
+     updateStatusMessage: HTMLElement,
+     // </if>
+@@ -92,6 +92,10 @@ export class SettingsAboutPageElement extends SettingsAboutPageElementBase
+       showRelaunch_: {type: Boolean},
+       // </if>
+ 
++      // <if expr="is_macosx">
++      barkUpdatesAvailable_: {type: Boolean},
++      // </if>
++
+       // <if expr="_google_chrome">
+       feedbackAllowedPref_: {type: Object},
+       // </if>
+@@ -132,6 +136,15 @@ export class SettingsAboutPageElement extends SettingsAboutPageElementBase
+       chrome.settingsPrivate.PrefObject<boolean>|undefined;
+   // </if>
+ 
++  // <if expr="is_macosx">
++  protected accessor barkUpdatesAvailable_: boolean =
++      loadTimeData.getBoolean('barkUpdatesAvailable');
++
++  protected onBarkCheckForUpdatesClick_() {
++    chrome.send('barkCheckForUpdates');
++  }
++  // </if>
++
+   private aboutBrowserProxy_: AboutPageBrowserProxy =
+       AboutPageBrowserProxyImpl.getInstance();
+ 
+@@ -192,7 +205,11 @@ export class SettingsAboutPageElement extends SettingsAboutPageElementBase
+         'promotion-state-changed',
+         this.onPromoteUpdaterStatusChanged_.bind(this));
+     // </if>
++    // Bark's explicit button opens Sparkle; loading Settings does not start
++    // Chromium's unrelated updater or open an unsolicited native dialog.
++    // <if expr="not is_macosx">
+     this.aboutBrowserProxy_.refreshUpdateStatus();
++    // </if>
+   }
+ 
+   private onUpdateStatusChanged_(event: UpdateStatusChangedEvent) {
+diff --git a/chrome/browser/resources/settings/reset_page/reset_page.html.ts b/chrome/browser/resources/settings/reset_page/reset_page.html.ts
+--- a/chrome/browser/resources/settings/reset_page/reset_page.html.ts
++++ b/chrome/browser/resources/settings/reset_page/reset_page.html.ts
+@@ -20,6 +20,11 @@ ${this.settingsRefresh2026Enabled_ ? html`
+     </cr-link-row>
+   </settings-section>
+ `}
++<if expr="is_macosx or is_linux">
++<cr-link-row id="barkFactoryReset" label="Reset Bark to factory settings"
++    sub-label="Erase all spaces, profiles, and local browser data"
++    @click="${this.onFactoryResetClick_}"></cr-link-row>
++</if>
+ <cr-lazy-render-lit id="resetProfileDialog"
+     .template="${() => html`
+       <settings-reset-profile-dialog
+diff --git a/chrome/browser/resources/settings/reset_page/reset_page.ts b/chrome/browser/resources/settings/reset_page/reset_page.ts
+--- a/chrome/browser/resources/settings/reset_page/reset_page.ts
++++ b/chrome/browser/resources/settings/reset_page/reset_page.ts
+@@ -80,6 +80,12 @@ export class SettingsResetPageElement extends SettingsResetPageElementBase
+     }
+   }
+ 
++  // <if expr="is_macosx or is_linux">
++  protected onFactoryResetClick_() {
++    window.location.assign('chrome://spaces/#factory-reset');
++  }
++  // </if>
++
+   protected onShowResetProfileDialogClick_() {
+     Router.getInstance().navigateTo(
+         routes.RESET_DIALOG, new URLSearchParams('origin=userclick'));
+diff --git a/chrome/browser/resources/settings/settings_menu/settings_menu.html.ts b/chrome/browser/resources/settings/settings_menu/settings_menu.html.ts
+--- a/chrome/browser/resources/settings/settings_menu/settings_menu.html.ts
++++ b/chrome/browser/resources/settings/settings_menu/settings_menu.html.ts
+@@ -9,7 +9,8 @@ import type {SettingsMenuElement} from './settings_menu.js';
+ export function getHtml(this: SettingsMenuElement) {
+   return html`<!--_html_template_start_-->
+ <div role="navigation">
+-  <cr-menu-selector id="menu" selectable="a:not(#extensionsLink)"
++  <cr-menu-selector id="menu"
++      selectable="a:not(#extensionsLink):not(#barkSpacesLink)"
+       attr-for-selected="href" @iron-activate="${this.onIronActivate_}"
+       @click="${this.onLinkClick_}" selected-attribute="selected">
+     ${this.settingsRefresh2026Enabled_ ? html`
+@@ -35,6 +36,19 @@ export function getHtml(this: SettingsMenuElement) {
+         <cr-ripple></cr-ripple>
+       </a>
+     `}
++    <a role="menuitem" id="barkSpacesLink" class="cr-nav-menu-item"
++        href="chrome://spaces">
++      <cr-icon icon="settings:dashboard"></cr-icon>
++      <span class="menu-label">Spaces &amp; profiles</span>
++      <cr-ripple></cr-ripple>
++    </a>
++    <a role="menuitem" id="barkImportLink" href="/importData"
++        ?hidden="${this.shouldHideMenuItem_(this.pageVisibility_?.people)}"
++        class="cr-nav-menu-item">
++      <cr-icon icon="settings:file-save"></cr-icon>
++      <span class="menu-label">$i18n{importTitle}</span>
++      <cr-ripple></cr-ripple>
++    </a>
+     <a role="menuitem" id="autofill" href="/autofill"
+         @click="${this.onAutofillClick_}" class="cr-nav-menu-item" ?hidden="${
+             this.shouldHideMenuItem_(this.pageVisibility_?.yourSavedInfo)}">
+diff --git a/chrome/browser/resources/settings/settings_menu/settings_menu.ts b/chrome/browser/resources/settings/settings_menu/settings_menu.ts
+--- a/chrome/browser/resources/settings/settings_menu/settings_menu.ts
++++ b/chrome/browser/resources/settings/settings_menu/settings_menu.ts
+@@ -145,7 +145,8 @@ export class SettingsMenuElement extends SettingsMenuElementBase {
+    * accessibility purposes, taps are handled separately.
+    */
+   protected onLinkClick_(event: Event) {
+-    if ((event.target as HTMLElement).matches('a:not(#extensionsLink)')) {
++    if ((event.target as HTMLElement)
++            .matches('a:not(#extensionsLink):not(#barkSpacesLink)')) {
+       event.preventDefault();
+     }
+   }
+diff --git a/chrome/browser/ui/BUILD.gn b/chrome/browser/ui/BUILD.gn
+--- a/chrome/browser/ui/BUILD.gn
++++ b/chrome/browser/ui/BUILD.gn
+@@ -1767,6 +1767,9 @@ if (!is_android) {
+     } else {
+       deps += [ "//chrome/browser/download/bubble" ]
+     }
++    if (is_mac) {
++      deps += [ "//bark:browser_hooks" ]
++    }
+   }
+ 
+   source_set("browser_tests") {
+diff --git a/chrome/browser/ui/chrome_pages.cc b/chrome/browser/ui/chrome_pages.cc
+--- a/chrome/browser/ui/chrome_pages.cc
++++ b/chrome/browser/ui/chrome_pages.cc
+@@ -20,6 +20,9 @@
+ #include "base/strings/string_util.h"
+ #include "base/strings/stringprintf.h"
+ #include "build/build_config.h"
++#if BUILDFLAG(IS_MAC)
++#include "bark/browser_hooks.h"
++#endif
+ #include "chrome/browser/apps/app_service/app_service_proxy.h"
+ #include "chrome/browser/apps/app_service/app_service_proxy_factory.h"
+ #include "chrome/browser/bookmarks/bookmark_model_factory.h"
+@@ -462,6 +465,9 @@ bool IsTrustedPopupWindowWithScheme(const BrowserWindowInterface* browser,
+ }
+ 
+ void ShowSettings(BrowserWindowInterface* browser) {
++#if BUILDFLAG(IS_MAC)
++  if (bark::ShowPreferences(browser)) return;
++#endif
+   ShowSettingsSubPage(browser, std::string());
+ }
+ 
+diff --git a/chrome/browser/ui/webui/BUILD.gn b/chrome/browser/ui/webui/BUILD.gn
+--- a/chrome/browser/ui/webui/BUILD.gn
++++ b/chrome/browser/ui/webui/BUILD.gn
+@@ -100,6 +100,9 @@ source_set("configs") {
+     "//ui/webui:buildflags",
+   ]
+ 
++  # Bark: chrome://spaces.
++  deps += [ "//bark:spaces_ui" ]
++
+   if (is_win || is_chromeos) {
+     deps += [ "//chrome/browser/ui/webui/signin:inline_login" ]
+   }
+diff --git a/chrome/browser/ui/webui/chrome_web_ui_configs.cc b/chrome/browser/ui/webui/chrome_web_ui_configs.cc
+--- a/chrome/browser/ui/webui/chrome_web_ui_configs.cc
++++ b/chrome/browser/ui/webui/chrome_web_ui_configs.cc
+@@ -4,6 +4,7 @@
+ 
+ #include "chrome/browser/ui/webui/chrome_web_ui_configs.h"
+ 
++#include "bark/spaces_ui/spaces_ui.h"
+ #include "build/android_buildflags.h"
+ #include "build/branding_buildflags.h"
+ #include "build/build_config.h"
+@@ -270,6 +271,7 @@ void RegisterChromeWebUIConfigs() {
+ #endif  // BUILDFLAG(IS_CHROMEOS)
+ 
+   auto& map = content::WebUIConfigMap::GetInstance();
++  map.AddWebUIConfig(std::make_unique<bark::SpacesUIConfig>());
+   map.AddWebUIConfig(std::make_unique<AccessibilityUIConfig>());
+   map.AddWebUIConfig(std::make_unique<AutofillInternalsUIConfig>());
+   map.AddWebUIConfig(std::make_unique<BluetoothInternalsUIConfig>());
+diff --git a/chrome/browser/ui/webui/settings/BUILD.gn b/chrome/browser/ui/webui/settings/BUILD.gn
+--- a/chrome/browser/ui/webui/settings/BUILD.gn
++++ b/chrome/browser/ui/webui/settings/BUILD.gn
+@@ -390,6 +390,7 @@ source_set("impl") {
+   }
+ 
+   if (is_mac) {
++    deps += [ "//bark:updater", "//base/version_info" ]
+     sources += [
+       "mac_system_settings_handler.cc",
+       "settings_utils_mac.mm",
+diff --git a/chrome/browser/ui/webui/settings/about_handler.cc b/chrome/browser/ui/webui/settings/about_handler.cc
+--- a/chrome/browser/ui/webui/settings/about_handler.cc
++++ b/chrome/browser/ui/webui/settings/about_handler.cc
+@@ -50,6 +50,10 @@
+ #include "ui/base/l10n/l10n_util.h"
+ #include "v8/include/v8-version-string.h"
+ 
++#if BUILDFLAG(IS_MAC)
++#include "bark/mac/updater_mac.h"
++#endif
++
+ #if BUILDFLAG(IS_CHROMEOS)
+ #include <optional>
+ 
+@@ -414,6 +418,10 @@ void AboutHandler::RegisterMessages() {
+   web_ui()->RegisterMessageCallback(
+       "promoteUpdater", base::BindRepeating(&AboutHandler::PromoteUpdater,
+                                             base::Unretained(this)));
++  web_ui()->RegisterMessageCallback(
++      "barkCheckForUpdates",
++      base::BindRepeating(&AboutHandler::HandleBarkCheckForUpdates,
++                         base::Unretained(this)));
+ #endif
+ 
+ #if BUILDFLAG(IS_CHROMEOS)
+@@ -506,7 +514,12 @@ void AboutHandler::RefreshUpdateStatus() {
+ 
+ #if BUILDFLAG(IS_MAC)
+ void AboutHandler::PromoteUpdater(const base::ListValue& args) {
+-  version_updater_->PromoteUpdater();
++  // Bark does not install or promote Chromium's updater.
++}
++
++void AboutHandler::HandleBarkCheckForUpdates(const base::ListValue& args) {
++  CHECK(args.empty());
++  bark::CheckForUpdates();
+ }
+ #endif
+ 
+@@ -872,15 +885,12 @@ void AboutHandler::OnExtendedUpdatesSettingChanged() {
+ #endif  // BUILDFLAG(IS_CHROMEOS)
+ 
+ void AboutHandler::RequestUpdate() {
++#if !BUILDFLAG(IS_MAC)
+   version_updater_->CheckForUpdate(
+       base::BindRepeating(&AboutHandler::SetUpdateStatus,
+-                          weak_factory_.GetWeakPtr()),
+-#if BUILDFLAG(IS_MAC)
+-      base::BindRepeating(&AboutHandler::SetPromotionState,
+-                          weak_factory_.GetWeakPtr()));
+-#else
++                         weak_factory_.GetWeakPtr()),
+       VersionUpdater::PromoteCallback());
+-#endif  // BUILDFLAG(IS_MAC)
++#endif  // !BUILDFLAG(IS_MAC)
+ }
+ 
+ void AboutHandler::SetUpdateStatus(VersionUpdater::Status status,
+diff --git a/chrome/browser/ui/webui/settings/about_handler.h b/chrome/browser/ui/webui/settings/about_handler.h
+--- a/chrome/browser/ui/webui/settings/about_handler.h
++++ b/chrome/browser/ui/webui/settings/about_handler.h
+@@ -71,6 +71,7 @@ class AboutHandler : public settings::SettingsPageUIHandler,
+ #if BUILDFLAG(IS_MAC)
+   // Promotes the updater for all users.
+   void PromoteUpdater(const base::ListValue& args);
++  void HandleBarkCheckForUpdates(const base::ListValue& args);
+ #endif
+ 
+   // Opens the feedback dialog.
+diff --git a/chrome/browser/ui/webui/settings/settings_localized_strings_provider.cc b/chrome/browser/ui/webui/settings/settings_localized_strings_provider.cc
+--- a/chrome/browser/ui/webui/settings/settings_localized_strings_provider.cc
++++ b/chrome/browser/ui/webui/settings/settings_localized_strings_provider.cc
+@@ -18,6 +18,11 @@
+ #include "base/strings/utf_string_conversions.h"
+ #include "build/branding_buildflags.h"
+ #include "build/build_config.h"
++
++#if BUILDFLAG(IS_MAC)
++#include "bark/mac/updater_mac.h"
++#include "base/version_info/version_info.h"
++#endif
+ #include "build/buildflag.h"
+ #include "chrome/browser/autofill/personal_data_manager_factory.h"
+ #include "chrome/browser/browser_process.h"
+@@ -366,6 +371,18 @@ void AddAboutStrings(content::WebUIDataSource* html_source, Profile* profile) {
+   std::u16string browser_version = VersionUI::GetAnnotatedVersionStringForUi();
+ 
+   html_source->AddString("aboutBrowserVersion", browser_version);
++#if BUILDFLAG(IS_MAC)
++  const bool bark_updates = bark::IsUpdaterConfigured();
++  html_source->AddBoolean("barkUpdatesAvailable", bark_updates);
++  html_source->AddString("barkReleaseVersion",
++                        bark_updates ? "Version " + bark::ReleaseVersion()
++                                     : "Development build");
++  html_source->AddString("barkEngineVersion",
++                        "Chromium " + std::string(version_info::GetVersionNumber()));
++  html_source->AddString("barkUpdateDescription",
++      bark_updates ? "Check for updates to Bark."
++                   : "This development build does not receive updates. Install the latest Bark release to enable them.");
++#endif
+   html_source->AddString(
+       "aboutProductCopyright",
+       base::i18n::MessageFormatter::FormatWithNumberedArgs(

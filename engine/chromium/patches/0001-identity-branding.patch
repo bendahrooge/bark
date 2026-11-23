@@ -1,0 +1,493 @@
+diff --git a/build/config/mac/rules.gni b/build/config/mac/rules.gni
+--- a/build/config/mac/rules.gni
++++ b/build/config/mac/rules.gni
+@@ -427,6 +427,10 @@ set_defaults("mac_framework_bundle") {
+ #         (optional) string, name of the generated app without the
+ #         .app suffix. If omitted, defaults to target_name.
+ #
++#     bundle_name:
++#         (optional) visible app bundle name, defaults to output_name.
++#         Does not change the executable or its linked framework names.
++#
+ #     extra_substitutions:
+ #         (optional) string array, 'key=value' pairs for extra fields which are
+ #         specified in a source Info.plist template.
+@@ -437,6 +441,12 @@ template("mac_app_bundle") {
+     _output_name = invoker.output_name
+   }
+ 
++  # The visible bundle name may differ from the stable executable name.
++  _bundle_name = _output_name
++  if (defined(invoker.bundle_name)) {
++    _bundle_name = invoker.bundle_name
++  }
++
+   _package_type = "app"
+   if (defined(invoker.package_type)) {
+     _package_type = invoker.package_type
+@@ -496,6 +506,7 @@ template("mac_app_bundle") {
+                            [
+                              "assert_no_deps",
+                              "bundle_deps",
++                             "bundle_name",
+                              "data_deps",
+                              "info_plist",
+                              "output_name",
+@@ -571,7 +582,7 @@ template("mac_app_bundle") {
+     }
+ 
+     product_type = _product_type
+-    bundle_root_dir = "$root_out_dir/${_output_name}.${_output_extension}"
++    bundle_root_dir = "$root_out_dir/${_bundle_name}.${_output_extension}"
+     bundle_contents_dir = "$bundle_root_dir/Contents"
+     bundle_resources_dir = "$bundle_contents_dir/Resources"
+     bundle_executable_dir = "$bundle_contents_dir/MacOS"
+diff --git a/chrome/BUILD.gn b/chrome/BUILD.gn
+--- a/chrome/BUILD.gn
++++ b/chrome/BUILD.gn
+@@ -490,6 +490,9 @@ if (is_win) {
+     outputs = [ "$root_out_dir/MINIBRANCH" ]
+   }
+ } else if (is_mac) {
++  # Local builds have a distinct identity; release staging restores Bark.
++  chrome_app_bundle_name = chrome_product_full_name + "-dev"
++  chrome_app_bundle_id = chrome_mac_bundle_id + ".chromium-development"
+   chrome_helper_name = chrome_product_full_name + " Helper"
+   chrome_framework_name = chrome_product_full_name + " Framework"
+   chrome_framework_version = chrome_version_full
+@@ -523,7 +526,7 @@ if (is_win) {
+     args = [
+       "--breakpad=0",
+       "--scm=1",
+-      "--bundle_id=$chrome_mac_bundle_id",
++      "--bundle_id=$chrome_app_bundle_id",
+     ]
+     if (enable_updater) {
+       args += [ "--privileged_helper_id=$privileged_helper_name" ]
+@@ -542,11 +545,12 @@ if (is_win) {
+ 
+   mac_app_bundle("chrome_app") {
+     output_name = chrome_product_full_name
++    bundle_name = chrome_app_bundle_name
+ 
+     info_plist_target = ":chrome_app_plist"
+     extra_substitutions = [
+-      "CHROMIUM_BUNDLE_ID=$chrome_mac_bundle_id",
+-      "CHROMIUM_SHORT_NAME=$chrome_product_short_name",
++      "CHROMIUM_BUNDLE_ID=$chrome_app_bundle_id",
++      "CHROMIUM_SHORT_NAME=$chrome_app_bundle_name",
+       "CHROMIUM_CREATOR=$chrome_mac_creator_code",
+     ]
+ 
+@@ -612,7 +616,7 @@ if (is_win) {
+   if (verify_dynamic_libraries) {
+     action("verify_libraries_chrome_app") {
+       script = "//chrome/tools/build/mac/verify_dynamic_libraries.py"
+-      inputs = [ "${root_out_dir}/${chrome_product_full_name}.app/Contents/MacOS/${chrome_product_full_name}" ]
++      inputs = [ "${root_out_dir}/${chrome_app_bundle_name}.app/Contents/MacOS/${chrome_product_full_name}" ]
+       outputs = [ "$target_out_dir/run_$target_name.stamp" ]
+       args = [
+         "--stamp",
+@@ -753,7 +757,7 @@ if (is_win) {
+ 
+     outputs = [ _stamp_file ]
+ 
+-    _versions_dir = "$root_out_dir/$chrome_product_full_name.app/Contents/Frameworks/$chrome_framework_name.framework/Versions"
++    _versions_dir = "$root_out_dir/$chrome_app_bundle_name.app/Contents/Frameworks/$chrome_framework_name.framework/Versions"
+ 
+     args = [
+       "--versions-dir",
+@@ -1506,7 +1510,7 @@ if (is_win) {
+     # This list must be updated with the two targets' deps list below, and
+     # the list of _dsyms in :chrome_dsym_archive.
+     _chrome_symbols_sources = [
+-      "$root_out_dir/$chrome_product_full_name.app/Contents/MacOS/$chrome_product_full_name",
++      "$root_out_dir/$chrome_app_bundle_name.app/Contents/MacOS/$chrome_product_full_name",
+       "$root_out_dir/chrome_crashpad_handler",
+       "$root_out_dir/libvk_swiftshader.dylib",
+       _framework_binary_path,
+diff --git a/chrome/app/app-Info.plist b/chrome/app/app-Info.plist
+--- a/chrome/app/app-Info.plist
++++ b/chrome/app/app-Info.plist
+@@ -5,7 +5,7 @@
+ 	<key>CFBundleDevelopmentRegion</key>
+ 	<string>en</string>
+ 	<key>CFBundleDisplayName</key>
+-	<string>${EXECUTABLE_NAME}</string>
++	<string>${CHROMIUM_SHORT_NAME}</string>
+ 	<key>CFBundleDocumentTypes</key>
+ 	<array>
+ 		<dict>
+diff --git a/chrome/browser/chrome_browser_main_mac.mm b/chrome/browser/chrome_browser_main_mac.mm
+--- a/chrome/browser/chrome_browser_main_mac.mm
++++ b/chrome/browser/chrome_browser_main_mac.mm
+@@ -159,8 +159,14 @@
+   AppController* app_controller = AppController.sharedController;
+   CHECK_NE(nil, NSApp.delegate);
+ 
++  // Use the outer app identity for About/Hide/Quit as well as the Dock name.
++  NSString* bundle_name = base::apple::ObjCCast<NSString>(
++      [base::apple::OuterBundle() objectForInfoDictionaryKey:@"CFBundleName"]);
++  const std::u16string product_name = bundle_name.length
++      ? base::SysNSStringToUTF16(bundle_name)
++      : l10n_util::GetStringUTF16(IDS_PRODUCT_NAME);
+   chrome::BuildMainMenu(NSApp, app_controller,
+-                        l10n_util::GetStringUTF16(IDS_PRODUCT_NAME),
++                        product_name,
+                         /*is_pwa=*/false,
+                         /*is_rtl=*/base::i18n::IsRTL());
+   [app_controller mainMenuCreated];
+diff --git a/chrome/browser/resources/settings/icons.html.ts b/chrome/browser/resources/settings/icons.html.ts
+--- a/chrome/browser/resources/settings/icons.html.ts
++++ b/chrome/browser/resources/settings/icons.html.ts
+@@ -32,7 +32,7 @@ NOTE: Chrome OS icons go in ./chromeos/os_icons.html.
+       <g id="broken-image"><path d="M4.5 17c-.402 0-.754-.148-1.05-.45-.302-.296-.45-.648-.45-1.05v-11c0-.414.148-.766.45-1.059A1.45 1.45 0 0 1 4.5 3h11c.414 0 .766.148 1.059.441.293.293.441.645.441 1.059v11c0 .402-.148.754-.441 1.05-.293.302-.645.45-1.059.45Zm1-6.313 2.484-2.484a.716.716 0 0 1 .52-.223c.195 0 .371.075.516.227l2.48 2.48 2.484-2.484a.716.716 0 0 1 .52-.223c.195 0 .371.075.516.227l.48.48V4.5h-11v5.188Zm-1 4.813h11v-4.688l-1-1-2.484 2.485a.716.716 0 0 1-.52.223.691.691 0 0 1-.516-.227L8.5 9.813l-2.484 2.484a.716.716 0 0 1-.52.223.691.691 0 0 1-.516-.227l-.48-.48Zm0 0v-5 1.313V4.5Zm0 0"></path></g>
+       <g id="button-auto"><path d="M10 10Zm-6.5 4c-.414 0-.766-.148-1.059-.441A1.443 1.443 0 0 1 2 12.5v-5c0-.414.148-.766.441-1.059A1.443 1.443 0 0 1 3.5 6h6.25c.21 0 .39.07.535.215.145.14.215.32.215.531 0 .211-.07.39-.215.535a.73.73 0 0 1-.535.219H3.5v5h13v-2.25c0-.21.07-.39.215-.535a.713.713 0 0 1 .531-.215c.211 0 .39.07.535.215a.73.73 0 0 1 .219.535v2.25c0 .414-.148.766-.441 1.059A1.443 1.443 0 0 1 16.5 14Zm12-6c-.082 0-.14-.043-.168-.125a4.242 4.242 0 0 0-1.156-2.05 4.325 4.325 0 0 0-2.059-1.165C12.04 4.637 12 4.582 12 4.5c0-.098.043-.152.125-.168a4.242 4.242 0 0 0 2.05-1.156 4.325 4.325 0 0 0 1.165-2.059c.023-.078.078-.117.16-.117.098 0 .152.043.168.125a4.414 4.414 0 0 0 1.168 2.043c.574.574 1.254.96 2.047 1.168.078.012.117.066.117.164 0 .082-.043.14-.125.168a4.242 4.242 0 0 0-2.05 1.156 4.286 4.286 0 0 0-1.16 2.059c-.013.078-.067.117-.165.117Zm0 0"></path></g>
+       <g id="checklist"><path d="m4.813 13.375 3.019-3.02a.729.729 0 0 1 1.063 0 .752.752 0 0 1 0 1.082l-3.54 3.543a.7.7 0 0 1-.52.227.72.72 0 0 1-.522-.227L2.52 13.187a.718.718 0 0 1-.227-.519.72.72 0 0 1 .227-.523.73.73 0 0 1 .53-.227c.204 0 .384.078.54.234Zm.019-6.5 3-3a.76.76 0 0 1 .531-.238.688.688 0 0 1 .532.218.752.752 0 0 1 0 1.082L5.355 8.48a.7.7 0 0 1-.52.227.72.72 0 0 1-.522-.227L2.52 6.687a.702.702 0 0 1-.22-.53.773.773 0 0 1 .243-.532.729.729 0 0 1 1.062 0ZM11.75 14c-.21 0-.39-.07-.535-.215a.713.713 0 0 1-.215-.531c0-.211.07-.39.215-.535a.73.73 0 0 1 .535-.219h5.5c.21 0 .39.07.535.215.145.14.215.32.215.531 0 .211-.07.39-.215.535a.73.73 0 0 1-.535.219Zm0-6.5c-.21 0-.39-.07-.535-.215A.713.713 0 0 1 11 6.754c0-.211.07-.39.215-.535A.73.73 0 0 1 11.75 6h5.5c.21 0 .39.07.535.215.145.14.215.32.215.531 0 .211-.07.39-.215.535a.73.73 0 0 1-.535.219Zm0 0"></path></g>
+-      <g id="chrome-product"><path d="M7.875 12.145c.582.585 1.293.875 2.125.875.832 0 1.543-.29 2.125-.875.582-.582.875-1.29.875-2.125 0-.832-.293-1.54-.875-2.125A2.898 2.898 0 0 0 10 7.02c-.832 0-1.543.293-2.125.875A2.904 2.904 0 0 0 7 10.02c0 .835.293 1.543.875 2.125ZM10 14.52c.152 0 .309-.004.469-.008.16-.008.316-.032.469-.075l-2.043 3.5c-2-.222-3.649-1.09-4.946-2.605C2.65 13.82 2 12.047 2 10.02c0-.598.066-1.184.2-1.758a7.92 7.92 0 0 1 .593-1.7l3.332 5.708c.39.71.93 1.261 1.625 1.656a4.446 4.446 0 0 0 2.25.594Zm0-9c-.984 0-1.863.293-2.637.875a4.597 4.597 0 0 0-1.613 2.25l-2.043-3.54a7.443 7.443 0 0 1 2.762-2.28A7.998 7.998 0 0 1 10 2.02c1.32 0 2.563.312 3.73.937a8.133 8.133 0 0 1 2.875 2.563Zm7.418 1.5c.207.488.355.98.445 1.48.09.5.137 1.008.137 1.52 0 2.152-.695 3.964-2.082 5.43-1.39 1.464-3.16 2.316-5.313 2.55l3.27-5.73c.195-.348.348-.707.457-1.082a4.238 4.238 0 0 0-.145-2.77 4.897 4.897 0 0 0-.855-1.398Zm0 0"></path></g>
++      <g id="chrome-product" viewBox="0 0 24 24"><path fill-rule="evenodd" d="M2.6,21.5 5.8,12.7 4.6,9.9 12.1,1.9 12.7,7 15.6,7 16.3,10 22.1,10.5 21.9,16.5 16.4,17.1 14.2,19.7 15.6,21.5ZM5.1,10.1 11.9,7.7 7,14.2Z"></path></g>
+       <g id="credit-card"><path d="M18 5.5v9c0 .402-.148.754-.441 1.05-.293.302-.645.45-1.059.45h-13c-.402 0-.754-.148-1.05-.45-.302-.296-.45-.648-.45-1.05v-9c0-.402.148-.754.45-1.05.296-.302.648-.45 1.05-.45h13c.414 0 .766.148 1.059.45.293.296.441.648.441 1.05ZM3.5 7h13V5.5h-13Zm0 3v4.5h13V10Zm0 4.5v-9Zm0 0"></path></g>
+       <g id="dashboard"><path d="M11 6.25V3.73c0-.207.07-.382.21-.52a.698.698 0 0 1 .52-.21h4.532a.718.718 0 0 1 .738.73v2.52c0 .21-.07.39-.21.535a.687.687 0 0 1-.52.215h-4.532a.707.707 0 0 1-.531-.215A.753.753 0 0 1 11 6.25Zm-8 4.02V3.73c0-.207.07-.382.215-.52A.742.742 0 0 1 3.754 3H8.27c.195 0 .367.07.511.21A.69.69 0 0 1 9 3.73v6.54a.704.704 0 0 1-.219.511.704.704 0 0 1-.511.219H3.754a.733.733 0 0 1-.54-.219A.7.7 0 0 1 3 10.27Zm8 5.98v-6.5c0-.21.07-.39.21-.535A.687.687 0 0 1 11.73 9h4.532c.215 0 .39.07.531.215A.753.753 0 0 1 17 9.75v6.5c0 .21-.07.39-.21.535a.687.687 0 0 1-.52.215h-4.532a.707.707 0 0 1-.531-.215.753.753 0 0 1-.207-.535Zm-8 0v-2.543c0-.207.07-.379.215-.52a.756.756 0 0 1 .539-.207H8.27c.195 0 .367.07.511.207.145.141.219.313.219.52v2.543a.73.73 0 0 1-.219.535.7.7 0 0 1-.511.215H3.754a.73.73 0 0 1-.54-.215A.727.727 0 0 1 3 16.25ZM4.5 9.5h3v-5h-3Zm8 6h3v-5h-3Zm0-9.98h3V4.5h-3Zm-8 9.98h3v-1.02h-3Zm3-6Zm5-3.98Zm0 4.98Zm-5 3.98Zm0 0"></path></g>
+       <g id="bar-chart"><path d="M13.754 16c-.211 0-.39-.07-.535-.215A.73.73 0 0 1 13 15.25v-4.5c0-.21.07-.39.215-.535A.721.721 0 0 1 13.75 10h1.496c.211 0 .39.07.535.215a.73.73 0 0 1 .219.535v4.5c0 .21-.07.39-.215.535a.721.721 0 0 1-.535.215Zm-4.5 0c-.211 0-.39-.07-.535-.215a.73.73 0 0 1-.219-.535V4.758a.73.73 0 0 1 .215-.54A.725.725 0 0 1 9.25 4h1.496c.211 0 .39.07.535.215a.73.73 0 0 1 .219.535v10.492a.73.73 0 0 1-.215.54.725.725 0 0 1-.535.218Zm-4.5 0c-.211 0-.39-.07-.535-.215A.73.73 0 0 1 4 15.25V8.746c0-.207.07-.383.215-.527A.725.725 0 0 1 4.75 8h1.496c.211 0 .39.07.535.215A.73.73 0 0 1 7 8.75v6.504c0 .207-.07.383-.215.527A.725.725 0 0 1 6.25 16Zm0 0"></path></g>
+@@ -268,7 +268,7 @@ NOTE: Chrome OS icons go in ./chromeos/os_icons.html.
+       <g id="broken-image"><path fill-rule="evenodd" clip-rule="evenodd" d="M15.8333 2.5H4.16667C3.25 2.5 2.5 3.25 2.5 4.16667V15.8333C2.5 16.75 3.25 17.5 4.16667 17.5H15.8333C16.75 17.5 17.5 16.75 17.5 15.8333V4.16667C17.5 3.25 16.75 2.5 15.8333 2.5ZM15.8333 4.16667V9.29167L14 7L11.3333 10.3333L8.66667 7L6 10.3333L4.16667 8.04167V4.16667H15.8333ZM4.16667 10.7083V15.8333H15.8417V11.9583L14.0083 9.66667L11.3333 13L8.66667 9.66667L6 13L4.16667 10.7083Z"></path></g>
+       <g id="button-auto" viewBox="0 -960 960 960"><path d="M480-480ZM160-280q-33 0-56.5-23.5T80-360v-240q0-33 23.5-56.5T160-680h320v80H160v240h640v-120h80v120q0 33-23.5 56.5T800-280H160Zm580-280q-6 0-8-6-16-61-60.5-105.5T566-732q-6-2-6-8 0-7 6-8 61-16 105.5-60.5T732-914q2-6 8-6 7 0 8 6 17 61 61 105.5T914-748q6 1 6 8 0 6-6 8-61 16-105.5 60.5T748-566q-1 6-8 6Z"></path></g>
+       <g id="checklist"><path d="M4.833 15.5 2 12.667l1.062-1.063 1.75 1.771 3.542-3.542 1.084 1.063Zm0-6.5L2 6.167l1.062-1.063 1.771 1.771 3.521-3.542 1.084 1.063ZM11 14v-1.5h7V14Zm0-6.5V6h7v1.5Z"></path></g>
+-      <g id="chrome-product"><path d="M6.875 10.0208C6.875 10.8958 7.17361 11.6389 7.77083 12.25C8.38194 12.8472 9.125 13.1458 10 13.1458C10.875 13.1458 11.6111 12.8472 12.2083 12.25C12.8194 11.6389 13.125 10.8958 13.125 10.0208C13.125 9.14583 12.8194 8.40972 12.2083 7.8125C11.6111 7.20139 10.875 6.89583 10 6.89583C9.125 6.89583 8.38194 7.20139 7.77083 7.8125C7.17361 8.40972 6.875 9.14583 6.875 10.0208ZM10 14.7083C10.1528 14.7083 10.3125 14.7083 10.4792 14.7083C10.6458 14.6944 10.8125 14.6667 10.9792 14.625L8.85417 18.25C6.78472 18.0139 5.06944 17.1111 3.70833 15.5417C2.36111 13.9722 1.6875 12.1319 1.6875 10.0208C1.6875 9.40972 1.75694 8.80556 1.89583 8.20833C2.03472 7.61111 2.24306 7.02083 2.52083 6.4375L5.97917 12.3542C6.38194 13.0903 6.94444 13.6667 7.66667 14.0833C8.38889 14.5 9.16667 14.7083 10 14.7083ZM10 5.33333C8.97222 5.33333 8.05556 5.63889 7.25 6.25C6.44444 6.84722 5.88889 7.625 5.58333 8.58333L3.45833 4.91667C4.22222 3.90278 5.17361 3.11805 6.3125 2.5625C7.46528 1.99305 8.69444 1.70833 10 1.70833C11.375 1.70833 12.6667 2.03472 13.875 2.6875C15.0833 3.32639 16.0694 4.20833 16.8333 5.33333H10ZM17.6875 6.89583C17.9097 7.40972 18.0694 7.93056 18.1667 8.45833C18.2639 8.97222 18.3125 9.49306 18.3125 10.0208C18.3125 12.2569 17.5903 14.1389 16.1458 15.6667C14.7014 17.1806 12.8681 18.0556 10.6458 18.2917L14.0208 12.3542C14.2292 11.9931 14.3889 11.6181 14.5 11.2292C14.625 10.8403 14.6875 10.4375 14.6875 10.0208C14.6875 9.4375 14.5764 8.88194 14.3542 8.35417C14.1458 7.8125 13.8542 7.32639 13.4792 6.89583H17.6875Z"></path></g>
++      <g id="chrome-product" viewBox="0 0 24 24"><path fill-rule="evenodd" d="M2.6,21.5 5.8,12.7 4.6,9.9 12.1,1.9 12.7,7 15.6,7 16.3,10 22.1,10.5 21.9,16.5 16.4,17.1 14.2,19.7 15.6,21.5ZM5.1,10.1 11.9,7.7 7,14.2Z"></path></g>
+       <g id="credit-card"><path d="M16.4,4 L3.6,4 C2.716,4 2.008,4.7271875 2.008,5.625 L2,15.375 C2,16.2728125 2.716,17 3.6,17 L16.4,17 C17.284,17 18,16.2728125 18,15.375 L18,5.625 C18,4.7271875 17.284,4 16.4,4 Z M16.5,15 L3.5,15 L3.5,10 L16.5,10 L16.5,15 Z M16.5,7 L3.5,7 L3.5,5.5 L16.5,5.5 L16.5,7 Z"></path></g>
+       <g id="dashboard"><path d="M3 10.5V4.5C3 4.08333 3.14583 3.72917 3.4375 3.4375C3.74306 3.14583 4.09722 3 4.5 3H9.25V10.5H3ZM10.75 3H15.5C15.9167 3 16.2708 3.14583 16.5625 3.4375C16.8542 3.72917 17 4.08333 17 4.5V8H10.75V3ZM10.75 17V9.5H17V15.5C17 15.9028 16.8542 16.2569 16.5625 16.5625C16.2708 16.8542 15.9167 17 15.5 17H10.75ZM3 12H9.25V17H4.5C4.09722 17 3.74306 16.8542 3.4375 16.5625C3.14583 16.2569 3 15.9028 3 15.5V12ZM4.5 9H7.75V4.5H4.5V9ZM12.25 6.5H15.5V4.5H12.25V6.5ZM12.25 11V15.5H15.5V11H12.25ZM4.5 13.5V15.5H7.75V13.5H4.5Z"></path></g>
+       <g id="bar-chart"><path d="M0 0h20v20H0z" fill="none" fill-rule="evenodd"></path><path d="M6.5 7v9H4V7h2.5zm5-3v12H9V4h2.5zm5 7v5H14v-5h2.5z"></path></g>
+diff --git a/chrome/browser/resources/webui_browser/icons.html.ts b/chrome/browser/resources/webui_browser/icons.html.ts
+--- a/chrome/browser/resources/webui_browser/icons.html.ts
++++ b/chrome/browser/resources/webui_browser/icons.html.ts
+@@ -48,9 +48,7 @@ if (document.documentElement.hasAttribute('webui-rounded-icons')) {
+       <g id="dangerous-filled" viewBox="0 0 16 16">
+         <path d="M6.184 13.602c-.157 0-.305-.032-.45-.086a1.182 1.182 0 0 1-.402-.266L2.75 10.648a1.174 1.174 0 0 1-.258-.39 1.167 1.167 0 0 1-.094-.457V6.184c0-.157.032-.305.086-.45.055-.144.145-.277.266-.402L5.332 2.75c.125-.121.258-.21.402-.266.145-.054.293-.086.45-.086h3.632c.157 0 .305.032.45.086.144.055.277.145.402.266l2.582 2.582c.121.125.21.258.266.402.054.145.086.293.086.45v3.632c0 .157-.032.305-.086.45a1.182 1.182 0 0 1-.266.402l-2.602 2.582c-.109.11-.238.195-.39.258-.149.062-.301.094-.457.094ZM8 8.852l1.367 1.347a.579.579 0 0 0 .418.184.577.577 0 0 0 .414-.184.577.577 0 0 0 .184-.414.579.579 0 0 0-.184-.418L8.852 8l1.347-1.367a.579.579 0 0 0 .184-.418.577.577 0 0 0-.184-.414.577.577 0 0 0-.414-.184.579.579 0 0 0-.418.184L8 7.148 6.633 5.801a.579.579 0 0 0-.418-.184.577.577 0 0 0-.414.184.577.577 0 0 0-.184.414c0 .156.063.297.184.418L7.148 8 5.801 9.367a.579.579 0 0 0-.184.418c0 .152.063.293.184.414a.577.577 0 0 0 .414.184.579.579 0 0 0 .418-.184Zm0 0"></path>
+       </g>
+-      <g id="chrome-product" viewBox="0 0 16 16">
+-        <path d="M6.3 9.715a2.303 2.303 0 0 0 1.7.703c.668 0 1.234-.234 1.7-.703a2.3 2.3 0 0 0 .698-1.7c0-.663-.23-1.23-.699-1.699A2.314 2.314 0 0 0 8 5.617c-.668 0-1.234.235-1.7.7a2.311 2.311 0 0 0-.698 1.699A2.3 2.3 0 0 0 6.3 9.715ZM8 11.617c.121 0 .246-.004.375-.008.129-.007.254-.027.375-.058l-1.633 2.8c-1.601-.18-2.922-.874-3.957-2.085-1.039-1.211-1.558-2.625-1.558-4.25a6.283 6.283 0 0 1 .632-2.766l2.664 4.566A3.366 3.366 0 0 0 6.2 11.141 3.579 3.579 0 0 0 8 11.617Zm0-7.199c-.79 0-1.492.23-2.11.7a3.627 3.627 0 0 0-1.288 1.8L2.965 4.082a5.994 5.994 0 0 1 2.21-1.824A6.42 6.42 0 0 1 8 1.618c1.055 0 2.05.25 2.984.75a6.49 6.49 0 0 1 2.301 2.05Zm5.934 1.2c.168.386.285.78.359 1.183.07.398.105.804.105 1.215 0 1.722-.554 3.171-1.664 4.343-1.113 1.172-2.527 1.852-4.25 2.04l2.618-4.583c.152-.277.277-.566.363-.867.09-.3.137-.61.137-.933 0-.446-.086-.871-.25-1.282a3.94 3.94 0 0 0-.684-1.117Zm0 0"></path>
+-      </g>
++      <g id="chrome-product" viewBox="0 0 24 24"><path fill-rule="evenodd" d="M2.6,21.5 5.8,12.7 4.6,9.9 12.1,1.9 12.7,7 15.6,7 16.3,10 22.1,10.5 21.9,16.5 16.4,17.1 14.2,19.7 15.6,21.5ZM5.1,10.1 11.9,7.7 7,14.2Z"></path></g>
+       <g id="chrome-extension" viewBox="0 0 16 16">
+         <path d="M3.602 13.602c-.332 0-.614-.118-.848-.356a1.142 1.142 0 0 1-.356-.848v-2.316c0-.145.047-.273.137-.387a.533.533 0 0 1 .348-.195c.324-.121.59-.316.8-.582C3.896 8.648 4 8.344 4 8c0-.344-.105-.648-.316-.918a1.814 1.814 0 0 0-.801-.582.512.512 0 0 1-.348-.203.624.624 0 0 1-.137-.399V3.602c0-.332.118-.614.356-.848.234-.238.516-.356.848-.356h2.796c0-.441.157-.82.465-1.132A1.545 1.545 0 0 1 7.996.8c.445 0 .824.152 1.137.465.312.308.469.687.469 1.132h2.796c.332 0 .614.118.848.356.238.234.356.516.356.848v2.796c.441 0 .82.157 1.132.465.309.309.465.688.465 1.133 0 .445-.152.824-.465 1.137a1.533 1.533 0 0 1-1.132.469v2.796c0 .332-.118.614-.356.848a1.142 1.142 0 0 1-.848.356Zm0-1.204h8.796V3.602H3.602v1.863c.5.223.89.566 1.171 1.027.286.461.426.965.426 1.508 0 .559-.14 1.066-.426 1.527a2.48 2.48 0 0 1-1.171 1.008ZM8 8Zm0 0"></path>
+       </g>
+@@ -98,9 +96,7 @@ if (document.documentElement.hasAttribute('webui-rounded-icons')) {
+       <g id="dangerous-filled" viewBox="0 0 16 16">
+         <path d="M 7.11 17 L 3 12.88 L 3 7.11 L 7.11 3 L 12.89 3 L 17 7.11 L 17 12.89 L 12.88 17 Z M 7.77 13.27 L 10 11.06 L 12.23 13.27 L 13.27 12.23 L 11.06 10 L 13.27 7.77 L 12.23 6.73 L 10 8.94 L 7.77 6.73 L 6.73 7.77 L 8.94 10 L 6.73 12.23 Z"/>
+       </g>
+-      <g id="chrome-product" viewBox="0 0 16 16">
+-        <path d="M 4.92 7.5 c 0 0.71 0.25 1.31 0.76 1.82 c 0.51 0.51 1.12 0.76 1.82 0.76 c 0.7 0 1.31 -0.25 1.82 -0.76 c 0.51 -0.51 0.76 -1.12 0.76 -1.82 c 0 -0.7 -0.25 -1.31 -0.76 -1.82 a 2.49 2.49 0 0 0 -1.82 -0.76 c -0.7 0 -1.31 0.25 -1.82 0.76 a 2.49 2.49 0 0 0 -0.76 1.82 Z M 7.5 11.48 c 0.14 0 0.28 0 0.41 -0.02 c 0.13 -0.01 0.26 -0.04 0.39 -0.07 L 6.77 14.06 c -1.65 -0.19 -3.04 -0.89 -4.15 -2.12 C 1.5 10.71 0.94 9.24 0.94 7.55 c 0 -0.46 0.05 -0.9 0.13 -1.33 c 0.08 -0.44 0.22 -0.85 0.39 -1.25 l 2.63 4.55 c 0.34 0.59 0.81 1.07 1.41 1.43 c 0.6 0.36 1.26 0.54 2.01 0.54 Z m 0 -7.87 c -0.87 0 -1.65 0.25 -2.33 0.77 a 3.95 3.95 0 0 0 -1.42 1.94 L 2.21 3.66 a 6.79 6.79 0 0 1 2.27 -1.94 C 5.4 1.22 6.4 0.98 7.5 0.98 c 1.1 0 2.08 0.24 2.99 0.72 A 6.66 6.66 0 0 1 12.76 3.6 H 7.51 l -0.01 0.01 Z m 6.01 1.31 c 0.19 0.4 0.32 0.83 0.41 1.27 c 0.09 0.44 0.15 0.89 0.15 1.36 c 0 1.7 -0.55 3.16 -1.68 4.38 c -1.11 1.23 -2.47 1.93 -4.1 2.13 l 2.63 -4.55 c 0.17 -0.28 0.29 -0.59 0.38 -0.92 c 0.09 -0.34 0.15 -0.69 0.15 -1.05 c 0 -0.52 -0.09 -0.99 -0.28 -1.42 a 3.96 3.96 0 0 0 -0.74 -1.2 h 3.08 v 0.01 Z"/>
+-      </g>
++      <g id="chrome-product" viewBox="0 0 24 24"><path fill-rule="evenodd" d="M2.6,21.5 5.8,12.7 4.6,9.9 12.1,1.9 12.7,7 15.6,7 16.3,10 22.1,10.5 21.9,16.5 16.4,17.1 14.2,19.7 15.6,21.5ZM5.1,10.1 11.9,7.7 7,14.2Z"></path></g>
+       <g id="chrome-extension" viewBox="0 0 16 16">
+         <path d="M 3.6 13.73 c -0.37 0 -0.69 -0.13 -0.95 -0.39 a 1.28 1.28 0 0 1 -0.39 -0.95 v -2.87 c 0.42 -0.02 0.77 -0.18 1.05 -0.47 A 1.46 1.46 0 0 0 3.75 8 c 0 -0.41 -0.14 -0.76 -0.43 -1.05 a 1.51 1.51 0 0 0 -1.05 -0.47 V 3.6 c 0 -0.37 0.13 -0.69 0.39 -0.95 c 0.26 -0.26 0.57 -0.39 0.95 -0.39 h 2.68 c 0.03 -0.46 0.21 -0.84 0.53 -1.16 a 1.63 1.63 0 0 1 1.18 -0.47 c 0.46 0 0.86 0.16 1.18 0.47 c 0.33 0.31 0.51 0.7 0.54 1.16 h 2.68 c 0.37 0 0.69 0.13 0.95 0.39 c 0.26 0.26 0.39 0.57 0.39 0.95 v 2.68 c 0.46 0.03 0.84 0.21 1.16 0.53 c 0.32 0.33 0.47 0.72 0.47 1.18 c 0 0.46 -0.16 0.86 -0.47 1.18 c -0.31 0.33 -0.7 0.51 -1.16 0.54 v 2.68 c 0 0.37 -0.13 0.69 -0.39 0.95 c -0.26 0.26 -0.57 0.39 -0.95 0.39 Z m 0.05 -1.38 h 8.7 V 3.65 H 3.65 v 1.81 c 0.47 0.25 0.83 0.61 1.09 1.07 c 0.26 0.46 0.39 0.95 0.39 1.48 c 0 0.54 -0.13 1.05 -0.39 1.5 a 2.58 2.58 0 0 1 -1.09 1.04 Z M 8 8 Z"/>
+       </g>
+diff --git a/chrome/browser/resources/webui_toolbar/icons.ts b/chrome/browser/resources/webui_toolbar/icons.ts
+--- a/chrome/browser/resources/webui_toolbar/icons.ts
++++ b/chrome/browser/resources/webui_toolbar/icons.ts
+@@ -49,7 +49,7 @@ iconset.registerIcons(
+       'chrome_extension_off': () =>
+           getTrustedHTML`<svg><g id="chrome_extension_off" viewBox="0 0 20 20"><path d="M 15.48 17.58 L 2.4 4.52 a 0.73 0.73 0 0 1 -0.23 -0.53 c 0 -0.2 0.07 -0.38 0.23 -0.53 a 0.73 0.73 0 0 1 0.54 -0.23 a 0.71 0.71 0 0 1 0.53 0.23 l 13.08 13.08 c 0.16 0.16 0.23 0.33 0.23 0.53 a 0.69 0.69 0 0 1 -0.23 0.52 a 0.71 0.71 0 0 1 -0.53 0.23 a 0.75 0.75 0 0 1 -0.54 -0.23 Z M 19 10 c 0 0.56 -0.19 1.03 -0.58 1.42 A 1.94 1.94 0 0 1 17 12 v 1.25 c 0 0.25 -0.08 0.44 -0.23 0.56 a 0.81 0.81 0 0 1 -0.52 0.19 a 0.79 0.79 0 0 1 -0.52 -0.19 c -0.16 -0.13 -0.23 -0.32 -0.23 -0.56 V 4.5 H 6.75 c -0.25 0 -0.44 -0.08 -0.56 -0.23 a 0.81 0.81 0 0 1 0 -1.03 C 6.31 3.08 6.5 3 6.75 3 H 8 c 0 -0.56 0.19 -1.03 0.58 -1.42 c 0.39 -0.39 0.86 -0.58 1.42 -0.58 c 0.56 0 1.03 0.19 1.42 0.58 c 0.39 0.39 0.58 0.86 0.58 1.42 h 3.5 c 0.41 0 0.77 0.15 1.06 0.44 c 0.29 0.29 0.44 0.65 0.44 1.06 V 8 a 1.94 1.94 0 0 1 1.42 0.58 c 0.39 0.39 0.58 0.86 0.58 1.42 Z M 11.54 8.52 Z m -2.15 2.15 Z M 4.5 17 c -0.41 0 -0.77 -0.15 -1.06 -0.44 A 1.44 1.44 0 0 1 3 15.5 v -2.89 c 0 -0.18 0.06 -0.34 0.17 -0.48 a 0.65 0.65 0 0 1 0.44 -0.25 a 2.28 2.28 0 0 0 1 -0.73 C 4.87 10.81 5 10.43 5 10 c 0 -0.43 -0.13 -0.81 -0.39 -1.14 a 2.28 2.28 0 0 0 -1 -0.73 a 0.64 0.64 0 0 1 -0.44 -0.25 A 0.78 0.78 0 0 1 3 7.38 V 4.52 c 0 -0.2 0.05 -0.38 0.14 -0.56 c 0.09 -0.17 0.21 -0.32 0.36 -0.46 l 1 1 v 2.33 a 3.23 3.23 0 0 1 1.47 1.28 C 6.32 8.69 6.5 9.32 6.5 10 c 0 0.7 -0.18 1.33 -0.53 1.91 A 3.12 3.12 0 0 1 4.5 13.17 V 15.5 h 11 l 1 1 c -0.15 0.14 -0.32 0.25 -0.49 0.33 c -0.18 0.09 -0.36 0.14 -0.56 0.17 Z" fill="currentColor"/></g></svg>`,
+       'chrome_product': () =>
+-          getTrustedHTML`<svg><g id="chrome_product" viewBox="0 0 24 24"><path d="M 9.18 14.9 c 0.78 0.79 1.72 1.18 2.82 1.18 c 1.1 0 2.04 -0.39 2.82 -1.18 c 0.79 -0.78 1.18 -1.72 1.18 -2.82 c 0 -1.1 -0.39 -2.04 -1.18 -2.82 c -0.78 -0.78 -1.72 -1.18 -2.82 -1.18 c -1.1 0 -2.04 0.39 -2.82 1.18 C 8.39 10.04 8 10.98 8 12.07 c 0 1.1 0.39 2.04 1.18 2.82 Z M 12 18.07 c 0.22 0 0.43 -0.01 0.63 -0.02 c 0.2 -0.02 0.4 -0.05 0.6 -0.1 L 10.88 22 c -2.52 -0.28 -4.62 -1.36 -6.32 -3.24 C 2.85 16.89 2 14.66 2 12.07 c 0 -0.7 0.07 -1.38 0.2 -2.03 c 0.13 -0.66 0.34 -1.29 0.6 -1.89 l 4 6.93 a 5.97 5.97 0 0 0 2.15 2.18 c 0.92 0.55 1.93 0.82 3.05 0.82 Z m 0 -12 c -1.33 0 -2.52 0.39 -3.55 1.16 C 7.42 8.01 6.7 9 6.3 10.2 L 3.95 6.15 a 10.3 10.3 0 0 1 3.46 -2.96 c 1.39 -0.74 2.92 -1.11 4.59 -1.11 c 1.65 0 3.17 0.36 4.55 1.09 A 10.17 10.17 0 0 1 20 6.07 Z m 9.15 2 c 0.29 0.62 0.5 1.26 0.64 1.93 c 0.14 0.67 0.21 1.36 0.21 2.07 c 0 2.59 -0.85 4.81 -2.54 6.68 c -1.69 1.87 -3.78 2.95 -6.26 3.25 l 4 -6.93 c 0.25 -0.43 0.45 -0.9 0.59 -1.41 c 0.14 -0.51 0.21 -1.04 0.21 -1.59 c 0 -0.78 -0.14 -1.51 -0.41 -2.19 a 6.07 6.07 0 0 0 -1.14 -1.81 Z" fill="currentColor"/></g></svg>`,
++          getTrustedHTML`<svg><g id="chrome_product" viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M2.6,21.5 5.8,12.7 4.6,9.9 12.1,1.9 12.7,7 15.6,7 16.3,10 22.1,10.5 21.9,16.5 16.4,17.1 14.2,19.7 15.6,21.5ZM5.1,10.1 11.9,7.7 7,14.2Z"></path></g></svg>`,
+       'close': () =>
+           getTrustedHTML`<svg><g id="close" viewBox="0 0 24 24"><path d="m 12 13.4 l -4.9 4.9 a 0.95 0.95 0 0 1 -0.7 0.27 a 0.95 0.95 0 0 1 -0.7 -0.27 a 0.95 0.95 0 0 1 -0.27 -0.7 c 0 -0.28 0.09 -0.52 0.27 -0.7 L 10.6 12 L 5.7 7.1 a 0.95 0.95 0 0 1 -0.27 -0.7 c 0 -0.28 0.09 -0.51 0.27 -0.7 a 0.95 0.95 0 0 1 0.7 -0.27 c 0.28 0 0.52 0.09 0.7 0.27 L 12 10.6 l 4.9 -4.9 a 0.95 0.95 0 0 1 0.7 -0.27 c 0.28 0 0.52 0.09 0.7 0.27 a 0.95 0.95 0 0 1 0.27 0.7 a 0.95 0.95 0 0 1 -0.27 0.7 L 13.4 12 l 4.9 4.9 a 0.95 0.95 0 0 1 0.27 0.7 c 0 0.28 -0.09 0.52 -0.27 0.7 a 0.95 0.95 0 0 1 -0.7 0.27 a 0.95 0.95 0 0 1 -0.7 -0.27 Z" fill="currentColor"/></g></svg>`,
+       'code_16': () =>
+diff --git a/chrome/browser/search/search.cc b/chrome/browser/search/search.cc
+--- a/chrome/browser/search/search.cc
++++ b/chrome/browser/search/search.cc
+@@ -39,6 +39,10 @@
+ #include "url/gurl.h"
+ #include "url/origin.h"
+ 
++#if BUILDFLAG(IS_MAC)
++#include "bark/native_ui_mac.h"
++#endif
++
+ #if BUILDFLAG(IS_ANDROID)
+ #include "base/android/device_info.h"
+ #include "chrome/browser/flags/android/chrome_feature_list.h"
+@@ -467,6 +471,14 @@ bool HandleNewTabURLRewrite(GURL* url,
+   }
+ 
+   Profile* profile = Profile::FromBrowserContext(browser_context);
++#if BUILDFLAG(IS_MAC)
++  // Policy and extension new-tab overrides are registered before this handler.
++  // Keep Bark's default new-tab surface blank, including native Cmd+T/startup.
++  if (!profile->IsOffTheRecord() && bark::IsSwiftUIEnabled()) {
++    *url = GURL("about:blank");
++    return true;
++  }
++#endif
+   NewTabURLDetails details(NewTabURLDetails::ForProfile(profile));
+   UMA_HISTOGRAM_ENUMERATION("NewTabPage.URLState", details.state,
+                             NEW_TAB_URL_MAX);
+diff --git a/chrome/browser/ui/infobars/browser_infobar_registry.cc b/chrome/browser/ui/infobars/browser_infobar_registry.cc
+--- a/chrome/browser/ui/infobars/browser_infobar_registry.cc
++++ b/chrome/browser/ui/infobars/browser_infobar_registry.cc
+@@ -389,10 +389,8 @@ void RegisterInfoBars() {
+             // come in per show via InfoBarShowParams.
+             .SetMessageText(
+                 l10n_util::GetStringUTF16(IDS_DEFAULT_BROWSER_INFOBAR_TEXT))
+-            .SetIcon(vector_icons::kProductRefreshIcon)
+-            .SetDarkModeIcon(features::IsRoundedIconsEnabled()
+-                                 ? omnibox::kChromeProductIcon
+-                                 : omnibox::kProductChromeRefreshOldIcon)
++            .SetIcon(vector_icons::kGlobeIcon)
++            .SetDarkModeIcon(vector_icons::kGlobeIcon)
+             .SetScope(InfoBarScope::kGlobal)
+             .SetExpireOnNavigation(false)
+             .SetShouldHideInFullscreen(true)
+diff --git a/chrome/browser/ui/startup/default_browser_prompt/default_browser_infobar_delegate.cc b/chrome/browser/ui/startup/default_browser_prompt/default_browser_infobar_delegate.cc
+--- a/chrome/browser/ui/startup/default_browser_prompt/default_browser_infobar_delegate.cc
++++ b/chrome/browser/ui/startup/default_browser_prompt/default_browser_infobar_delegate.cc
+@@ -45,10 +45,7 @@ DefaultBrowserInfoBarDelegate::GetIdentifier() const {
+ }
+ 
+ const gfx::VectorIcon& DefaultBrowserInfoBarDelegate::GetVectorIcon() const {
+-  return dark_mode() ? features::IsRoundedIconsEnabled()
+-                           ? omnibox::kChromeProductIcon
+-                           : omnibox::kProductChromeRefreshOldIcon
+-                     : vector_icons::kProductRefreshIcon;
++  return vector_icons::kGlobeIcon;
+ }
+ 
+ bool DefaultBrowserInfoBarDelegate::ShouldExpire(
+diff --git a/chrome/browser/ui/views/frame/browser_native_widget_mac.mm b/chrome/browser/ui/views/frame/browser_native_widget_mac.mm
+--- a/chrome/browser/ui/views/frame/browser_native_widget_mac.mm
++++ b/chrome/browser/ui/views/frame/browser_native_widget_mac.mm
+@@ -276,6 +276,13 @@ - (NSTouchBar*)makeTouchBar {
+ void BrowserNativeWidgetMac::GetWindowFrameTitlebarHeight(
+     bool* override_titlebar_height,
+     float* titlebar_height) {
++  // Bark's caption controls share the sidebar's 38-point header row.
++  if (browser_view_ && browser_view_->GetIsNormalType() &&
++      browser_view_->GetBarkToolbarAnchor(false)) {
++    *override_titlebar_height = true;
++    *titlebar_height = 38;
++    return;
++  }
+   if (browser_view_ && browser_view_->browser_widget() &&
+       browser_view_->browser_widget()->GetFrameView()) {
+     *override_titlebar_height = true;
+diff --git a/chrome/chrome_repack_locales.gni b/chrome/chrome_repack_locales.gni
+--- a/chrome/chrome_repack_locales.gni
++++ b/chrome/chrome_repack_locales.gni
+@@ -18,6 +18,7 @@ assert(!is_ios, "Chromium/iOS shouldn't use anything in //chrome")
+ #      Extra source_patterns for repack_locales().
+ template("chrome_repack_locales") {
+   repack_locales(target_name) {
++    bark_branding = true
+     forward_variables_from(invoker, "*", [ "additional_source_patterns" ])
+ 
+     # Each input pak file should also have a deps line.
+diff --git a/chrome/common/chrome_paths_linux.cc b/chrome/common/chrome_paths_linux.cc
+--- a/chrome/common/chrome_paths_linux.cc
++++ b/chrome/common/chrome_paths_linux.cc
+@@ -96,7 +96,7 @@ bool GetDefaultUserDataDirectory(base::FilePath* result) {
+ #elif BUILDFLAG(GOOGLE_CHROME_BRANDING)
+   std::string data_dir_basename = "google-chrome";
+ #else
+-  std::string data_dir_basename = "chromium";
++  std::string data_dir_basename = "bark";
+ #endif
+   // LINT.ThenChange(//chrome/installer/linux/snap/build.py:ConfigDirName)
+   *result = config_dir.Append(data_dir_basename + GetChannelSuffixForDataDir());
+diff --git a/chrome/common/chrome_paths_mac.mm b/chrome/common/chrome_paths_mac.mm
+--- a/chrome/common/chrome_paths_mac.mm
++++ b/chrome/common/chrome_paths_mac.mm
+@@ -37,7 +37,11 @@
+ #elif BUILDFLAG(GOOGLE_CHROME_BRANDING)
+       product_dir_name = "Google/Chrome";
+ #else
+-      product_dir_name = "Chromium";
++      // Bark: packaged apps set CrProductDirName to "BarkChromium". The raw
++      // build output is unsigned and keeps separate data, because the
++      // packaged app's keychain key (and so its profile) is not readable
++      // by it.
++      product_dir_name = "BarkChromium Raw Build";
+ #endif
+     }
+ 
+diff --git a/components/os_crypt/common/keychain_password_mac.mm b/components/os_crypt/common/keychain_password_mac.mm
+--- a/components/os_crypt/common/keychain_password_mac.mm
++++ b/components/os_crypt/common/keychain_password_mac.mm
+@@ -6,6 +6,8 @@
+ 
+ #import <Security/Security.h>
+ 
++#include "base/apple/bundle_locations.h"
++#include "base/apple/foundation_util.h"
+ #include "base/apple/osstatus_logging.h"
+ #include "base/apple/scoped_cftyperef.h"
+ #include "base/base64.h"
+@@ -14,6 +16,7 @@
+ #include "base/no_destructor.h"
+ #include "base/rand_util.h"
+ #include "base/strings/string_view_util.h"
++#include "base/strings/sys_string_conversions.h"
+ #include "build/branding_buildflags.h"
+ #include "crypto/apple/keychain_v2.h"
+ #include "third_party/abseil-cpp/absl/cleanup/cleanup.h"
+@@ -35,10 +38,22 @@
+ const char kDefaultServiceName[] = "Chrome Safe Storage";
+ const char kDefaultAccountName[] = "Chrome";
+ #else
+-const char kDefaultServiceName[] = "Chromium Safe Storage";
+-const char kDefaultAccountName[] = "Chromium";
++// Bark: packaged apps name their item with BarkSafeStorageName in
++// Info.plist ("Bark Safe Storage"). The unsigned raw build uses its own item
++// instead of failing to read the packaged app's key.
++const char kDefaultServiceName[] = "Bark Raw Build Safe Storage";
++const char kDefaultAccountName[] = "Bark";
+ #endif
+ 
++std::string DefaultServiceName() {
++#if !BUILDFLAG(GOOGLE_CHROME_BRANDING)
++  NSString* name = base::apple::ObjCCast<NSString>(
++      [base::apple::OuterBundle() objectForInfoDictionaryKey:@"BarkSafeStorageName"]);
++  if (name.length) return base::SysNSStringToUTF8(name);
++#endif
++  return kDefaultServiceName;
++}
++
+ // These values are persisted to logs. Entries should not be renumbered and
+ // numeric values should never be reused.
+ enum class FindGenericPasswordResult {
+@@ -73,7 +88,7 @@
+ 
+ // static
+ KeychainPassword::KeychainNameType& KeychainPassword::GetServiceName() {
+-  static KeychainNameContainerType service_name(kDefaultServiceName);
++  static KeychainNameContainerType service_name(DefaultServiceName());
+   return *service_name;
+ }
+ 
+diff --git a/components/remote_cocoa/app_shim/native_widget_mac_nswindow.mm b/components/remote_cocoa/app_shim/native_widget_mac_nswindow.mm
+--- a/components/remote_cocoa/app_shim/native_widget_mac_nswindow.mm
++++ b/components/remote_cocoa/app_shim/native_widget_mac_nswindow.mm
+@@ -4,6 +4,8 @@
+ 
+ #import "components/remote_cocoa/app_shim/native_widget_mac_nswindow.h"
+ 
++#import <objc/runtime.h>
++
+ #include <memory>
+ #include <ranges>
+ 
+@@ -33,6 +35,14 @@
+ 
+ namespace {
+ 
++// Popup windows use the default titled frame. Only Little windows have a
++// custom titlebar on that frame, and fullscreen uses AppKit's normal metrics.
++CGFloat BarkLittleHeaderHeight(NSWindow* window) {
++  if (window.styleMask & NSWindowStyleMaskFullScreen) return 0;
++  NSNumber* height = objc_getAssociatedObject(window, sel_registerName("barkLittleHeaderHeight"));
++  return height.doubleValue;
++}
++
+ bool AreWindowShadowsDisabled() {
+   // When:
+   // 1) Shadows are being generated by the window server
+@@ -113,6 +123,11 @@ void OrderChildWindow(NSWindow* child_window,
+ 
+ }  // namespace
+ 
++@interface NSThemeFrame (BarkTitlebarMetrics)
++- (CGFloat)_titlebarHeight;
++- (BOOL)_shouldCenterTrafficLights;
++@end
++
+ @interface NSNextStepFrame (Private)
+ - (instancetype)initWithFrame:(NSRect)frame
+                     styleMask:(NSUInteger)styleMask
+@@ -184,6 +199,14 @@ - (void)cr_mouseDownOnFrameView:(NSEvent*)event {
+ @end
+ 
+ @implementation NativeWidgetMacNSWindowTitledFrame
++- (CGFloat)_titlebarHeight {
++  CGFloat height = BarkLittleHeaderHeight(self.window);
++  return height > 0 ? height : [super _titlebarHeight];
++}
++- (BOOL)_shouldCenterTrafficLights {
++  if (BarkLittleHeaderHeight(self.window) > 0) return YES;
++  return [NSThemeFrame instancesRespondToSelector:_cmd] && [super _shouldCenterTrafficLights];
++}
+ - (void)mouseDown:(NSEvent*)event {
+   if (self.window.movable) {
+     [self cr_mouseDownOnFrameView:event];
+diff --git a/tools/grit/pak_util.py b/tools/grit/pak_util.py
+--- a/tools/grit/pak_util.py
++++ b/tools/grit/pak_util.py
+@@ -44,6 +44,11 @@ def _RepackMain(args):
+     args.suppress_removed_key_output,
+     output_info_filepath=output_info_filepath,
+   )
++  if args.bark_branding:
++    # Loaded only for Bark's locale repack targets; declared as a GN input.
++    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../bark'))
++    from rebrand_strings import rebrand_pak
++    rebrand_pak(out_path, output_info_filepath, data_pack)
+   if args.compress:
+     with open(args.output_pak_file, 'wb') as out:
+       with gzip.GzipFile(filename='', mode='wb', fileobj=out, mtime=0) as outgz:
+@@ -214,6 +219,8 @@ def main():
+     default=False,
+     help='Compress output_pak_file using gzip.',
+   )
++  sub_parser.add_argument('--bark-branding', action='store_true',
++                          help='Apply Bark product branding to locale strings.')
+   sub_parser.set_defaults(func=_RepackMain)
+ 
+   sub_parser = sub_parsers.add_parser('extract', help='Extracts pak file')
+diff --git a/tools/grit/repack.gni b/tools/grit/repack.gni
+--- a/tools/grit/repack.gni
++++ b/tools/grit/repack.gni
+@@ -75,6 +75,10 @@ template("repack") {
+     }
+ 
+     args = [ "repack" ]
++    if (defined(invoker.bark_branding) && invoker.bark_branding) {
++      inputs += [ "//bark/rebrand_strings.py" ]
++      args += [ "--bark-branding" ]
++    }
+     if (defined(invoker.repack_allowlist)) {
+       inputs += [ invoker.repack_allowlist ]
+       _rebased_allowlist = rebase_path(invoker.repack_allowlist)
+@@ -165,6 +169,7 @@ template("repack_locales") {
+       repack(_current_name) {
+         forward_variables_from(invoker,
+                                [
++                                 "bark_branding",
+                                  "bundle_output",
+                                  "compress",
+                                  "copy_data_to_bundle",
+diff --git a/ui/webui/resources/cr_elements/icons.html.ts b/ui/webui/resources/cr_elements/icons.html.ts
+--- a/ui/webui/resources/cr_elements/icons.html.ts
++++ b/ui/webui/resources/cr_elements/icons.html.ts
+@@ -91,9 +91,7 @@ if (document.documentElement.hasAttribute('webui-rounded-icons')) {
+       <g id="chevron-right">
+         <path d="m13.05 12-4.1-4.102a.87.87 0 0 1-.274-.636.87.87 0 0 1 .273-.637.879.879 0 0 1 1.277 0l4.75 4.75a.84.84 0 0 1 .188.29c.04.105.063.218.063.335 0 .117-.024.23-.063.336a.84.84 0 0 1-.187.289l-4.75 4.75a.822.822 0 0 1-.625.262.902.902 0 0 1-.625-.285.883.883 0 0 1-.278-.641.88.88 0 0 1 .278-.637Zm0 0"></path>
+       </g>
+-      <g id="chrome-product">
+-        <path d="M9.45 14.574c.698.7 1.55 1.051 2.55 1.051 1 0 1.852-.352 2.55-1.05.7-.7 1.052-1.552 1.052-2.552s-.352-1.847-1.051-2.546C13.85 8.773 13 8.426 12 8.426c-1 0-1.852.347-2.55 1.05-.7.7-1.052 1.547-1.052 2.547 0 1 .352 1.852 1.051 2.551ZM12 17.426c.184 0 .371-.004.563-.012.19-.012.378-.039.562-.09l-2.45 4.2c-2.402-.266-4.378-1.31-5.937-3.126-1.558-1.816-2.34-3.941-2.34-6.375 0-.714.082-1.418.239-2.109.16-.691.398-1.371.715-2.039l4 6.852A4.988 4.988 0 0 0 9.3 16.71a5.346 5.346 0 0 0 2.699.715Zm0-10.801a5.114 5.114 0 0 0-3.164 1.05 5.499 5.499 0 0 0-1.938 2.7L4.45 6.125a8.93 8.93 0 0 1 3.313-2.738A9.61 9.61 0 0 1 12 2.426c1.582 0 3.074.375 4.477 1.125a9.739 9.739 0 0 1 3.449 3.074Zm8.898 1.8c.25.583.43 1.177.54 1.774.109.602.164 1.211.164 1.824 0 2.586-.836 4.754-2.5 6.516-1.668 1.758-3.793 2.777-6.375 3.063l3.921-6.875c.235-.418.418-.852.551-1.301a5.058 5.058 0 0 0-.176-3.324A5.943 5.943 0 0 0 16 8.426Zm0 0"></path>
+-      </g>
++      <g id="chrome-product" viewBox="0 0 24 24"><path fill-rule="evenodd" d="M2.6,21.5 5.8,12.7 4.6,9.9 12.1,1.9 12.7,7 15.6,7 16.3,10 22.1,10.5 21.9,16.5 16.4,17.1 14.2,19.7 15.6,21.5ZM5.1,10.1 11.9,7.7 7,14.2Z"></path></g>
+       <g id="close">
+         <path d="m12 13.273-4.102 4.102a.816.816 0 0 1-.625.262.91.91 0 0 1-.625-.285.879.879 0 0 1 0-1.278L10.727 12 6.625 7.898a.83.83 0 0 1-.262-.636.914.914 0 0 1 .285-.637.879.879 0 0 1 1.278 0L12 10.727l4.102-4.102a.87.87 0 0 1 .636-.273.87.87 0 0 1 .637.273.87.87 0 0 1 .273.637.87.87 0 0 1-.273.636L13.273 12l4.102 4.102c.184.183.273.39.273.625 0 .23-.09.441-.273.625a.87.87 0 0 1-.637.273.87.87 0 0 1-.636-.273Zm0 0"></path>
+       </g>
+@@ -309,10 +307,7 @@ if (document.documentElement.hasAttribute('webui-rounded-icons')) {
+       <g id="chevron-right">
+         <path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"></path>
+       </g>
+-      <g id="chrome-product" viewBox="0 -960 960 960">
+-        <path d="M336-479q0 60 42 102t102 42q60 0 102-42t42-102q0-60-42-102t-102-42q-60 0-102 42t-42 102Zm144 216q11 0 22.5-.5T525-267L427-99q-144-16-237.5-125T96-479q0-43 9.5-84.5T134-645l160 274q28 51 78 79.5T480-263Zm0-432q-71 0-126.5 42T276-545l-98-170q53-71 132.5-109.5T480-863q95 0 179 45t138 123H480Zm356 72q15 35 21.5 71t6.5 73q0 155-100 260.5T509-96l157-275q14-25 22-52t8-56q0-40-15-77t-41-67h196Z">
+-        </path>
+-      </g>
++      <g id="chrome-product" viewBox="0 0 24 24"><path fill-rule="evenodd" d="M2.6,21.5 5.8,12.7 4.6,9.9 12.1,1.9 12.7,7 15.6,7 16.3,10 22.1,10.5 21.9,16.5 16.4,17.1 14.2,19.7 15.6,21.5ZM5.1,10.1 11.9,7.7 7,14.2Z"></path></g>
+       <g id="close">
+         <path
+           d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z">

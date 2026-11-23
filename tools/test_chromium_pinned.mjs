@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Focused native regression: pins load on selection and close without removal.
 import assert from 'node:assert/strict';
+import {execFileSync} from 'node:child_process';
 import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
@@ -388,6 +389,23 @@ try {
   assert.equal(tabFor(state, suffix).meta.folder, folder);
   assert.ok(visible(state).favorites.some(tab => tab.url === base + '/favorite'));
   report.checks.push('Closed pins and Favorites survive restart without loading; an explicitly unpinned and closed tab stays removed');
+
+  // Closing the last window and reopening from the Dock (an Apple "reopen"
+  // event) brings the window back with its Favorites and pins. Stock Chromium
+  // opens an empty window here, which dropped Favorites.
+  await command('testCloseWindow', {windowId: visible(state).windowId});
+  await delay(1500);
+  execFileSync('/usr/bin/osascript', ['-l', 'JavaScript', '-e', `
+    ObjC.import('Foundation');
+    const target = $.NSAppleEventDescriptor.descriptorWithProcessIdentifier(${browser.child.pid});
+    const reopen = $.NSAppleEventDescriptor.appleEventWithEventClassEventIDTargetDescriptorReturnIDTransactionID(
+      0x61657674, 0x72617070, target, -1, 0);  // 'aevt' / 'rapp'
+    reopen.sendEventWithOptionsTimeoutError(1, 10, null);  // kAENoReply
+  `], {timeout: 30000});
+  state = await waitFor(state => !!visible(state) && !!tabFor(state, suffix) &&
+    visible(state).favorites.some(tab => tab.url === base + '/favorite'), 'Favorites and pins after Dock reopen');
+  assert.equal(tabFor(state, suffix).meta.title, 'Course home');
+  report.checks.push('Reopening from the Dock after closing the last window restores its Favorites and pins');
   await setStartupPreference(5);  // Open the New Tab page.
   await close();
   requests.clear();

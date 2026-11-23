@@ -77,6 +77,7 @@
 #include "chrome/browser/themes/theme_service_factory.h"
 #include "chrome/browser/themes/theme_service_observer.h"
 #include "chrome/browser/ui/browser_commands.h"
+#include "chrome/browser/ui/browser_init_state.h"
 #include "chrome/browser/ui/chrome_pages.h"
 #include "chrome/browser/ui/browser_window/public/browser_collection_observer.h"
 #include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
@@ -145,6 +146,7 @@
 #include "components/tabs/public/tab_interface.h"
 #include "components/url_formatter/elide_url.h"
 #include "components/url_formatter/url_fixer.h"
+#include "extensions/browser/extension_registry.h"
 #include "components/viz/common/frame_sinks/copy_output_result.h"
 #include "content/public/browser/favicon_status.h"
 #include "content/public/browser/media_session.h"
@@ -5304,7 +5306,22 @@ bool SidebarMac::OpenStandaloneLittleWindow(Profile* profile, const GURL& url) {
   return true;
 }
 
+namespace {
+// chrome.windows.create({type: "popup"}) opens an app popup named for the
+// calling extension. Web app popups and other window types keep their frames.
+bool IsExtensionPopup(BrowserWindowInterface* browser) {
+  if (browser->GetType() != BrowserWindowInterface::TYPE_APP_POPUP) return false;
+  const auto* state = BrowserInitState::From(browser);
+  constexpr std::string_view kPrefix = "_crx_";
+  const std::string_view name = state ? state->create_params().app_name : std::string_view();
+  return name.starts_with(kPrefix) &&
+         extensions::ExtensionRegistry::Get(browser->GetProfile())->enabled_extensions().GetByID(
+             std::string(name.substr(kPrefix.size())));
+}
+}  // namespace
+
 void SidebarMac::AttachLittleWindow(BrowserWindowInterface* browser, content::WebContents* page) {
+  if (browser->GetType() != BrowserWindowInterface::TYPE_POPUP && !IsExtensionPopup(browser)) return;
   if (!IsSwiftUIEnabled() || !browser->GetProfile()->IsRegularProfile()) return;
   Impl::AttachLittleWindow(browser, page);
   ExternalLink() = &Impl::OpenExternalLink;

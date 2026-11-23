@@ -86,5 +86,21 @@ private final class CommandBarTestRecorder { var messages: [[String: Any]] = [] 
     precondition(model.address == "https://example.test/a")
     model.submitAddress("https://edit.test/")
     precondition(recorder.messages.last?["action"] as? String == "navigate", "Cmd+L preserves in-place navigation")
+    model.cancelAddressEditing()
+    panelsShown = 0
+    model.activateAddress()
+    precondition(panelsShown == 1 && model.editingAddress && model.address == "https://example.test/a" &&
+                 model.addressDisposition == .currentTab,
+                 "Clicking the address on a loaded page shows its URL for editing")
+    model.submitAddress("https://clicked.test/")
+    precondition(recorder.messages.last?["action"] as? String == "navigate" &&
+                 recorder.messages.last?["text"] as? String == "https://clicked.test/",
+                 "Submitting a clicked address navigates the current tab")
+    model.cancelAddressEditing()
+    model.update(snapshot.replacingOccurrences(of: "https://example.test/a", with: "about:blank"))
+    model.activateAddress()
+    precondition(model.editingAddress && model.address.isEmpty && model.addressDisposition == .newTab,
+                 "Clicking the address on a blank page opens the composer")
+    model.cancelAddressEditing()
     model.shutdown()
 }
