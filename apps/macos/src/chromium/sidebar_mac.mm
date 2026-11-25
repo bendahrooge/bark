@@ -891,8 +891,11 @@ class SidebarMac::Impl : public TabStripModelObserver,
       NSWindow* window = i == 0 ? NSApp.keyWindow : NSApp.mainWindow;
       if (!window) continue;
       for (auto* host : Instances()) {
+        // A host is registered while its Browser is still being constructed,
+        // before the Browser has a window. A Little window can be key then.
+        auto* browser_window = host->view_->browser()->GetWindow();
         if (host->tabs_ && !host->tabs_->closing_all() && !host->view_->browser()->IsDeleteScheduled() &&
-            host->view_->browser()->GetWindow()->IsVisible() &&
+            browser_window && browser_window->IsVisible() &&
             host->view_->GetNativeWindow().GetNativeNSWindow() == window) return host;
       }
     }
@@ -2794,12 +2797,26 @@ class SidebarMac::Impl : public TabStripModelObserver,
       }
       // Opening a normal window is deferred until promotion if the user
       // closed the last one while reading. Its sidebar adopts this popup.
+      // This window may be the first since launch, when a link opened Bark
+      // straight into a Little window. Let it restore the saved session so
+      // the promoted page joins the user's tabs instead of replacing them.
       if (!record->owner) {
         BrowserWindowCreateParams params(browser->GetProfile(), true);
-        params.should_trigger_session_restore = false;
         if (!CreateBrowserWindow(std::move(params))) return;
       }
-      if (record->owner) record->owner->MovePopupToTab(record, false, space);
+      if (auto* owner = record->owner.get()) {
+        auto* destination = owner->view_->browser();
+        auto moved = page ? page->GetWeakPtr() : base::WeakPtr<content::WebContents>();
+        owner->MovePopupToTab(record, false, space);
+        // A standalone Little window is left out of the session, so the page
+        // arrives without saved history. Record it, or a restart drops the tab.
+        auto* session = SessionServiceFactory::GetForProfileIfExisting(destination->GetProfile());
+        if (session && moved &&
+            destination->GetTabStripModel()->GetIndexOfWebContents(moved.get()) != TabStripModel::kNoTab) {
+          session->TrackWindowAfterTabMove(destination);
+          session->TabRestored(moved.get(), false);
+        }
+      }
     } else if (auto* host = record->owner.get()) {
       if (command == "expand" && record->swift) host->CapturePeekForPromotion(record);
       else if (command == "expand") host->MovePopupToTab(record);

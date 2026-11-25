@@ -417,6 +417,7 @@ try {
   state = await command();
   assert.equal(tabFor(state, '/ordinary'), undefined, 'New-tab startup skips the old session');
   assert.equal(tabFor(state, '/slow-pin'), undefined, 'A removed pin stays removed on new-tab startup');
+  assert.equal(tabFor(state, '/favorite').space, 'bark.favorites', 'New-tab startup keeps Favorites in Favorites');
   assertDormant(state, pins);
   await select('/pin-b');
   await waitFor(state => {
@@ -424,7 +425,7 @@ try {
     return row?.title === 'Saved /pin-b' && row.faviconValid && row.favicon && row.favicon !== savedRows.get('/pin-b').favicon;
   }, 'live title and favicon replace cached values after selection');
   assertDormant(await command(), ['/pin-a', '/favorite']);
-  report.checks.push('New-tab startup shows saved titles and favicons before selection, and removed pins stay removed');
+  report.checks.push('New-tab startup shows saved titles and favicons before selection, keeps Favorites, and removed pins stay removed');
   await close();
   report.passed = true;
   console.log(`${report.checks.length} focused pinned-tab checks passed`);

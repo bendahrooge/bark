@@ -22,7 +22,7 @@
     },
     {
       "file": "0004-spaces-sessions.patch",
-      "sha256": "1c5473b1375e9c7066411fd52bfd937ac2c328bd97c0e5283dd1cd2f63bd0c2c"
+      "sha256": "de98ccfd99ea4307fdeb909e2a382b6de33fa3517e0912171b555bc90e5feb13"
     },
     {
       "file": "0005-tab-behavior.patch",

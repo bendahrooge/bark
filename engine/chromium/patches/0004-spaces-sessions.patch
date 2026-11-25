@@ -78,7 +78,7 @@ diff --git a/chrome/browser/prefs/browser_prefs.cc b/chrome/browser/prefs/browse
 diff --git a/chrome/browser/prefs/session_startup_pref.cc b/chrome/browser/prefs/session_startup_pref.cc
 --- a/chrome/browser/prefs/session_startup_pref.cc
 +++ b/chrome/browser/prefs/session_startup_pref.cc
-@@ -3,6 +3,7 @@
+@@ -3,9 +3,14 @@
  // found in the LICENSE file.
  
  #include "chrome/browser/prefs/session_startup_pref.h"
@@ -86,13 +86,26 @@ diff --git a/chrome/browser/prefs/session_startup_pref.cc b/chrome/browser/prefs
  
  #include <stddef.h>
  
-@@ -66,6 +67,10 @@ void SessionStartupPref::RegisterProfilePrefs(
++#if BUILDFLAG(IS_MAC)
++#include <CoreFoundation/CoreFoundation.h>
++#endif
++
+ #include <string>
+ 
+ #include "base/feature_list.h"
+@@ -66,6 +71,16 @@ void SessionStartupPref::RegisterProfilePrefs(
  
  // static
  SessionStartupPref::Type SessionStartupPref::GetDefaultStartupType() {
 +#if BUILDFLAG(IS_MAC)
-+  if (base::CommandLine::ForCurrentProcess()->HasSwitch("bark-swift-ui"))
++  // Bark's sidebar keeps Favorites and pins in the session. Release builds
++  // turn it on in Info.plist rather than with --bark-swift-ui.
++  if (base::CommandLine::ForCurrentProcess()->HasSwitch("bark-swift-ui") ||
++      CFBundleGetValueForInfoDictionaryKey(CFBundleGetMainBundle(),
++                                           CFSTR("BarkEnableSwiftUI")) ==
++          kCFBooleanTrue) {
 +    return SessionStartupPref::LAST;
++  }
 +#endif
  #if BUILDFLAG(IS_CHROMEOS)
    return SessionStartupPref::LAST;
@@ -176,7 +189,28 @@ diff --git a/chrome/browser/sessions/session_restore.cc b/chrome/browser/session
 diff --git a/chrome/browser/sessions/session_service.cc b/chrome/browser/sessions/session_service.cc
 --- a/chrome/browser/sessions/session_service.cc
 +++ b/chrome/browser/sessions/session_service.cc
-@@ -438,6 +438,21 @@ void SessionService::WindowOpened(BrowserWindowInterface* browser) {
+@@ -74,6 +74,7 @@
+ #endif  // BUILDFLAG(IS_CHROMEOS)
+ 
+ #if BUILDFLAG(IS_MAC)
++#include "bark/native_ui_mac.h"
+ #include "chrome/browser/app_controller_mac.h"
+ #endif
+ 
+@@ -232,8 +233,10 @@ bool SessionService::ShouldRestore(BrowserWindowInterface* browser) {
+       !SessionRestore::IsRestoring(profile())
+ #if BUILDFLAG(IS_MAC)
+       // On OSX, a new window should not start a new session if it was opened
+-      // from the dock or the menubar.
+-      && !app_controller_mac::IsOpeningNewWindow()
++      // from the dock or the menubar. Bark instead brings back the last
++      // window: its Favorites and pins live only in that profile's session,
++      // and other profiles in the same window restore when Bark opens them.
++      && (bark::IsSwiftUIEnabled() || !app_controller_mac::IsOpeningNewWindow())
+ #endif  // BUILDFLAG(IS_MAC)
+   ) {
+     return true;
+@@ -438,6 +441,21 @@ void SessionService::WindowOpened(BrowserWindowInterface* browser) {
        BrowserWindow::FromBrowser(browser)->IsVisibleOnAllWorkspaces());
  }
  
@@ -440,7 +474,7 @@ diff --git a/chrome/browser/ui/startup/startup_browser_creator_impl.cc b/chrome/
  #include "chrome/browser/apps/platform_apps/install_chrome_app.h"
  #include "chrome/browser/browser_process.h"
  #include "chrome/browser/custom_handlers/protocol_handler_registry_factory.h"
-@@ -457,6 +462,13 @@ BrowserWindowInterface* StartupBrowserCreatorImpl::OpenTabsInBrowser(
+@@ -457,6 +462,14 @@ BrowserWindowInterface* StartupBrowserCreatorImpl::OpenTabsInBrowser(
              ? ui::mojom::WindowOpenDisposition::kNewForegroundTab
              : ui::mojom::WindowOpenDisposition::kNewBackgroundTab;
      params.tabstrip_add_types = add_types;
@@ -449,11 +483,25 @@ diff --git a/chrome/browser/ui/startup/startup_browser_creator_impl.cc b/chrome/
 +    if (tab.type == StartupTab::Type::kPinned && bark::IsSwiftUIEnabled()) {
 +      params.contents_to_insert = bark::CreateLazyTab(profile_, tab.url);
 +      bark::SetTabMeta(params.contents_to_insert.get(), tab.bark_tab_meta);
++      bark::SetTabSpace(params.contents_to_insert.get(), tab.bark_space);
 +    }
 +#endif
  
  #if BUILDFLAG(ENABLE_RLZ)
      if (process_startup == chrome::startup::IsProcessStartup::kYes &&
+diff --git a/chrome/browser/ui/startup/startup_tab.cc b/chrome/browser/ui/startup/startup_tab.cc
+--- a/chrome/browser/ui/startup/startup_tab.cc
++++ b/chrome/browser/ui/startup/startup_tab.cc
+@@ -11,4 +11,9 @@
+ StartupTab::StartupTab(GURL url, bool is_untrusted_launch)
+     : url(std::move(url)), is_untrusted_launch(is_untrusted_launch) {}
+ 
++StartupTab::StartupTab(const StartupTab&) = default;
++StartupTab::StartupTab(StartupTab&&) = default;
++StartupTab& StartupTab::operator=(const StartupTab&) = default;
++StartupTab& StartupTab::operator=(StartupTab&&) = default;
++
+ StartupTab::~StartupTab() = default;
 diff --git a/chrome/browser/ui/startup/startup_tab.h b/chrome/browser/ui/startup/startup_tab.h
 --- a/chrome/browser/ui/startup/startup_tab.h
 +++ b/chrome/browser/ui/startup/startup_tab.h
@@ -468,13 +516,26 @@ diff --git a/chrome/browser/ui/startup/startup_tab.h b/chrome/browser/ui/startup
  #include "url/gurl.h"
  
  // Represents tab data at startup.
-@@ -28,6 +30,11 @@ struct StartupTab {
+@@ -21,6 +23,10 @@
+ 
+   explicit StartupTab(GURL url, Type type = Type::kNormal);
+   StartupTab(GURL url, bool is_untrusted_launch);
++  StartupTab(const StartupTab&);
++  StartupTab(StartupTab&&);
++  StartupTab& operator=(const StartupTab&);
++  StartupTab& operator=(StartupTab&&);
+   ~StartupTab();
+ 
+   // The url to load.
+@@ -28,6 +34,13 @@
  
    Type type = Type::kNormal;
  
 +#if BUILDFLAG(IS_MAC)
 +  // Per-pin sidebar metadata saved alongside the URL in the pinned-tabs pref.
 +  std::string bark_tab_meta;
++  // The pin's space, or Favorites, so it returns to the same place.
++  std::string bark_space;
 +#endif
 +
    // True if this tab was launched from an untrusted external custom protocol
@@ -508,7 +569,7 @@ diff --git a/chrome/browser/ui/tabs/pinned_tab_codec.cc b/chrome/browser/ui/tabs
  #include "chrome/browser/profiles/profile.h"
  #include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
  #include "chrome/browser/ui/browser_window/public/browser_window_interface_iterator.h"
-@@ -29,9 +33,14 @@ namespace {
+@@ -29,9 +33,17 @@ namespace {
  const char kURL[] = "url";
  
  // Returns a base::DictValue representing the supplied StartupTab.
@@ -521,11 +582,14 @@ diff --git a/chrome/browser/ui/tabs/pinned_tab_codec.cc b/chrome/browser/ui/tabs
 +  if (!tab.bark_tab_meta.empty()) {
 +    dict.Set(bark::kTabMetaKey, tab.bark_tab_meta);
 +  }
++  if (!tab.bark_space.empty()) {
++    dict.Set(bark::kTabSpaceKey, tab.bark_space);
++  }
 +#endif
    return dict;
  }
  
-@@ -48,7 +57,11 @@ void EncodePinnedTabs(BrowserWindowInterface* browser,
+@@ -48,7 +60,12 @@ void EncodePinnedTabs(BrowserWindowInterface* browser,
      NavigationEntry* entry =
          web_contents->GetController().GetLastCommittedEntry();
      if (entry) {
@@ -533,12 +597,13 @@ diff --git a/chrome/browser/ui/tabs/pinned_tab_codec.cc b/chrome/browser/ui/tabs
 +      StartupTab pin(entry->GetURL(), StartupTab::Type::kPinned);
 +#if BUILDFLAG(IS_MAC)
 +      pin.bark_tab_meta = bark::GetTabMeta(web_contents);
++      pin.bark_space = bark::GetTabSpace(web_contents);
 +#endif
 +      serialized_tabs.Append(EncodeTab(pin));
      }
    }
  }
-@@ -57,9 +70,16 @@ void EncodePinnedTabs(BrowserWindowInterface* browser,
+@@ -57,9 +74,19 @@ void EncodePinnedTabs(BrowserWindowInterface* browser,
  // on success.
  std::optional<StartupTab> DecodeTab(const base::DictValue& value) {
    const std::string* const url_string = value.FindString(kURL);
@@ -553,12 +618,15 @@ diff --git a/chrome/browser/ui/tabs/pinned_tab_codec.cc b/chrome/browser/ui/tabs
 +  if (const auto* meta = value.FindString(bark::kTabMetaKey)) {
 +    pin.bark_tab_meta = *meta;
 +  }
++  if (const auto* space = value.FindString(bark::kTabSpaceKey)) {
++    pin.bark_space = *space;
++  }
 +#endif
 +  return pin;
  }
  
  }  // namespace
-@@ -101,7 +121,7 @@ void PinnedTabCodec::WritePinnedTabs(Profile* profile,
+@@ -101,7 +128,7 @@ void PinnedTabCodec::WritePinnedTabs(Profile* profile,
    base::ListValue& values = update.Get();
    values.clear();
    for (const auto& tab : tabs) {
