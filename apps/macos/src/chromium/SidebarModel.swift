@@ -162,10 +162,21 @@ enum AddressDisposition {
         let velocity: CGFloat
         let rate: CGFloat
 
-        var offset: CGFloat {
-            let t = CGFloat(ProcessInfo.processInfo.systemUptime - start)
+        var offset: CGFloat { offset(after: ProcessInfo.processInfo.systemUptime - start) }
+
+        func offset(after elapsed: TimeInterval) -> CGFloat {
+            let t = CGFloat(elapsed)
             let distance = from - to
             return to + (distance + (velocity + rate * distance) * t) * exp(-rate * t)
+        }
+
+        /// When the pages come within a point of rest. A flick, or a release
+        /// partway across, gets there sooner than `limit`.
+        func settleTime(limit: TimeInterval) -> TimeInterval {
+            let frame = 1.0 / 120
+            var time = limit
+            while time > 0.1, abs(offset(after: time - frame) - to) < 1 { time -= frame }
+            return time
         }
     }
 
@@ -177,13 +188,20 @@ enum AddressDisposition {
     }
 
     @Published private var slide: SpaceSlide?
-    @Published private(set) var spaceSwipeOffset: CGFloat = 0
+    // Where the pager is headed. Core Animation moves the pages (`pager`), so
+    // finger movement does not redraw the views observing this model; they
+    // see only which side is showing.
+    private(set) var spaceSwipeOffset: CGFloat = 0
+    @Published private var swipeSide: CGFloat = 0
+    let pager = SpacePagerDriver()
+    let swipeFade = SpaceSwipeFade()
     private var spaceDrag: SpaceDrag?
     private var queuedHandoffSpace: String?
     private var swipeCommitTarget: String? { slide?.committed == true ? slide?.target?.id : nil }
     private var slideLanded = false
     private var swipeResetWork: DispatchWorkItem?
-    private static let spaceDragGain: CGFloat = 0.5
+    // The pages follow the fingers point for point.
+    private static let spaceDragGain: CGFloat = 1
 
     private let reduceSpaceMotion: () -> Bool
 
@@ -314,6 +332,12 @@ enum AddressDisposition {
         } else {
             send("close", id: tab.id)
         }
+    }
+
+    /// Shows a tab here: a pin open in another window moves into this one.
+    func select(_ tab: ChromiumTab) {
+        if let window = tab.elsewhere { send("claimTab", id: tab.id, metadata: ["window": String(window)]) }
+        else { send("select", id: tab.id) }
     }
 
     func send(_ action: String, id: Int? = nil, text: String? = nil, width: Double? = nil, metadata: [String: String]? = nil) {
@@ -454,12 +478,15 @@ enum AddressDisposition {
             guard let active, !active.isBlank else { return }
             copyLink(active, markdown: action == .copyMarkdown)
         case .nextTab, .previousTab:
+            // Cycling stays in this window; pins open elsewhere are skipped.
+            let tabs = tabs.filter { !$0.isElsewhere }
             guard tabs.count > 1 else { return }
             let step = action == .nextTab ? 1 : -1
             let index = tabs.firstIndex { $0.active }.map { ($0 + step + tabs.count) % tabs.count } ?? 0
             send("select", id: tabs[index].id)
         case .tab(let number):
-            if tabs.indices.contains(number - 1) { send("select", id: tabs[number - 1].id) }
+            // Numbers follow the sidebar, so a pin open elsewhere moves here.
+            if tabs.indices.contains(number - 1) { select(tabs[number - 1]) }
         case .nextSpace, .previousSpace:
             guard snapshot.switchingSpace != true, let index = spaces.firstIndex(where: { $0.active }) else { return }
             let target = index + (action == .nextSpace ? 1 : -1)
@@ -557,11 +584,24 @@ enum AddressDisposition {
     var outgoingTabs: [ChromiumTab] { slide?.originTabs ?? snapshot.sidebarTabs }
     var outgoingTheme: SpaceTheme { slide?.theme ?? theme }
     var outgoingEmoji: String { slide?.emoji ?? emoji }
-    var spaceInMotion: Bool { (slide != nil && !slideLanded) || spaceSwipeOffset != 0 }
-    var swipeDirection: CGFloat { slide?.direction ?? (spaceSwipeOffset < 0 ? -1 : 1) }
+    var spaceInMotion: Bool { (slide != nil && !slideLanded) || swipeSide != 0 }
+    var swipeDirection: CGFloat { slide?.direction ?? (swipeSide < 0 ? -1 : 1) }
     var swipeNeighbor: ChromiumSpace? {
         if let slide { return slide.target }
-        return spaceSwipeOffset < 0 ? nextSpace : spaceSwipeOffset > 0 ? previousSpace : nil
+        return swipeSide < 0 ? nextSpace : swipeSide > 0 ? previousSpace : nil
+    }
+
+    private func setSwipeTarget(_ offset: CGFloat) {
+        spaceSwipeOffset = offset
+        let side: CGFloat = offset < 0 ? -1 : offset > 0 ? 1 : 0
+        if side != swipeSide { swipeSide = side }
+    }
+
+    /// Follows the fingers, without animation.
+    private func trackSwipe(to offset: CGFloat) {
+        setSwipeTarget(offset)
+        if swipeFade.offset != offset { swipeFade.offset = offset }
+        pager.move(to: offset)
     }
     func swipePage(in direction: CGFloat) -> ChromiumSpace? {
         if direction == swipeDirection { return swipeNeighbor }
@@ -622,12 +662,12 @@ enum AddressDisposition {
         let offset = initialOffset + drag.travel * Self.spaceDragGain
         let target = offset < 0 ? nextSpace : previousSpace
         if let target {
-            spaceSwipeOffset = min(width, max(-width, offset))
+            trackSwipe(to: min(width, max(-width, offset)))
             if target.profile != nil, target.profile != snapshot.profileId, preparedSpaces.insert(target.id).inserted {
                 send("prepareSpace", text: target.id)
             }
         } else {
-            spaceSwipeOffset = min(48, max(-48, offset * 0.5))
+            trackSwipe(to: min(48, max(-48, offset * 0.5)))
         }
     }
 
@@ -670,6 +710,7 @@ enum AddressDisposition {
         slideLanded = false
         let remaining = destination - spaceSwipeOffset
         let animation: Animation?
+        var motion: SpacePagerMotion?
         let duration: TimeInterval
         var spring: SpaceSpring?
         if reduceSpaceMotion() {
@@ -682,15 +723,20 @@ enum AddressDisposition {
             // through the last few pixels.
             duration = 0.28
             animation = .timingCurve(0.20, 0.12, 0.18, 1, duration: duration)
+            motion = .curve(x1: 0.20, y1: 0.12, x2: 0.18, y2: 1, duration: duration)
         } else {
             // A critically damped spring carries the displayed velocity into
             // release. initialVelocity is measured in remaining distances/sec.
             let relativeSpeed = abs(remaining) > 1 ? velocity * Self.spaceDragGain / remaining : 0
             let rate: CGFloat = committed ? 21 : 24
             let speed = min(rate, max(-rate, relativeSpeed))
-            spring = SpaceSpring(from: spaceSwipeOffset, to: destination, velocity: speed * remaining, rate: rate)
+            let release = SpaceSpring(from: spaceSwipeOffset, to: destination, velocity: speed * remaining, rate: rate)
+            spring = release
             animation = .interpolatingSpring(mass: 1, stiffness: rate * rate, damping: 2 * rate, initialVelocity: speed)
-            duration = committed ? 0.42 : 0.35
+            let limit = committed ? 0.42 : 0.35
+            motion = .spring(rate: rate, initialVelocity: speed, duration: limit)
+            // Hand the sidebar back as soon as the pages look at rest.
+            duration = release.settleTime(limit: limit)
         }
         let opposite = spaceSwipeOffset * direction < 0 ? neighbor(of: origin.id, direction: -direction) : nil
         slide = SpaceSlide(origin: origin, originTabs: snapshot.sidebarTabs, theme: theme, emoji: emoji,
@@ -718,19 +764,25 @@ enum AddressDisposition {
         }
         swipeResetWork = landed
         if let animation {
+            // The pages slide in the render server. Commit that animation in
+            // this turn, ahead of the native switch below, which occupies the
+            // main thread. Only the backdrop's color fade is left to SwiftUI.
             let start = { [weak self] in
                 guard let self, !landed.isCancelled else { return }
-                withAnimation(animation) { self.spaceSwipeOffset = destination }
+                self.setSwipeTarget(destination)
+                withAnimation(animation) { self.swipeFade.offset = destination }
                 DispatchQueue.main.asyncAfter(deadline: .now() + duration, execute: landed)
             }
             if fromClick {
-                // Mount the incoming page before the animation clock starts.
+                // The incoming page mounts in the update that starts its slide.
+                pager.moveWithContent(to: destination, motion: motion)
                 DispatchQueue.main.async { start() }
             } else {
+                pager.move(to: destination, motion: motion)
                 start()
             }
         } else {
-            spaceSwipeOffset = 0
+            trackSwipe(to: 0)
             landed.perform()
         }
         if committed, let target {
@@ -756,8 +808,11 @@ enum AddressDisposition {
         transaction.disablesAnimations = true
         withTransaction(transaction) {
             slide = nil
-            spaceSwipeOffset = offset
+            setSwipeTarget(offset)
+            if swipeFade.offset != offset { swipeFade.offset = offset }
         }
+        // The pages change with this reset; move them in that same update.
+        pager.moveWithContent(to: offset)
     }
 
     func finishSpaceSwipe() {

@@ -125,6 +125,7 @@ if (is_mac) {
       "mac/MediaPlayer.swift",
       "mac/SiteControls.swift",
       "mac/PageFrame.swift",
+      "mac/SpacePager.swift",
       "mac/Organization.swift",
       "mac/CommandBar.swift",
       "mac/Preferences.swift",

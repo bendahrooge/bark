@@ -714,8 +714,9 @@ class SidebarMac::Impl : public TabStripModelObserver,
     const bool expanded = !collapsed_ || revealed_;
     site_anchor_->SetBounds(expanded ? sidebar_width - (collapsed_ ? 39 : 32) + panel_x : 84,
                             expanded ? top + inset + 9 : 5, 24, 28);
-    extensions_anchor_->SetBounds(expanded ? sidebar_width - (collapsed_ ? 65 : 58) + panel_x : 84,
-                                  expanded ? top + inset + 9 : 5, 24, 28);
+    // The address bar has no extensions button; extension popups open from
+    // the menu bar and hang beneath the site controls button instead.
+    extensions_anchor_->SetBoundsRect(site_anchor_->bounds());
     site_anchor_->SetVisible(can_show);
     extensions_anchor_->SetVisible(can_show);
   }
@@ -763,6 +764,9 @@ class SidebarMac::Impl : public TabStripModelObserver,
       if (auto* contents = selection.new_contents.get()) {
         TouchTab(contents);
         const int id = sessions::SessionTabHelper::IdForTab(contents).id();
+        // Each space reopens on the tab last used in it.
+        if (const std::string space = GetTabSpace(contents); space != kFavoritesSpace && SpaceBelongsHere(space))
+          selected_tabs_[space] = id;
         std::erase(recent_tabs_, id);
         recent_tabs_.insert(recent_tabs_.begin(), id);
         if (recent_tabs_.size() > 200) recent_tabs_.pop_back();
@@ -924,10 +928,11 @@ class SidebarMac::Impl : public TabStripModelObserver,
   static void PopulateExtensionsMenu(NSMenu* menu) {
     [menu removeAllItems];
     auto* host = ActiveMenuHost();
-    auto add = [&](NSString* title, NSString* action, bool enabled) {
+    auto add = [&](NSString* title, NSString* action, bool enabled, NSImage* image = nil) {
       NSMenuItem* item = [[NSMenuItem alloc] initWithTitle:title action:@selector(invokeItem:) keyEquivalent:@""];
       item.target = menu.delegate;
       item.enabled = enabled;
+      item.image = image;
       item.representedObject = @{@"action": action,
           @"window": @(host ? host->view_->browser()->GetSessionID().id() : -1)};
       [menu addItem:item];
@@ -943,9 +948,18 @@ class SidebarMac::Impl : public TabStripModelObserver,
       return [base::SysUTF16ToNSString(a->GetActionName())
           localizedStandardCompare:base::SysUTF16ToNSString(b->GetActionName())] == NSOrderedAscending;
     });
-    for (auto* action : actions)
+    for (auto* action : actions) {
+      auto* active = host->tabs_->GetActiveWebContents();
+      // The same icon the toolbar shows, sized to a menu item's image slot.
+      NSImage* image = nil;
+      const auto icon = action->GetIcon(active, gfx::Size(16, 16));
+      if (!icon.IsEmpty()) {
+        image = gfx::Image(icon.Rasterize(host->view_->GetColorProvider())).AsNSImage();
+        image.size = NSMakeSize(16, 16);
+      }
       add(base::SysUTF16ToNSString(action->GetActionName()), base::SysUTF8ToNSString(action->GetId()),
-          action->IsEnabled(host->tabs_->GetActiveWebContents()));
+          action->IsEnabled(active), image);
+    }
     if (actions.empty()) add(host ? @"No enabled extensions" : @"Open a browser window to use extensions", @"", false);
     [menu addItem:NSMenuItem.separatorItem];
     add(@"Manage Extensions…", @"bark.manageExtensions", host != nullptr);
@@ -3322,11 +3336,21 @@ class SidebarMac::Impl : public TabStripModelObserver,
     if (id != active_space_) just_closed_pin_.reset();
     OpenPendingTabs(id);
     active_space_ = id;
+    // The tab last used in this space; without one (after a restart, or when
+    // it closed), the space's most recently seen tab.
+    const auto remembered = selected_tabs_.find(id);
     int selection = -1;
+    double latest = -1;
     for (int i = 0; i < tabs_->count(); ++i) {
       auto* contents = tabs_->GetWebContentsAt(i);
       if (GetTabSpace(contents) != id) continue;
-      if (selection < 0 || selected_tabs_[id] == sessions::SessionTabHelper::IdForTab(contents).id()) selection = i;
+      if (remembered != selected_tabs_.end() &&
+          remembered->second == sessions::SessionTabHelper::IdForTab(contents).id()) {
+        selection = i;
+        break;
+      }
+      const double seen = ReadTabMeta(contents).FindDouble("lastActive").value_or(0);
+      if (selection < 0 || seen > latest) { selection = i; latest = seen; }
     }
     if (selection >= 0) tabs_->ActivateTabAt(selection);
     else NavigateTo(GURL("about:blank"), true);
@@ -3525,6 +3549,8 @@ class SidebarMac::Impl : public TabStripModelObserver,
     if (IsPrivate()) return;
     for (auto* host : Instances())
       if (host != this && host->group_ == group_ && !host->IsPrivate()) host->QueueSnapshot();
+    // Other windows list this window's pins.
+    for (auto* host : SiblingWindows()) host->QueueSnapshot();
   }
 
   void Snapshot() {
@@ -4173,6 +4199,16 @@ class SidebarMac::Impl : public TabStripModelObserver,
       if (!IsPrivate() && GetTabSpace(contents) != active_space_) continue;
       tab_list.Append(TabValue(i, tabs_->active_index() == i));
     }
+    for (auto* host : SiblingWindows()) {
+      for (int i = 0; i < host->tabs_->count() && host->tabs_->IsTabPinned(i); ++i) {
+        auto* contents = host->tabs_->GetWebContentsAt(i);
+        const bool favorite = host->IsFavorite(contents);
+        if (!favorite && GetTabSpace(contents) != active_space_) continue;
+        auto tab = host->TabValue(i, false);
+        tab.Set("elsewhere", host->view_->browser()->GetSessionID().id());
+        (favorite ? favorites : tab_list).Append(std::move(tab));
+      }
+    }
     auto* profile = view_->GetProfile();
     const bool incognito = profile->IsOffTheRecord();
     base::ListValue spaces;
@@ -4283,6 +4319,70 @@ class SidebarMac::Impl : public TabStripModelObserver,
     return !IsPrivate() && GetTabSpace(contents) == kFavoritesSpace;
   }
 
+  // Before a tab leaves this window, show another of the space's tabs.
+  void SelectAwayFrom(content::WebContents* contents) {
+    if (tabs_->GetActiveWebContents() != contents) return;
+    int next = -1;
+    for (int i = 0; i < tabs_->count(); ++i) {
+      auto* candidate = tabs_->GetWebContentsAt(i);
+      if (candidate == contents || (!InActiveSpace(i) && !IsFavorite(candidate)) ||
+          candidate->GetController().NeedsReload()) continue;
+      if (next < 0 || (tabs_->IsTabPinned(next) && !tabs_->IsTabPinned(i))) next = i;
+    }
+    if (next >= 0) tabs_->ActivateTabAt(next);
+    // Keep the source workspace (including its other profile hosts) alive
+    // without waking a dormant pin when its last open tab leaves.
+    else NavigateTo(GURL("about:blank"), true);
+  }
+
+  // Other Bark windows of this profile, which can hold this space's pins
+  // and Favorites. One live tab can be in only one window.
+  std::vector<Impl*> SiblingWindows() const {
+    std::vector<Impl*> windows;
+    if (IsPrivate()) return windows;
+    for (auto* host : Instances()) {
+      if (host == this || host->IsPrivate() || host->view_->GetProfile() != view_->GetProfile() ||
+          !host->tabs_ || host->tabs_->closing_all() || host->view_->browser()->IsDeleteScheduled() ||
+          host->group_->closing) continue;
+      windows.push_back(host);
+    }
+    return windows;
+  }
+
+  // Moves a pin or Favorite that is open in another window into this one,
+  // with its live page, history and session, and shows it here.
+  void ClaimTab(int window_id, int tab_id) {
+    if (IsPrivate() || !tabs_ || tabs_->closing_all() || group_->closing) return;
+    Impl* source = nullptr;
+    for (auto* host : SiblingWindows())
+      if (host->view_->browser()->GetSessionID().id() == window_id) source = host;
+    if (!source) return;
+    int index = source->FindTab(tab_id);
+    if (!source->tabs_->ContainsIndex(index) || !source->tabs_->IsTabPinned(index)) return;
+    auto* contents = source->tabs_->GetWebContentsAt(index);
+    const std::string space = GetTabSpace(contents);
+    if (space != kFavoritesSpace && space != active_space_) return;
+    source->AdoptTabs();
+    AdoptTabs();
+    source->Unsplit(index);
+    source->SelectAwayFrom(contents);
+    index = source->tabs_->GetIndexOfWebContents(contents);
+    if (index == TabStripModel::kNoTab) return;
+    chrome::MoveTabsToExistingWindow(source->view_->browser(), view_->browser(), {index});
+    index = tabs_->GetIndexOfWebContents(contents);
+    if (index == TabStripModel::kNoTab) return;
+    if (!tabs_->IsTabPinned(index)) index = tabs_->SetTabPinned(index, true);
+    AdoptTabs();
+    // Rewrite the saved window membership, as for a tab moved to a new window.
+    PersistTab(contents);
+    if (auto* session = SessionServiceFactory::GetForProfileIfExisting(view_->GetProfile()))
+      session->TrackWindowAfterTabMove(view_->browser());
+    tabs_->ActivateTabAt(tabs_->GetIndexOfWebContents(contents));
+    contents->Focus();
+    QueueGroupSnapshot();
+    source->QueueGroupSnapshot();
+  }
+
   // Move the real tab into an empty, independent browser of the same profile.
   // No startup/session tabs are copied into this window.
   void DetachTabToWindow(int index, std::optional<NSPoint> drop_point,
@@ -4311,19 +4411,7 @@ class SidebarMac::Impl : public TabStripModelObserver,
     index = tabs_->GetIndexOfWebContents(contents);
     if (tabs_->IsTabPinned(index)) index = tabs_->SetTabPinned(index, false);
     if (!IsPrivate()) SetTabSpace(contents, active_space_);
-    if (tabs_->GetActiveWebContents() == contents) {
-      int next = -1;
-      for (int i = 0; i < tabs_->count(); ++i) {
-        auto* candidate = tabs_->GetWebContentsAt(i);
-        if (candidate == contents || (!InActiveSpace(i) && !IsFavorite(candidate)) ||
-            candidate->GetController().NeedsReload()) continue;
-        if (next < 0 || (tabs_->IsTabPinned(next) && !tabs_->IsTabPinned(i))) next = i;
-      }
-      if (next >= 0) tabs_->ActivateTabAt(next);
-      // Keep the source workspace (including its other profile hosts) alive
-      // without waking a dormant pin when its last open tab is dragged out.
-      else NavigateTo(GURL("about:blank"), true);
-    }
+    SelectAwayFrom(contents);
     index = tabs_->GetIndexOfWebContents(contents);
     if (before_move_for_testing) std::move(before_move_for_testing).Run();
     chrome::MoveTabsToExistingWindow(source, destination, {index});
@@ -4815,6 +4903,13 @@ class SidebarMac::Impl : public TabStripModelObserver,
       CloseOtherTabs(index, *action == "closeBelow");
     } else if (*action == "moveTabToSpace" && text) {
       MoveTabToSpace(index, *text);
+    } else if (*action == "claimTab") {
+      const auto* metadata = message->FindDict("metadata");
+      const std::string* window = metadata ? metadata->FindString("window") : nullptr;
+      int window_id;
+      if (window && base::StringToInt(*window, &window_id))
+        ClaimTab(window_id, message->FindInt("id").value_or(-1));
+      return;
     } else if (*action == "detachTab" && tabs_->ContainsIndex(index)) {
       std::optional<NSPoint> point;
       if (const auto* metadata = message->FindDict("metadata")) {

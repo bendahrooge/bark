@@ -39,6 +39,11 @@ struct ChromiumTab: Decodable, Identifiable {
     }
     // The sidebar folder of a pinned tab.
     var folder: String? = nil
+    // A pin or Favorite of this space that is open in another window (that
+    // window's session ID). One live tab can be in only one window, so the
+    // row is shown dimmed, and choosing it moves the tab into this window.
+    var elsewhere: Int? = nil
+    var isElsewhere: Bool { elsewhere != nil }
     // A JPEG of the page, in the Control-Tab switcher only.
     var thumbnail: String? = nil
     // Set by Chromium from the committed entry, even while another URL is loading.

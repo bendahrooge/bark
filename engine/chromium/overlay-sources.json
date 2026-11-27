@@ -13,6 +13,7 @@
   "mac/MediaPlayer.swift": "apps/macos/src/chromium/MediaPlayer.swift",
   "mac/SiteControls.swift": "apps/macos/src/chromium/SiteControls.swift",
   "mac/PageFrame.swift": "apps/macos/src/chromium/PageFrame.swift",
+  "mac/SpacePager.swift": "apps/macos/src/chromium/SpacePager.swift",
   "mac/Organization.swift": "apps/macos/src/chromium/Organization.swift",
   "mac/CommandBar.swift": "apps/macos/src/chromium/CommandBar.swift",
   "mac/Preferences.swift": "apps/macos/src/chromium/Preferences.swift",

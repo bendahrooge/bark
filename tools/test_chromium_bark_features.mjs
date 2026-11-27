@@ -281,6 +281,11 @@ try {
   await clickNewTarget(await page(base + '/background'), '/regular-new-target');
   state = await waitFor(state => tabWith(state, '/regular-new-target')?.active, 'ordinary foreground tab');
   assert.equal(visible(state).popups.length, 0);
+  state = await waitFor(state => visible(state).canGoBack, 'Back enabled on a new link tab');
+  await command('back', {windowId});
+  state = await waitFor(state => !tabWith(state, '/regular-new-target') && tabWith(state, '/background')?.active,
+    'Back closes the link tab and returns to its opener');
+  report.checks.push('Back on a tab opened from a link closes it and returns to the tab that opened it');
 
   await command('select', {windowId, id: pin});
   await command('setPeek', {windowId, text: 'off'});

@@ -36,5 +36,5 @@
   "ui/message_center/vector_icons/chrome_product.icon": "engine/chromium/product-icons/terrier-24.icon",
   "ui/webui/resources/cr_components/searchbox/icons/chrome_product_cr23.svg": "engine/chromium/product-icons/terrier.svg",
   "ui/webui/resources/cr_components/searchbox/icons/chrome_product_cr23_old.svg": "engine/chromium/product-icons/terrier.svg",
-  "ui/webui/resources/images/chrome_logo_dark.svg": "apps/macos/resources/icon.svg"
+  "ui/webui/resources/images/chrome_logo_dark.svg": "engine/chromium/product-icons/terrier-outline.svg"
 }

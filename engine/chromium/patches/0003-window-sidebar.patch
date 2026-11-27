@@ -697,3 +697,21 @@ diff --git a/components/remote_cocoa/app_shim/bridged_content_view.mm b/componen
    // If `point` is classified as a draggable background (HTCAPTION), return nil
    // so that it can lead to a window drag or double-click in the title bar.
    // Dragging could be optimized by telling the window server which regions
+diff --git a/chrome/browser/ui/views/extensions/extension_popup.cc b/chrome/browser/ui/views/extensions/extension_popup.cc
+--- a/chrome/browser/ui/views/extensions/extension_popup.cc
++++ b/chrome/browser/ui/views/extensions/extension_popup.cc
+@@ -261,7 +261,14 @@ ExtensionPopup::ExtensionPopup(
+     ShowPopupCallback callback)
+     : BubbleDialogDelegateView(anchor,
+                                arrow,
++#if BUILDFLAG(IS_MAC)
++                               // Use the native window shadow and edge, as
++                               // other Mac bubbles do; the drawn stroke is
++                               // nearly invisible against dark windows.
++                               views::BubbleBorder::DIALOG_SHADOW,
++#else
+                                views::BubbleBorder::STANDARD_SHADOW,
++#endif
+                                /*autosize=*/true),
+       browser_(browser),
+       host_(std::move(host)),

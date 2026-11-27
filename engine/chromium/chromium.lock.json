@@ -14,11 +14,11 @@
     },
     {
       "file": "0002-hooks.patch",
-      "sha256": "3ea77ae2865bc034dc68b275dba499cc7d6b66d2ef8c43f8e10aced3a9b354c4"
+      "sha256": "2cf766f79e5255244453d998153c61a4ab9b0fb9032c3eab4ccf97214b2b1ea8"
     },
     {
       "file": "0003-window-sidebar.patch",
-      "sha256": "9d93e2557f457c04b5c7fbf8a04faf91dad80e78f6a4ec27211f2d08a583f17c"
+      "sha256": "7519a28e4cacb243dc8ecd6f733d14475b7c1b0bf409ebddf117a6cfe24c92dd"
     },
     {
       "file": "0004-spaces-sessions.patch",
@@ -39,6 +39,10 @@
     {
       "file": "0008-settings.patch",
       "sha256": "c4504353831c33619e2fd470814f3b74831ee532c33f2adfb337b71ee9f45f9b"
+    },
+    {
+      "file": "0009-hide-chrome-settings.patch",
+      "sha256": "274c609de73c26cff584cf0d8c910f1cbb2eacd8e102a59739a5666b6ee84cae"
     }
   ]
 }

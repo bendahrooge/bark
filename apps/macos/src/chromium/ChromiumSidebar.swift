@@ -148,7 +148,15 @@ struct ChromiumSidebar: View {
     @State private var profileName = ""
     @State private var tabDrag: TabDrag?
     @GestureState private var tabGestureActive = false
-    @State private var tabFrames: [Int: CGRect] = [:]
+    // Frames reported outside the pager, and by the active page inside it.
+    @State private var sidebarFrames: [Int: CGRect] = [:]
+    @State private var pageFrames: [Int: CGRect] = [:]
+    private var pagerOrigin: CGPoint { sidebarFrames[Self.pagerKey]?.origin ?? .zero }
+    /// Every reported frame, in the sidebar's coordinate space.
+    private var tabFrames: [Int: CGRect] {
+        let origin = pagerOrigin
+        return sidebarFrames.merging(pageFrames.mapValues { $0.offsetBy(dx: origin.x, dy: origin.y) }) { $1 }
+    }
     @State private var archiveNotice: ArchiveNotice?
     @State private var folderToRename: String?
     @State private var knownFolders: Set<String> = []
@@ -168,23 +176,13 @@ struct ChromiumSidebar: View {
                     favoritesGrid.padding(.leading, 8).padding(.trailing, trailingInset).padding(.bottom, 14)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                ZStack(alignment: .top) {
-                    activePage
-                        .allowsHitTesting(!model.spaceInMotion)
-                    ForEach([CGFloat(-1), 1], id: \.self) { direction in
-                        if let neighbor = model.swipePage(in: direction) {
-                            previewPage(neighbor)
-                                .offset(x: -direction * geometry.size.width)
-                                .transition(.identity)
-                                .allowsHitTesting(false).accessibilityHidden(true)
-                        }
-                    }
-                }
-                .offset(x: model.spaceSwipeOffset)
-                // minHeight 0: a long preview list must be clipped here, not
-                // make the sidebar taller than its window (which shifts and
-                // squeezes the whole sidebar while swiping).
-                .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity, alignment: .top).clipped()
+                // The pages slide as a Core Animation layer.
+                SpacePager(driver: model.pager, pages: pagerPages)
+                    // minHeight 0: a long preview list must be clipped here, not
+                    // make the sidebar taller than its window (which shifts and
+                    // squeezes the whole sidebar while swiping).
+                    .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity, alignment: .top)
+                    .background(frameReporter(Self.pagerKey))
                 BrowserNoticeSummary(model: model).padding(.horizontal, 10).padding(.top, model.activeNotices.isEmpty ? 0 : 6)
                 if let media = model.snapshot.media {
                     SidebarMediaPlayer(model: model, media: media).padding(.horizontal, 10).padding(.top, 6)
@@ -198,7 +196,8 @@ struct ChromiumSidebar: View {
                 }
             }.frame(maxWidth: .infinity, maxHeight: .infinity)
                 .coordinateSpace(name: Self.dragSpace)
-                .onPreferenceChange(TabFramesKey.self) { tabFrames = $0 }
+                .onPreferenceChange(TabFramesKey.self) { sidebarFrames = $0 }
+                .onChange(of: tabOrder) { _ in tabOrderChanged() }
                 .onChange(of: model.archiveRequests) { _ in archiveTabs() }
                 .overlay(alignment: .topLeading) {
                     ZStack(alignment: .topLeading) { dragOverlay }
@@ -273,12 +272,35 @@ struct ChromiumSidebar: View {
 
     }
 
-    // The active space's heading and tabs. This is the part that moves while
-    // swiping between spaces; the address field and dock stay in place.
-    private var activePage: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            if let space = model.outgoingSpace, !model.isIncognito {
-                spaceHeading(space, emoji: model.outgoingEmoji, tint: model.outgoingTheme.accent)
+    // The pager's pages: the Space on screen, and the neighbors a swipe or
+    // slide reveals. Each is keyed by its Space, and the incoming page is
+    // built exactly like the active one, so landing on it changes which page
+    // takes input without rebuilding its rows.
+    private var pagerPages: [SpacePager.Page] {
+        let active = model.outgoingSpace
+        var pages = [SpacePager.Page(id: active?.id ?? "", slot: 0,
+                                     content: spacePage(active, tabs: model.outgoingTabs, emoji: model.outgoingEmoji,
+                                                        tint: model.outgoingTheme.accent, interactive: true))]
+        for direction in [CGFloat(1), -1] {
+            guard let neighbor = model.swipePage(in: direction), neighbor.id != active?.id else { continue }
+            pages.append(SpacePager.Page(id: neighbor.id, slot: direction > 0 ? -1 : 1,
+                                         content: spacePage(neighbor, tabs: model.previewTabs(for: neighbor),
+                                                            emoji: model.emoji(for: neighbor),
+                                                            tint: neighbor.themeValue.accent, interactive: false)))
+        }
+        return pages
+    }
+
+    // A Space's heading and tabs. This is the part that moves while swiping
+    // between spaces; the address field and dock stay in place. Only the
+    // active page is interactive. Each page is its own SwiftUI host, so the
+    // active one reports its row frames and drag locations in its own space
+    // (see `pagerOrigin`).
+    private func spacePage(_ space: ChromiumSpace?, tabs: [ChromiumTab], emoji: String, tint: Color,
+                           interactive: Bool) -> AnyView {
+        AnyView(VStack(alignment: .leading, spacing: 0) {
+            if let space, !model.isIncognito {
+                spaceHeading(space, emoji: emoji, tint: tint)
                     .contextMenu {
                         Button("New Folder") { model.requestNewFolder() }
                         Button("New space…", action: newSpace)
@@ -293,14 +315,15 @@ struct ChromiumSidebar: View {
             } else {
                 HStack(spacing: 8) {
                     if model.isIncognito { Image(systemName: "eyeglasses") }
-                    else { SpaceIcon(emoji: model.outgoingEmoji, tint: model.outgoingTheme.accent) }
+                    else { SpaceIcon(emoji: emoji, tint: tint) }
                     Text(model.activeSpaceName).font(.system(size: 13, weight: .semibold)).lineLimit(1)
                 }.foregroundStyle(.secondary).padding(.leading, 18)
                     .frame(height: 36).padding(.bottom, 4)
             }
             ScrollView(.vertical) {
-                tabList(model.outgoingTabs, space: model.outgoingSpace, interactive: true)
+                tabList(tabs, space: space, interactive: interactive)
                     .background(EnclosingScrollView { scrollView in
+                        guard interactive else { return }
                         model.tabScrollView = scrollView
                         if scrollView.scrollerStyle != .overlay { scrollView.scrollerStyle = .overlay }
                         scrollView.autohidesScrollers = true
@@ -309,24 +332,16 @@ struct ChromiumSidebar: View {
                             scrollView.tile()
                         }
                     }.allowsHitTesting(false))
-            }.scrollIndicators(.automatic)
+            }.scrollIndicators(interactive ? .automatic : .hidden)
                 // The scrollbar overlays only the tabs; the resize target is
                 // hosted on the outer boundary, without reserving row width.
                 .frame(minHeight: 0, maxHeight: .infinity)
-                .id(model.outgoingSpace?.id)
-                .onChange(of: tabOrder) { _ in tabOrderChanged() }
         }
-    }
-
-    // A non-interactive copy of an adjacent space, revealed during a swipe.
-    private func previewPage(_ space: ChromiumSpace) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
-            spaceHeading(space, emoji: model.emoji(for: space), tint: space.themeValue.accent)
-            ScrollView(.vertical) {
-                tabList(model.previewTabs(for: space), space: space, interactive: false)
-            }.scrollIndicators(.hidden)
-                .frame(minHeight: 0, maxHeight: .infinity)
-        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .allowsHitTesting(interactive && !model.spaceInMotion)
+        .accessibilityHidden(!interactive)
+        .coordinateSpace(name: Self.dragSpace)
+        .onPreferenceChange(TabFramesKey.self) { if interactive { pageFrames = $0 } })
     }
 
     private func spaceHeading(_ space: ChromiumSpace, emoji: String, tint: Color) -> some View {
@@ -433,7 +448,8 @@ struct ChromiumSidebar: View {
                 reorderSlot(tab.id) {
                     FavoriteTile(model: model, tab: tab, showsTitle: favorites.count == 1)
                         .opacity(tabDrag?.id == tab.id ? 0 : 1)
-                        .simultaneousGesture(tabDragGesture(tab.id, fromFavorites: true))
+                        .simultaneousGesture(tabDragGesture(tab.id, fromFavorites: true),
+                                             including: tab.isElsewhere ? .subviews : .all)
                 }
             }
         }.background(frameReporter(Self.gridKey))
@@ -465,6 +481,7 @@ struct ChromiumSidebar: View {
     private static let addressKey = -2
     private static let gridKey = -3
     private static let newTabKey = -4
+    private static let pagerKey = -5
     private static let settleDuration = 0.16
 
     private func frameReporter(_ key: Int) -> some View {
@@ -481,18 +498,18 @@ struct ChromiumSidebar: View {
     }
 
     @ViewBuilder private func tabRow(_ tab: ChromiumTab, interactive: Bool, indent: CGFloat = 0) -> some View {
-        if interactive {
-            ChromiumTabRow(model: model, tab: tab, indent: indent)
-                .overlay {
+        // One structure for both, so a row survives its page becoming active.
+        ChromiumTabRow(model: model, tab: tab, indent: indent)
+            .overlay {
+                if interactive && !tab.isElsewhere {
                     MiddleClickCatcher {
                         if tab.sessionClosed != true { model.close(tab) }
                     }.accessibilityHidden(true)
                 }
-                .opacity(tabDrag?.id == tab.id ? 0 : 1)
-                .simultaneousGesture(tabDragGesture(tab.id, fromFavorites: false, indent: indent))
-        } else {
-            ChromiumTabRow(model: model, tab: tab, indent: indent)
-        }
+            }
+            .opacity(interactive && tabDrag?.id == tab.id ? 0 : 1)
+            .simultaneousGesture(tabDragGesture(tab.id, fromFavorites: false, indent: indent),
+                                 including: interactive && !tab.isElsewhere ? .all : .subviews)
     }
 
     private func draggedTab(_ id: Int) -> ChromiumTab? {
@@ -620,7 +637,12 @@ struct ChromiumSidebar: View {
     }
 
     private func tabDragGesture(_ id: Int, fromFavorites: Bool, indent: CGFloat = 0) -> some Gesture {
-        DragGesture(minimumDistance: 4, coordinateSpace: .named(Self.dragSpace))
+        // Rows inside the pager report locations in the active page's space.
+        func location(_ point: CGPoint) -> CGPoint {
+            let origin = fromFavorites ? .zero : pagerOrigin
+            return CGPoint(x: point.x + origin.x, y: point.y + origin.y)
+        }
+        return DragGesture(minimumDistance: 4, coordinateSpace: .named(Self.dragSpace))
             .updating($tabGestureActive) { _, active, _ in active = true }
             .onChanged { value in
                 model.draggingTab = true
@@ -629,11 +651,12 @@ struct ChromiumSidebar: View {
                     drag = current
                 } else {
                     guard let frame = tabFrames[id] else { return }
+                    let start = location(value.startLocation)
                     drag = TabDrag(id: id, fromFavorites: fromFavorites,
-                                   grab: CGSize(width: value.startLocation.x - frame.minX, height: value.startLocation.y - frame.minY),
-                                   sourceFrame: frame, indent: indent, pointer: value.location)
+                                   grab: CGSize(width: start.x - frame.minX, height: start.y - frame.minY),
+                                   sourceFrame: frame, indent: indent, pointer: location(value.location))
                 }
-                drag.pointer = value.location
+                drag.pointer = location(value.location)
                 let target: TabDropTarget
                 if model.splitDrop.updateNewWindow(from: model.hostView, title: draggedTab(id)?.displayTitle ?? "Tab") {
                     target = .newWindow
@@ -653,7 +676,7 @@ struct ChromiumSidebar: View {
             .onEnded { value in
                 model.draggingTab = false
                 guard var drag = tabDrag, drag.id == id, !drag.dropped else { model.splitDrop.end(); return }
-                drag.pointer = value.location
+                drag.pointer = location(value.location)
                 let newWindowPoint = SplitDropController.newWindowPoint(from: model.hostView)
                 let side = newWindowPoint == nil ? splitSide(for: drag) : nil
                 model.splitDrop.end()

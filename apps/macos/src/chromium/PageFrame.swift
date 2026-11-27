@@ -3,6 +3,7 @@ import SwiftUI
 
 private struct WindowSpaceBackground: View {
     @ObservedObject var model: ChromiumSidebarModel
+    @ObservedObject var fade: SpaceSwipeFade
     var canvasSize: CGSize? = nil
 
     var body: some View {
@@ -16,7 +17,7 @@ private struct WindowSpaceBackground: View {
                         SidebarBackground(theme: neighbor.themeValue, style: neighbor.style, canvasSize: canvasSize)
                             .transition(.identity)
                     }
-                }.opacity(min(1, max(0, direction * model.spaceSwipeOffset / max(1, model.snapshot.sidebarWidth ?? 260))))
+                }.opacity(min(1, max(0, direction * fade.offset / max(1, model.snapshot.sidebarWidth ?? 260))))
             }
         }
     }
@@ -32,7 +33,7 @@ struct SidebarBackdropView: View {
     static let shadowMargin: CGFloat = 24
 
     var body: some View {
-        WindowSpaceBackground(model: model, canvasSize: canvasSize)
+        WindowSpaceBackground(model: model, fade: model.swipeFade, canvasSize: canvasSize)
             .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
             .overlay {
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
@@ -124,7 +125,7 @@ struct PageFrameView: View {
     var body: some View {
         if let state = geometry.state {
             ZStack(alignment: .topLeading) {
-                WindowSpaceBackground(model: model)
+                WindowSpaceBackground(model: model, fade: model.swipeFade)
                 ForEach(Array(state.panes.enumerated()), id: \.offset) { _, pane in
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
                         .fill(Color.black.opacity(scheme == .dark ? 0.22 : 0.12))
@@ -134,8 +135,55 @@ struct PageFrameView: View {
                 }
             }
             .mask(PageFrameMask(state: state).fill(style: FillStyle(eoFill: true)))
+            .overlay(alignment: .topLeading) {
+                if model.activeTabLoading {
+                    ZStack(alignment: .topLeading) {
+                        ForEach(Array(state.panes.enumerated()), id: \.offset) { _, pane in
+                            PageLoadingLine(width: pane.width, height: pane.height)
+                                .position(x: pane.x + pane.width / 2, y: pane.y + pane.height / 2)
+                        }
+                    }
+                    .transition(.opacity)
+                }
+            }
+            .animation(.easeInOut(duration: 0.25), value: model.activeTabLoading)
             .allowsHitTesting(false)
             .accessibilityHidden(true)
+        }
+    }
+}
+
+/// A thin line on the page's top edge while the active tab loads: a soft
+/// pulse with a highlight sweeping across. It follows the page's rounded
+/// corners. Reduce Motion keeps only a slow pulse.
+private struct PageLoadingLine: View {
+    let width: Double
+    let height: Double
+    @Environment(\.colorScheme) private var scheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    private static let thickness: CGFloat = 2
+    private static let sweep: Double = 1.3
+
+    var body: some View {
+        TimelineView(.animation) { context in
+            let time = context.date.timeIntervalSinceReferenceDate
+            let pulse = 0.5 + 0.5 * sin(time * 2 * .pi / (reduceMotion ? 1.6 : 1.1))
+            let phase = time.truncatingRemainder(dividingBy: Self.sweep) / Self.sweep
+            let highlight = max(80, width * 0.3)
+            let tint = scheme == .dark ? Color.white : Color.black
+            Rectangle()
+                .fill(tint.opacity((scheme == .dark ? 0.16 : 0.12) + 0.14 * pulse))
+                .overlay(alignment: .leading) {
+                    if !reduceMotion {
+                        LinearGradient(colors: [.clear, tint.opacity(scheme == .dark ? 0.7 : 0.55), .clear],
+                                       startPoint: .leading, endPoint: .trailing)
+                            .frame(width: highlight)
+                            .offset(x: -highlight + phase * (width + highlight))
+                    }
+                }
+                .frame(width: width, height: Self.thickness)
+                .frame(width: width, height: height, alignment: .top)
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
     }
 }

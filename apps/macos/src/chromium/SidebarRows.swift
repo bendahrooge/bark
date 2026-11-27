@@ -194,8 +194,9 @@ struct ChromiumTabRow: View {
                 Image(systemName: "xmark").font(.system(size: 10, weight: .medium)).frame(width: 24, height: 24)
             }.help(tab.closeLabel).accessibilityLabel(Text(tab.closeLabel))
                 .buttonStyle(SidebarButtonStyle()).foregroundStyle(.secondary)
-                .opacity(hovered ? 1 : 0)
-                .disabled(!hovered).allowsHitTesting(hovered).accessibilityHidden(!hovered)
+                .opacity(hovered && !tab.isElsewhere ? 1 : 0)
+                .disabled(!hovered || tab.isElsewhere).allowsHitTesting(hovered && !tab.isElsewhere)
+                .accessibilityHidden(!hovered || tab.isElsewhere)
         }.frame(width: 24, height: 24)
             .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: hovered)
     }
@@ -219,6 +220,28 @@ struct ChromiumTabRow: View {
     }
 
     var body: some View {
+        if tab.isElsewhere { elsewhereRow } else { liveRow }
+    }
+
+    // Open in another window: dimmed, and choosing it moves the tab here.
+    private var elsewhereRow: some View {
+        row
+            .opacity(0.45)
+            .contentShape(RoundedRectangle(cornerRadius: 9)).onTapGesture { model.select(tab) }
+            .onHover { hovered = $0 }
+            .help("Open in another window. Click to move it to this window.")
+            .accessibilityElement(children: .combine).accessibilityLabel(title)
+            .accessibilityValue("Pinned. Open in another window")
+            .accessibilityAddTraits(.isButton)
+            .accessibilityAction(named: "Move to This Window") { model.select(tab) }
+            .accessibilityAction { model.select(tab) }
+            .contextMenu {
+                Button("Move to This Window") { model.select(tab) }
+                if !tab.isBlank { Button("Copy Link") { model.copyLink(tab) } }
+            }
+    }
+
+    private var liveRow: some View {
         row
             .contentShape(RoundedRectangle(cornerRadius: 9)).onTapGesture { if !renaming { model.send("select", id: tab.id) } }
             .simultaneousGesture(TapGesture(count: 2).onEnded { if !renaming { startRenaming() } })
@@ -316,14 +339,28 @@ struct FavoriteTile: View {
     let tab: ChromiumTab
     let showsTitle: Bool
     @State private var hovered = false
+    @Environment(\.colorScheme) private var scheme
     private var title: String { tab.displayTitle }
     var body: some View {
         ZStack {
             if tab.active {
-                SidebarSelectionBackground(tint: model.theme.accent, cornerRadius: 12)
+                // Tiles sit on a filled background of their own, so the shared
+                // selection fill alone barely differs from them: lift the
+                // selected tile further and ring it in the space's accent.
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(Color.white.opacity(scheme == .dark ? 0.26 : 0.92))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .fill(model.theme.accent.opacity(scheme == .dark ? 0.10 : 0.05))
+                    }
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .strokeBorder(model.theme.accent.opacity(scheme == .dark ? 0.75 : 0.6), lineWidth: 1.5)
+                    }
+                    .shadow(color: .black.opacity(scheme == .dark ? 0.25 : 0.10), radius: 3, y: 1)
             } else {
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(Color.primary.opacity(hovered ? 0.13 : 0.10))
+                    .fill(Color.primary.opacity(hovered ? 0.11 : 0.07))
             }
             HStack(spacing: 8) {
                 Group {
@@ -338,17 +375,28 @@ struct FavoriteTile: View {
             .overlay(alignment: .topTrailing) {
                 if tab.loading { TabLoadingDot().padding(7) }
             }
-            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous)).onTapGesture { model.send("select", id: tab.id) }
-            .onHover { hovered = $0 }.help(title)
+            .opacity(tab.isElsewhere ? 0.45 : 1)
+            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous)).onTapGesture { model.select(tab) }
+            .onHover { hovered = $0 }
+            .help(tab.isElsewhere ? title + " — open in another window. Click to move it here." : title)
             .accessibilityElement().accessibilityLabel(title).accessibilityAddTraits(.isButton)
-            .accessibilityValue((tab.active ? "Selected. Favorite" : "Favorite") + (tab.loading ? ". Loading" : ""))
-            .accessibilityAction { model.send("select", id: tab.id) }
+            .accessibilityValue(tab.isElsewhere ? "Favorite. Open in another window"
+                                : (tab.active ? "Selected. Favorite" : "Favorite") + (tab.loading ? ". Loading" : ""))
+            .accessibilityAction { model.select(tab) }
             .contextMenu {
+                if tab.isElsewhere {
+                    Button("Move to This Window") { model.select(tab) }
+                } else {
+                    favoriteMenu
+                }
+            }
+    }
+
+    @ViewBuilder private var favoriteMenu: some View {
                 Button(tab.muted == true ? "Unmute tab" : "Mute tab") { model.send("mute", id: tab.id) }
                 Button("Remove from Favorites") { model.send("moveTab", id: tab.id, metadata: ["zone": "unpinned", "before": ""]) }
                 Button("Move to New Window") { model.send("detachTab", id: tab.id) }
                 Button(tab.closeLabel) { model.close(tab) }
-            }
     }
 }
 
@@ -381,7 +429,7 @@ struct ChromiumAddressBar: View {
     @State private var hovered = false
     @FocusState private var focusedControl: Control?
     @AccessibilityFocusState private var accessibleControl: Control?
-    private enum Control: Hashable { case address, siteInfo, extensions }
+    private enum Control: Hashable { case address, siteInfo }
     static let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
 
     private var showControls: Bool {
@@ -401,7 +449,7 @@ struct ChromiumAddressBar: View {
                 .foregroundStyle(model.addressSummary.isEmpty ? Color.secondary : Color.primary.opacity(contrast == .increased ? 1 : 0.78))
                 .lineLimit(1).truncationMode(.tail)
                 .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
-                .padding(.leading, 13).padding(.trailing, 65).frame(height: 36)
+                .padding(.leading, 13).padding(.trailing, 39).frame(height: 36)
                 .contentShape(Self.shape)
         }.buttonStyle(.plain)
             .focused($focusedControl, equals: .address)
@@ -410,18 +458,6 @@ struct ChromiumAddressBar: View {
             .accessibilityValue(model.sidebarAddress)
             .overlay(alignment: .trailing) {
                 HStack(spacing: 2) {
-                    Button {
-                        model.setSiteControlsOpen(false)
-                        model.send("extensionMenu")
-                    } label: {
-                        Image(systemName: "puzzlepiece.extension")
-                            .font(.system(size: 12)).frame(width: 24, height: 28)
-                            .opacity(showControls ? 1 : 0)
-                    }.buttonStyle(SidebarButtonStyle()).foregroundStyle(.secondary)
-                        .focused($focusedControl, equals: .extensions)
-                        .accessibilityFocused($accessibleControl, equals: .extensions)
-                        .help("Extensions").accessibilityLabel("Extensions")
-                        .allowsHitTesting(showControls)
                     Button { model.setSiteControlsOpen(!model.siteControlsOpen) } label: {
                         Image(systemName: hasSecurityWarning ? "exclamationmark.triangle" : "slider.horizontal.3")
                             .font(.system(size: 12)).frame(width: 24, height: 28)

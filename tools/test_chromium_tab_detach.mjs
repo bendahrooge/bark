@@ -38,7 +38,8 @@ let base;
 const windowById = (state, id) => state.windows.find(window => window.windowId === id);
 const tabIn = (window, name) => window?.allTabs.find(tab => tab.url === base + '/' + name);
 const owner = (state, name) => state.windows.find(window => tabIn(window, name));
-const emptyPins = window => window.allTabs.every(tab => !tab.pinned) && window.favorites.length === 0;
+// Pins open in another window are listed there, dimmed, but never copied.
+const emptyPins = window => window.allTabs.every(tab => !tab.pinned) && window.favorites.every(tab => tab.elsewhere);
 async function attachToPage(name) {
   const {targetInfos} = await browser.send('Target.getTargets');
   const target = targetInfos.find(target => target.type === 'page' && target.url === base + '/' + name);
@@ -153,9 +154,29 @@ try {
   assert.ok(tabIn(windowById(state, source), 'keep-pin').pinned);
   report.checks.push('Dragging a pinned tab out converts only that tab to an ordinary tab');
 
+  // The new window lists the space's pins and Favorites that live in the
+  // source, dimmed; choosing one moves the same live tab across.
+  const listed = (window, name, list = 'tabs') => window[list].find(tab => tab.url === base + '/' + name);
+  state = await waitFor(state => listed(windowById(state, pinnedDestination.windowId), 'keep-pin')?.elsewhere === source &&
+    listed(windowById(state, pinnedDestination.windowId), 'keep-favorite', 'favorites')?.elsewhere === source, 'pins listed in new window');
+  assert.equal(listed(windowById(state, pinnedDestination.windowId), 'keep-pin').pinned, true);
+  const keepPin = id('keep-pin');
+  const pinLoads = requests.get('/keep-pin');
+  await command('claimTab', {windowId: pinnedDestination.windowId, id: keepPin, metadata: {window: String(source)}});
+  state = await waitFor(state => owner(state, 'keep-pin')?.windowId === pinnedDestination.windowId &&
+    listed(windowById(state, source), 'keep-pin')?.elsewhere === pinnedDestination.windowId, 'claimed pin');
+  assert.equal(tabIn(windowById(state, pinnedDestination.windowId), 'keep-pin').id, keepPin, 'The same live tab moves');
+  assert.ok(tabIn(windowById(state, pinnedDestination.windowId), 'keep-pin').pinned);
+  assert.ok(listed(windowById(state, pinnedDestination.windowId), 'keep-pin').active);
+  assert.equal(requests.get('/keep-pin'), pinLoads, 'Moving the pin must not reload it');
+  await command('claimTab', {windowId: source, id: keepPin, metadata: {window: String(pinnedDestination.windowId)}});
+  state = await waitFor(state => owner(state, 'keep-pin')?.windowId === source &&
+    !listed(windowById(state, source), 'keep-pin')?.elsewhere, 'pin returned to source');
+  report.checks.push('Another window lists the space’s pins and Favorites dimmed; choosing one moves that live tab there without reloading');
+
   await command('detachTab', {windowId: source, id: id('move-favorite')});
   state = await waitFor(state => !!owner(state, 'move-favorite') && owner(state, 'move-favorite').windowId !== source, 'detached Favorite');
-  assert.equal(owner(state, 'move-favorite').tabs.length, 1);
+  assert.equal(owner(state, 'move-favorite').tabs.filter(tab => !tab.elsewhere).length, 1);
   assert.ok(emptyPins(owner(state, 'move-favorite')));
   assert.ok(windowById(state, source).favorites.some(tab => tab.url === base + '/keep-favorite'));
   report.checks.push('Dragging a Favorite out makes it an ordinary tab without copying other Favorites');

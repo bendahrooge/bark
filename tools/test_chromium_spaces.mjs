@@ -192,6 +192,18 @@ try {
   assert.ok(!current.tabs.some(tab => tab.url === urls.research));
   checks.push('Two spaces share one profile and the same real browser window while retaining separate tabs and shared sign-ins');
 
+  const lastUsed = base + '/personal-last-used';
+  await command('navigateNew', {windowId: firstWindow, text: lastUsed});
+  await waitState(state => visible(state)[0]?.tabs.some(tab => tab.url === lastUsed && tab.active), 'second personal tab');
+  await select(research, firstWindow);
+  current = await select(personal, firstWindow);
+  assert.ok(current.tabs.find(tab => tab.url === lastUsed)?.active, 'Returning to a space reopens the tab last used there');
+  await command('select', {windowId: firstWindow, id: current.tabs.find(tab => tab.url === urls.personal).id});
+  await select(research, firstWindow);
+  current = await select(personal, firstWindow);
+  assert.ok(current.tabs.find(tab => tab.url === urls.personal)?.active, 'Selecting a tab updates the space’s last used tab');
+  checks.push('Switching back to a space reopens the tab last used in it');
+
   await command('createProfile', {windowId: firstWindow, text: 'Work Profile'});
   state = await waitState(state => visible(state)[0]?.profiles.some(profile => profile.name === 'Work Profile'), 'create profile');
   current = visible(state)[0];
