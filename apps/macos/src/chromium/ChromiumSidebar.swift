@@ -172,7 +172,7 @@ struct ChromiumSidebar: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .background(frameReporter(Self.addressKey))
                     .overlay { if showFavoritesHint { favoritesHint.padding(.leading, 8).padding(.trailing, trailingInset).padding(.top, 5).padding(.bottom, 8) } }
-                if !favorites.isEmpty {
+                if !favorites.isEmpty && !model.crossProfileMotion {
                     favoritesGrid.padding(.leading, 8).padding(.trailing, trailingInset).padding(.bottom, 14)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -299,6 +299,16 @@ struct ChromiumSidebar: View {
     private func spacePage(_ space: ChromiumSpace?, tabs: [ChromiumTab], emoji: String, tint: Color,
                            interactive: Bool) -> AnyView {
         AnyView(VStack(alignment: .leading, spacing: 0) {
+            // Across profiles, Favorites slide with their space, in the
+            // same place as the fixed grid they stand in for.
+            if model.crossProfileMotion {
+                let pageFavorites = model.previewFavorites(for: space)
+                if !pageFavorites.isEmpty {
+                    previewFavoritesGrid(pageFavorites)
+                        .padding(.leading, 8).padding(.trailing, trailingInset).padding(.bottom, 14)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
             if let space, !model.isIncognito {
                 spaceHeading(space, emoji: emoji, tint: tint)
                     .contextMenu {
@@ -453,6 +463,13 @@ struct ChromiumSidebar: View {
                 }
             }
         }.background(frameReporter(Self.gridKey))
+    }
+
+    private func previewFavoritesGrid(_ tabs: [ChromiumTab]) -> some View {
+        let columns = Array(repeating: GridItem(.flexible(), spacing: 8), count: min(tabs.count, 4))
+        return LazyVGrid(columns: columns, alignment: .leading, spacing: 8) {
+            ForEach(tabs) { tab in FavoriteTile(model: model, tab: tab, showsTitle: tabs.count == 1) }
+        }.allowsHitTesting(false)
     }
 
     // With no Favorites yet, the address field shows where to drop a tab.
@@ -887,7 +904,7 @@ struct ChromiumSidebar: View {
                                         Circle().fill(Color.secondary.opacity(0.65)).frame(width: 4, height: 4)
                                     } else {
                                         SpaceIcon(emoji: model.emoji(for: space), tint: model.tint(for: space))
-                                            .font(.system(size: 15))
+                                            .font(.system(size: 12))
                                             .opacity(space.active ? 1 : 0.75)
                                     }
                                 }

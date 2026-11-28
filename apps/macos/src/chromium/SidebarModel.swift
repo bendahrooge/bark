@@ -613,6 +613,22 @@ enum AddressDisposition {
         if let slide, slide.opposite?.id == space.id { return slide.oppositeTabs }
         return snapshot.spacePreviews?[space.id]?.filter { !$0.isSidebarPlaceholder } ?? []
     }
+    /// The Favorites shown with a space: its own profile's.
+    func previewFavorites(for space: ChromiumSpace?) -> [ChromiumTab] {
+        if isIncognito { return [] }
+        guard let profile = space?.profile, profile != snapshot.profileId else { return snapshot.favorites ?? [] }
+        return snapshot.favoritePreviews?[profile] ?? []
+    }
+    /// A space of another profile is on screen beside this one, so each
+    /// page carries its own profile's Favorites while it moves.
+    var crossProfileMotion: Bool {
+        guard spaceInMotion, !isIncognito else { return false }
+        return [swipePage(in: 1), swipePage(in: -1)].contains { space in
+            guard let profile = space?.profile else { return false }
+            return profile != snapshot.profileId
+        }
+    }
+
     var canSwipeSpaces: Bool {
         !isIncognito && snapshot.windowVisible != false && snapshot.spaces.count > 1 &&
             (snapshot.switchingSpace != true || swipeCommitTarget != nil)

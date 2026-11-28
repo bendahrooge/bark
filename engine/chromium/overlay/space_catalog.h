@@ -35,6 +35,10 @@ class SpaceCatalog {
   void SetPreviewTabs(const std::string& id, base::ListValue tabs);
   // Saved preview of a space: tabs waiting to reopen, else its last tabs.
   base::ListValue SavedPreview(const std::string& id) const;
+  // Remembers a profile's Favorites ({title, url}) on its spaces, so a swipe
+  // into that profile can show them before its window opens.
+  void SetPreviewFavorites(const std::string& profile, base::ListValue tabs);
+  base::ListValue SavedFavorites(const std::string& profile) const;
   // Removes a sidebar space, keeping at least one available replacement.
   // A profile's last space is retained privately to preserve its tabs/data.
   bool Remove(const std::string& id, const std::string& replacement);

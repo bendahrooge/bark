@@ -226,6 +226,36 @@ try {
   await evaluate(browser, workPage.sessionId, "localStorage.setItem('bark-profile-test', 'work'); document.cookie = 'bark_profile_test=work; path=/; SameSite=Lax'");
   checks.push('Profile creation opens no extra window; a space assigned to another profile uses one visible window with isolated storage');
 
+  // A swipe toward a neighboring Space in another profile previews that
+  // Space's pins before the switch, in both directions. Creating the profile
+  // added its own Space, which sits between Research and Work Space.
+  state = await command(); current = visible(state)[0];
+  const workProfileSpace = current.spaces.find(space => space.name === 'Work Profile').id;
+  const previewPin = (window, space, url) => window?.spacePreviews?.[space]?.find(tab => tab.url === url)?.pinned === true;
+  current = await select(workProfileSpace, current.windowId);
+  await command('navigate', {windowId: current.windowId, text: urls.work + '-profile'});
+  state = await waitState(state => visible(state)[0]?.tabs.some(tab => tab.url === urls.work + '-profile' && !tab.loading), 'work profile page');
+  await command('pin', {windowId: current.windowId, id: visible(state)[0].tabs.find(tab => tab.url === urls.work + '-profile').id});
+  state = await waitState(state => visible(state)[0]?.tabs.some(tab => tab.url === urls.work + '-profile' && tab.pinned), 'pin work profile tab');
+  const workFavorite = urls.work + '-favorite';
+  await command('navigateNew', {windowId: current.windowId, text: workFavorite});
+  state = await waitState(state => visible(state)[0]?.tabs.some(tab => tab.url === workFavorite && !tab.loading), 'work favorite page');
+  await command('moveTab', {windowId: current.windowId, id: visible(state)[0].tabs.find(tab => tab.url === workFavorite).id,
+    metadata: {zone: 'favorites', before: ''}});
+  state = await waitState(state => visible(state)[0]?.favorites.some(tab => tab.url === workFavorite), 'work favorite');
+  fs.writeFileSync(path.join(reports, 'preview-from-work.json'), JSON.stringify(visible(state)[0].spacePreviews ?? null, null, 2));
+  assert.ok(previewPin(visible(state)[0], research, urls.research), 'Work Profile previews the Research pin from the personal profile');
+  current = await select(research, current.windowId);
+  state = await command();
+  fs.writeFileSync(path.join(reports, 'preview-from-research.json'), JSON.stringify(visible(state)[0].spacePreviews ?? null, null, 2));
+  assert.ok(previewPin(visible(state)[0], workProfileSpace, urls.work + '-profile'), 'Research previews the Work Profile pin from the work profile');
+  const workProfileKey = visible(state)[0].spaces.find(space => space.id === workProfileSpace).profile;
+  assert.ok(visible(state)[0].favoritePreviews?.[workProfileKey]?.some(tab => tab.url === workFavorite),
+    'Research previews the work profile’s Favorites for a swipe into Work Profile');
+  assert.ok(!visible(state)[0].favorites.some(tab => tab.url === workFavorite), 'Favorites stay with their profile');
+  current = await select(workSpace, current.windowId);
+  checks.push('Swipe previews show pinned tabs and Favorites of Spaces in another profile before switching');
+
   const workWindow = current.windowId;
   for (const query of ['', 'Space page', urls.research]) {
     const matches = await openTabSuggestions(workWindow, query);
@@ -317,6 +347,16 @@ try {
   assert.equal(restored.allTabs.find(tab => tab.url === urls.research).pinned, true);
   assert.equal(restored.spaces.find(space => space.id === research).emoji, '📚');
   await verifySettingsRestored();
+  {
+    // After a restart, a swipe into another profile still previews its pins and Favorites.
+    const spaces = (await command()).windows.find(window => window.windowId === restored.windowId).spaces;
+    const workProfileSpace = spaces.find(space => space.name === 'Work Profile').id;
+    const workProfileKey = spaces.find(space => space.id === workProfileSpace).profile;
+    await select(research, restored.windowId);
+    const after = visible(await command())[0];
+    assert.ok(after.spacePreviews?.[workProfileSpace]?.some(tab => tab.url === urls.work + '-profile' && tab.pinned));
+    assert.ok(after.favoritePreviews?.[workProfileKey]?.some(tab => tab.url === urls.work + '-favorite'));
+  }
   current = await select(workSpace, restored.windowId);
   state = await waitState(state => visible(state).length === 1 && visible(state)[0].allTabs.some(tab => tab.url === urls.work), 'second profile restoration');
   assert.equal(visible(state)[0].allTabs.find(tab => tab.url === urls.work).space, workSpace);

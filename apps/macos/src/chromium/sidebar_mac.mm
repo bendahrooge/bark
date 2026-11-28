@@ -4059,6 +4059,34 @@ class SidebarMac::Impl : public TabStripModelObserver,
     return preview;
   }
 
+  // Another profile's Favorites, for a swipe toward one of its spaces: live
+  // when its window is open in this logical window, otherwise as last saved.
+  base::ListValue FavoritesPreview(const std::string& profile_key) const {
+    base::ListValue preview;
+    for (auto* host : Instances()) {
+      if (host->group_ != group_ || host->IsPrivate() || host->ProfileKey() != profile_key ||
+          !host->tabs_ || host->tabs_->closing_all()) continue;
+      for (int i = 0; i < host->tabs_->count(); ++i)
+        if (host->IsFavorite(host->tabs_->GetWebContentsAt(i))) preview.Append(host->TabValue(i, false));
+      return preview;
+    }
+    int placeholder_id = -10000;
+    for (const auto& value : catalog_.SavedFavorites(profile_key)) {
+      const auto* saved = value.GetIfDict();
+      if (!saved || !saved->FindString("url")) continue;
+      base::DictValue tab;
+      tab.Set("id", placeholder_id--);
+      tab.Set("title", saved->FindString("title") ? *saved->FindString("title") : std::string());
+      tab.Set("url", *saved->FindString("url"));
+      tab.Set("active", false);
+      tab.Set("pinned", true);
+      tab.Set("blankPlaceholder", false);
+      tab.Set("loading", false);
+      preview.Append(std::move(tab));
+    }
+    return preview;
+  }
+
   // Saves the tabs of this window's spaces so other windows can preview them
   // during a swipe even after a restart, before this profile's window opens.
   void SaveSpacePreviews() {
@@ -4071,9 +4099,17 @@ class SidebarMac::Impl : public TabStripModelObserver,
       const auto* profile = entry ? entry->FindString("profile") : nullptr;
       if (id && profile && *profile == profile_key) by_space.try_emplace(*id);
     }
+    base::ListValue favorites;
     for (int i = 0; i < tabs_->count(); ++i) {
       auto* contents = tabs_->GetWebContentsAt(i);
       const std::string space = GetTabSpace(contents);
+      if (IsFavorite(contents) && favorites.size() < 24) {
+        base::DictValue tab;
+        tab.Set("title", base::UTF16ToUTF8(contents->GetTitle()));
+        tab.Set("url", contents->GetVisibleURL().spec());
+        favorites.Append(std::move(tab));
+        continue;
+      }
       const auto found = by_space.find(space);
       if (found == by_space.end() || found->second.size() >= 30 || IsBlankPlaceholder(i)) continue;
       const GURL& url = contents->GetVisibleURL();
@@ -4092,6 +4128,7 @@ class SidebarMac::Impl : public TabStripModelObserver,
     }
     // SetPreviewTabs can replace the preference list that catalog_.List() references.
     for (auto& [id, tabs] : by_space) catalog_.SetPreviewTabs(id, std::move(tabs));
+    catalog_.SetPreviewFavorites(profile_key, std::move(favorites));
   }
 
   static bool ShowNativePreferences(BrowserWindowInterface* browser) {
@@ -4227,7 +4264,7 @@ class SidebarMac::Impl : public TabStripModelObserver,
           item->FindBool("hidden").value_or(false) ||
           ProfilePath(*item->FindString("profile")).empty()) continue;
       auto space = item->Clone();
-      for (const char* key : {"pendingTabs", "previewTabs", "archivedTabs", "arcTabIds", "arcSource", "arcProfile"}) space.Remove(key);
+      for (const char* key : {"pendingTabs", "previewTabs", "previewFavorites", "archivedTabs", "arcTabIds", "arcSource", "arcProfile"}) space.Remove(key);
       space.Set("active", *item->FindString("id") == active_space_);
       spaces.Append(std::move(space));
     }
@@ -4235,13 +4272,19 @@ class SidebarMac::Impl : public TabStripModelObserver,
     // any space, including one in a different profile's window.
     if (!switching_space_ && group_->transitions == 0) switch_preview_space_.clear();
     base::DictValue previews;
+    base::DictValue favorite_previews;
     for (size_t i = 0; i < spaces.size(); ++i) {
       const auto& space = spaces[i].GetDict();
       const std::string& id = *space.FindString("id");
       const bool adjacent = (i > 0 && spaces[i - 1].GetDict().FindBool("active").value_or(false)) ||
           (i + 1 < spaces.size() && spaces[i + 1].GetDict().FindBool("active").value_or(false));
-      if (adjacent || id == switch_preview_space_)
-        previews.Set(id, SpacePreview(id, *space.FindString("profile")));
+      if (adjacent || id == switch_preview_space_) {
+        const std::string& space_profile = *space.FindString("profile");
+        previews.Set(id, SpacePreview(id, space_profile));
+        // Favorites belong to a profile; a swipe into another one shows its own.
+        if (space_profile != ProfileKey() && !favorite_previews.Find(space_profile))
+          favorite_previews.Set(space_profile, FavoritesPreview(space_profile));
+      }
     }
     base::DictValue state;
     if (!incognito && browser_import_result_) state.Set("browserImportResult", browser_import_result_->Clone());
@@ -4273,6 +4316,7 @@ class SidebarMac::Impl : public TabStripModelObserver,
     }
     state.Set("spaces", std::move(spaces));
     state.Set("spacePreviews", std::move(previews));
+    state.Set("favoritePreviews", std::move(favorite_previews));
     state.Set("incognito", incognito);
     state.Set("profiles", std::move(profile_list));
     state.Set("profileId", ProfileKey());

@@ -159,6 +159,8 @@ struct ChromiumSnapshot: Decodable {
     var windowVisible: Bool? = nil
     // Read-only tabs of the spaces adjacent to the active one, keyed by space ID.
     var spacePreviews: [String: [ChromiumTab]]? = nil
+    // Favorites of other profiles that own a previewed space, keyed by profile.
+    var favoritePreviews: [String: [ChromiumTab]]? = nil
     var browserImportResult: ChromiumBarkImportResult? = nil
     // Media playing in a tab that is not on screen.
     var media: ChromiumMedia? = nil

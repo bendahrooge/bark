@@ -158,6 +158,28 @@ base::ListValue SpaceCatalog::SavedPreview(const std::string& id) const {
   if (const auto* tabs = space->FindList("previewTabs")) return tabs->Clone();
   return {};
 }
+void SpaceCatalog::SetPreviewFavorites(const std::string& profile, base::ListValue tabs) {
+  auto list = List().Clone();
+  bool changed = false;
+  for (auto& value : list) {
+    auto* space = value.GetIfDict();
+    if (!space || !space->FindString("profile") || *space->FindString("profile") != profile) continue;
+    const auto* existing = space->FindList("previewFavorites");
+    if (existing ? *existing == tabs : tabs.empty()) continue;
+    if (tabs.empty()) space->Remove("previewFavorites");
+    else space->Set("previewFavorites", tabs.Clone());
+    changed = true;
+  }
+  if (changed) prefs_->SetList(kSpacesPref, std::move(list));
+}
+base::ListValue SpaceCatalog::SavedFavorites(const std::string& profile) const {
+  for (const auto& value : List()) {
+    const auto* space = value.GetIfDict();
+    if (!space || !space->FindString("profile") || *space->FindString("profile") != profile) continue;
+    if (const auto* tabs = space->FindList("previewFavorites")) return tabs->Clone();
+  }
+  return {};
+}
 bool SpaceCatalog::Remove(const std::string& id, const std::string& replacement) {
   if (id == replacement || !Find(replacement) || IsHidden(replacement) || IsHidden(id)) return false;
   const auto* space = Find(id);
