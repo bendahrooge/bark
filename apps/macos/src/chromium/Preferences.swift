@@ -122,6 +122,7 @@ struct BarkPreferencesView: View {
     @State private var newProfileName = ""
     @State private var profileToDelete: ChromiumProfile?
     @State private var newSpace = false
+    @AppStorage(EyeRestReminder.defaultsKey) private var eyeRest = false
     private var preferences: ChromiumPreferences? { model.snapshot.preferences }
     private var features: ChromiumFeatures { model.snapshot.features ?? ChromiumFeatures() }
     private var profiles: [SpaceProfileChoice] {
@@ -214,6 +215,11 @@ struct BarkPreferencesView: View {
                     .disabled(!preferences.askDownloadEditable)
                 if !preferences.downloadEditable || !preferences.askDownloadEditable { managedNote }
             } else { ProgressView().controlSize(.small).accessibilityLabel("Loading preferences") }
+        }
+        Section("Eye comfort · All profiles") {
+            Toggle("Remind me to rest my focus", isOn: Binding(get: { eyeRest }, set: { EyeRestReminder.shared.setEnabled($0) }))
+            Text("Every 20 minutes, look at something about 20 feet away for 20 seconds. Your focusing muscles tire from holding at screen distance.")
+                .font(.caption).foregroundStyle(.secondary)
         }
         Section("Advanced") {
             advanced("Search engine settings", path: "searchEngines")

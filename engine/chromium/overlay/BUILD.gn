@@ -120,6 +120,7 @@ if (is_mac) {
       "mac/Shortcuts.swift",
       "mac/BarkFeatures.swift",
       "mac/Toast.swift",
+      "mac/EyeRest.swift",
       "mac/TabSwitcher.swift",
       "mac/PopupChrome.swift",
       "mac/MediaPlayer.swift",

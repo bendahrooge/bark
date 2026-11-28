@@ -210,6 +210,7 @@ enum AddressDisposition {
         self.context = context
         self.callback = callback
         self.reduceSpaceMotion = reduceSpaceMotion
+        EyeRestReminder.shared.start()
     }
 
     func update(_ json: String) {

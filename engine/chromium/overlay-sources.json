@@ -8,6 +8,7 @@
   "mac/Shortcuts.swift": "apps/macos/src/chromium/Shortcuts.swift",
   "mac/BarkFeatures.swift": "apps/macos/src/chromium/BarkFeatures.swift",
   "mac/Toast.swift": "apps/macos/src/chromium/Toast.swift",
+  "mac/EyeRest.swift": "apps/macos/src/chromium/EyeRest.swift",
   "mac/TabSwitcher.swift": "apps/macos/src/chromium/TabSwitcher.swift",
   "mac/PopupChrome.swift": "apps/macos/src/chromium/PopupChrome.swift",
   "mac/MediaPlayer.swift": "apps/macos/src/chromium/MediaPlayer.swift",
